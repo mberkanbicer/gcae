@@ -7,6 +7,11 @@ auto_bootstrap = true
 # Merge the verified branch into the current branch when a run completes, so the work
 # is visible in your checkout. Recorded in state.json; `gcae undo` reverses it.
 auto_merge = true
+# Also hand over the checkpoints a failed or stopped run accepted (marked unverified).
+merge_accepted_on_failure = true
+# Remove GCAE's worktree once its branch is merged. The branch is kept, so `gcae undo`
+# still reverses the merge and the work can be merged again.
+cleanup_after_merge = true
 max_steps = 20
 command_timeout = 30
 max_tool_calls_per_step = 8

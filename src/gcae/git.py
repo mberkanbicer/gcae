@@ -218,15 +218,48 @@ class GitRepository:
         )
         return report
 
+    def prune_worktrees(self) -> None:
+        """Forget worktrees whose directory no longer exists (GCAE's own bookkeeping)."""
+        self._run("worktree", "prune", check=False)
+
+    def registered_worktrees(self) -> set[Path]:
+        listing = self._run("worktree", "list", "--porcelain", check=False)
+        return {
+            Path(line.removeprefix("worktree ")).resolve()
+            for line in listing.splitlines()
+            if line.startswith("worktree ")
+        }
+
+    def ensure_worktree(self, branch: str, path: Path) -> Path:
+        """Create or re-register the worktree for a branch (used by resume).
+
+        GCAE owns the runtime directory, so a directory left behind without a
+        registration is cleaned up instead of blocking the next run.
+        """
+        self.prune_worktrees()
+        path = Path(path).resolve()
+        registered = self.registered_worktrees()
+        if path.exists() and path not in registered:
+            shutil.rmtree(path)
+        if not path.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self._run("worktree", "add", str(path), branch)
+        self.worktree = path
+        self.branch = branch
+        return path
+
     def create_isolated_worktree(self, run_id: str | None = None) -> tuple[Path, str, str]:
         base = self.validate_source()
+        self.prune_worktrees()
         run_id = run_id or uuid.uuid4().hex[:12]
         if not re.fullmatch(r"[A-Za-z0-9._-]+", run_id):
             raise GitError("run_id contains unsupported characters")
         branch = f"gcae/{run_id}"
         worktree = self.worktree_dir / run_id
         if worktree.exists():
-            raise GitError(f"worktree path already exists: {worktree}")
+            if worktree.resolve() in self.registered_worktrees():
+                raise GitError(f"worktree is in use by a live run: {worktree}")
+            shutil.rmtree(worktree)
         worktree.parent.mkdir(parents=True, exist_ok=True)
         self._run("worktree", "add", "-b", branch, str(worktree), base)
         self.worktree = worktree
@@ -275,13 +308,7 @@ class GitRepository:
 
     def assert_registered_worktree(self) -> None:
         worktree = self._require_worktree().resolve()
-        listing = self._run("worktree", "list", "--porcelain", cwd=self.source)
-        registered = {
-            Path(line.removeprefix("worktree ")).resolve()
-            for line in listing.splitlines()
-            if line.startswith("worktree ")
-        }
-        if worktree not in registered:
+        if worktree not in self.registered_worktrees():
             raise GitError(f"worktree is not registered with the source repository: {worktree}")
 
     def current_commit(self) -> str:
@@ -460,7 +487,10 @@ class GitRepository:
     def remove_worktree(self) -> None:
         if self.worktree is None:
             return
-        self._run("worktree", "remove", "--force", str(self.worktree))
+        self._run("worktree", "remove", "--force", str(self.worktree), check=False)
+        if self.worktree.exists():
+            shutil.rmtree(self.worktree)
+        self.prune_worktrees()
         self.worktree = None
 
     def branch_exists(self) -> bool:

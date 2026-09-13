@@ -20,25 +20,30 @@ and runs. It runs headless or with an interactive Textual TUI.
    the run: GCAE creates the base commit it needs (`auto_bootstrap`, bounded to 2000 files / 50 MB,
    `.gitignore` respected, reported as a notice), while a mid-merge/rebase repository and a
    non-repository directory are refused.
-3. **Verified work reaches the user.** A completed run merges its branch into the source
+3. **The loop owns every git operation.** Bootstrap (initial commit, identity fallback),
+   branches, worktrees, checkpoints, merges and cleanup are performed by the runtime without
+   asking the user to run git. The only git a user may still choose to run is inspecting history;
+   no workflow may require it. A repository GCAE cannot safely touch (mid-merge/rebase) is
+   refused with an explanation instead of being modified.
+4. **Verified work reaches the user.** A completed run merges its branch into the source
    branch (`[runtime] auto_merge`, default on) with the pre-merge and merge commits recorded in
    `state.json`, so the work is visible in the checkout and `gcae undo` reverses it. A run that
    cannot be merged (dirty checkout, branch moved, nothing to merge) reports why and leaves the
    branch intact for `gcae merge`.
-4. **Only acceptance creates commits.** An accepted step commits `gcae: <goal>`; a passing final
+5. **Only acceptance creates commits.** An accepted step commits `gcae: <goal>`; a passing final
    verification with a dirty worktree commits `gcae: verified final state`; rejection does
    `reset --hard accepted_commit` plus cleanup inside the worktree only.
-5. **The model never runs Git checkpoint commands.** Checkpoint management is runtime-owned and
+6. **The model never runs Git checkpoint commands.** Checkpoint management is runtime-owned and
    `git reset|clean|commit|worktree|...` stays blocked in the command tool.
-6. **The unit of progress is a semantic step**, not a tool call. Tools run freely inside a step;
+7. **The unit of progress is a semantic step**, not a tool call. Tools run freely inside a step;
    deterministic validation and evaluation happen only at `complete_semantic_step` or when
    `max_tool_calls_per_step` is exhausted.
-6. **Context is reconstructed per call** from persistent state. Never accumulate a growing
+8. **Context is reconstructed per call** from persistent state. Never accumulate a growing
    conversation, never summarize summaries. Pinned data (request, constraints, criteria, current
    goal, accepted commit, failure lessons) cannot be dropped by budgeting.
-7. **Structured decisions only.** Controller, planner and evaluator outputs are Pydantic models
+9. **Structured decisions only.** Controller, planner and evaluator outputs are Pydantic models
    with bounded repair; invalid output fails the run — it never falls back silently.
-8. **The TUI is first-class and must keep working headlessly.** The engine must not import
+10. **The TUI is first-class and must keep working headlessly.** The engine must not import
    Textual; the TUI subscribes to runtime events and drives a thread-safe `RuntimeControl`.
 
 ## Dependencies

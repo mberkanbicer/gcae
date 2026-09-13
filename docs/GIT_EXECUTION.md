@@ -5,7 +5,7 @@ The source repository must be a Git repository with a committed base. When it is
 commit bootstrap* below); pass `--no-auto-bootstrap` to refuse instead. It
 creates exactly one external worktree and branch per run. Runtime-owned rollback performs
 `reset --hard <accepted_commit>` and `clean -fdx` only inside that worktree. The source branch is
-never merged or modified.
+changed only by the recorded merge (fast-forward or merge commit), which `gcae undo` reverses.
 
 ## Base commit bootstrap
 
@@ -27,8 +27,25 @@ commit on the current branch, so `git reset --soft HEAD~1` undoes it.
 
 Only evaluator acceptance creates `gcae: <goal>` checkpoint commits. A passing final verification
 with a non-empty worktree creates the final `gcae: verified final state` checkpoint, so
-`accepted_commit` always equals the verified tree of a completed run. Resume verifies that the
-persisted worktree is registered with the source repository before resetting it.
+`accepted_commit` always equals the verified tree of a completed run. Resume re-registers or recreates the
+persisted worktree from the run branch instead of failing when it is missing.
+
+## Who does the git work
+
+The loop owns it; the user never has to run git:
+
+| Requirement | Handled by |
+| --- | --- |
+| repository without commits | base commit created (`--allow-empty` when empty) |
+| uncommitted working tree before a run | committed as `gcae: base commit of the current working tree` |
+| uncommitted working tree found at merge time | committed as the base the merge builds on |
+| missing `user.name`/`user.email` | commits as `GCAE <gcae@localhost>` |
+| branch, worktree, checkpoints | created and owned by the runtime |
+| merge of completed runs | automatic (`auto_merge`) |
+| merge of a failed run's accepted checkpoints | automatic (`merge_accepted_on_failure`), labelled unverified |
+| worktree after a merge | removed by GCAE; the branch is kept so `gcae undo` and re-merging still work |
+| worktree deleted by hand | pruned/recreated on the next run or resume |
+| mid-merge / rebase / cherry-pick state | **refused** — that state belongs to the user |
 
 A completed run is merged into the source branch so the work is visible in the checkout.
 `[runtime] auto_merge` (default `true`) controls this; `--merge` forces it, `--no-merge` disables it,

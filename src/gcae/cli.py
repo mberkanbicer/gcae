@@ -16,7 +16,12 @@ from .models import AgentState, MergeRecord
 from .persistence import StateStore
 from .planner import LLMPlanner, Planner
 from .providers import FakeProvider, Provider
-from .runtime import Runtime, RuntimeControl, merge_verified_run
+from .runtime import (
+    Runtime,
+    RuntimeControl,
+    cleanup_merged_worktree,
+    merge_verified_run,
+)
 from .verifier import FinalVerifier
 
 ROLES = ("controller", "planner", "evaluator", "verifier", "escalation")
@@ -186,7 +191,10 @@ def _summary(state: AgentState, files: list[str] | None = None) -> str:
         passed = sum(1 for item in verification.criteria if item.passed)
         criteria = f"{passed}/{len(verification.criteria)} criteria passed"
     if state.merge is None:
-        branch = f"branch: {state.branch} (not merged; apply with: git merge {state.branch})"
+        branch = (
+            f"branch: {state.branch} (not merged yet — GCAE merges automatically; "
+            f"run 'gcae merge {state.source_repo} {state.run_id}' if it stayed pending)"
+        )
     else:
         branch = (
             f"branch: {state.branch} merged into {state.merge.target_branch} "
@@ -199,8 +207,8 @@ def _summary(state: AgentState, files: list[str] | None = None) -> str:
         branch = f"{branch}\ndocuments: {state.source_repo} (in your working tree now)"
     else:
         branch = (
-            f"{branch}\ndocuments: {state.worktree} (worktree; nothing is in your checkout "
-            "until it is merged)"
+            f"{branch}\ndocuments: {state.worktree} (worktree on branch {state.branch}; "
+            "nothing is in your checkout until GCAE merges it)"
         )
     return (
         f"run {state.run_id}: {state.status}\n"
@@ -228,6 +236,7 @@ def _apply_merge(
     state_path: Path,
     repo: GitRepository,
     allow_unverified: bool = False,
+    cleanup: bool = True,
 ) -> MergeRecord:
     record = merge_verified_run(
         repo,
@@ -240,6 +249,15 @@ def _apply_merge(
         f"({record.pre_merge_commit[:12]} -> {record.merge_commit[:12]})",
         file=sys.stderr,
     )
+    for notice in repo.notices:
+        print(f"gcae: {notice.get('message')}", file=sys.stderr)
+    repo.notices.clear()
+    if cleanup and cleanup_merged_worktree(repo, state):
+        print(
+            f"gcae: removed the merged worktree {state.worktree} "
+            f"(branch {record.branch} kept; gcae undo reverses the merge)",
+            file=sys.stderr,
+        )
     return record
 
 
@@ -259,7 +277,9 @@ def _undo(repository: Path, run_id: str, runtime_dir: Path) -> None:
     )
 
 
-def _merge_run(repository: Path, run_id: str, runtime_dir: Path) -> None:
+def _merge_run(
+    repository: Path, run_id: str, runtime_dir: Path, cleanup: bool = True
+) -> None:
     state, state_path = _load_run(repository, run_id, runtime_dir)
     repo = GitRepository(state.source_repo, Path(runtime_dir).expanduser())
     if state.status != "complete" and state.accepted_steps > 0:
@@ -269,7 +289,7 @@ def _merge_run(repository: Path, run_id: str, runtime_dir: Path) -> None:
             file=sys.stderr,
         )
     try:
-        _apply_merge(state, state_path, repo, allow_unverified=True)
+        _apply_merge(state, state_path, repo, allow_unverified=True, cleanup=cleanup)
     except NothingToMerge as exc:
         print(f"gcae: {exc}", file=sys.stderr)
         return
@@ -282,10 +302,18 @@ def _maybe_merge(
     merge_flag: bool,
     no_merge_flag: bool,
     auto_merge: bool = True,
+    merge_accepted: bool = True,
+    cleanup_after_merge: bool = True,
 ) -> None:
     if no_merge_flag or result.merge is not None or not result.branch:
         return
-    if merge_flag or auto_merge:
+    complete = result.status == "complete"
+    if not complete:
+        # a failed or stopped run still owns the checkpoints it accepted
+        if not (merge_accepted and result.accepted_steps > 0):
+            return
+        approved = True
+    elif merge_flag or auto_merge:
         approved = True
     elif sys.stdin.isatty():
         print(
@@ -300,7 +328,9 @@ def _maybe_merge(
             approved = False
     else:
         print(
-            f"gcae: branch {result.branch} is ready; merge manually or rerun with --merge",
+            f"gcae: branch {result.branch} is ready but automatic merging is off "
+            "(auto_merge = false); press M in the dashboard or run "
+            f"gcae merge {result.source_repo} {result.run_id}",
             file=sys.stderr,
         )
         return
@@ -308,7 +338,13 @@ def _maybe_merge(
         return
     repo = GitRepository(result.source_repo, Path(runtime_dir).expanduser())
     try:
-        _apply_merge(result, _state_path(runtime_dir, result.run_id), repo)
+        _apply_merge(
+            result,
+            _state_path(runtime_dir, result.run_id),
+            repo,
+            allow_unverified=not complete,
+            cleanup=cleanup_after_merge,
+        )
     except NothingToMerge as exc:
         print(f"gcae: {exc}", file=sys.stderr)
     except GitError as exc:
@@ -441,7 +477,12 @@ def main(argv: list[str] | None = None) -> None:
             _undo(args.repository, args.run_id, runtime_dir)
             return
         if args.command == "merge":
-            _merge_run(args.repository, args.run_id, runtime_dir)
+            _merge_run(
+                args.repository,
+                args.run_id,
+                runtime_dir,
+                cleanup=config.runtime.cleanup_after_merge,
+            )
             return
         if args.command == "list":
             _list_runs(runtime_dir)
@@ -480,13 +521,17 @@ def main(argv: list[str] | None = None) -> None:
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"gcae: error: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
-    if args.command in {"run", "resume"} and result.status == "complete":
+    if args.command in {"run", "resume"} and (
+        result.status == "complete" or result.accepted_steps > 0
+    ):
         _maybe_merge(
             result,
             runtime_dir,
             getattr(args, "merge", False),
             getattr(args, "no_merge", False),
             auto_merge=config.runtime.auto_merge,
+            merge_accepted=config.runtime.merge_accepted_on_failure,
+            cleanup_after_merge=config.runtime.cleanup_after_merge,
         )
     files: list[str] = []
     try:

@@ -40,7 +40,11 @@ gcae inspect <run-id>
 When a run completes, GCAE merges the verified branch into your current branch so the work is
 visible in your checkout (`[runtime] auto_merge`, default on). The merge is recorded, so
 `gcae undo <repo> <run-id>` puts your branch back; `--no-merge` keeps the branch separate for a
-manual `gcae merge`. A run that cannot be merged (dirty checkout, moved branch, no changes) says so
+manual `gcae merge`. Everything git-side is handled by the loop: the base commit, the commit identity, the run
+branch and worktree, the merge, and the cleanup of the worktree afterwards. A checkout with
+uncommitted edits is committed as the base the merge builds on (never discarded), and a run that
+failed *after* accepting checkpoints still hands that work over. A run that cannot be merged (a real
+conflict, or a branch that moved) says so
 and leaves the branch intact. A run that failed *after* accepting checkpoints can still be rescued:
 `gcae merge <repo> <run-id>` (or `M` in the dashboard) merges that accepted work and tells you final
 verification did not pass.

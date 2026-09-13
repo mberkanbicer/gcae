@@ -340,7 +340,9 @@ def test_auto_merge_off_keeps_the_branch_separate(tmp_path: Path, capsys) -> Non
     assert runtime.state is not None
     _maybe_merge(runtime.state, tmp_path / "state", False, False, auto_merge=False)
     assert runtime.state.merge is None
-    assert "merge manually" in capsys.readouterr().err
+    errors = capsys.readouterr().err
+    assert "automatic merging is off" in errors
+    assert "gcae merge" in errors  # the single command that does it, not raw git
 
 
 def test_merge_command_reports_nothing_to_merge(tmp_path: Path, capsys) -> None:
@@ -475,7 +477,8 @@ def test_summary_reports_where_the_documents_are(tmp_path: Path, capsys) -> None
 
     summary = _summary(runtime.state, files)
     assert "files: answer.txt" in summary
-    assert "worktree; nothing is in your checkout" in summary
+    assert "worktree on branch" in summary
+    assert "nothing is in your checkout until GCAE merges it" in summary
     assert str(runtime.state.worktree) in summary
 
     runtime.merge_completed_run()
@@ -487,3 +490,98 @@ def test_summary_reports_where_the_documents_are(tmp_path: Path, capsys) -> None
     merged_summary = _summary(runtime.state, files_after_merge)
     assert f"documents: {tmp_path / 'repo'} (in your working tree now)" in merged_summary
     assert (tmp_path / "repo" / "answer.txt").exists()
+
+
+def test_cli_handles_every_git_step_without_user_action(tmp_path: Path, capsys) -> None:
+    """The name says Git-Checkpointed: the loop, not the user, does the git work.
+
+    One scenario with every precondition at once: unborn repository, no identity, dirty
+    working tree, a run that fails after accepting work, and a worktree the user deleted.
+    """
+    import subprocess
+
+    from gcae.cli import _maybe_merge, _run_files, _summary
+    from gcae.git import GitRepository
+    from gcae.providers import FakeProvider
+    from gcae.runtime import Runtime, RuntimeControl
+
+    repo = tmp_path / "fresh"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    (repo / "notes.txt").write_text("my work in progress\n")
+
+    env = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"}
+    import os
+
+    previous = {key: os.environ.get(key) for key in env}
+    os.environ.update(env)
+    try:
+        runtime = Runtime(
+            repo,
+            tmp_path / "state",
+            provider=FakeProvider(
+                [
+                    {
+                        "action": "execute_tool",
+                        "semantic_goal": "a",
+                        "reason_summary": "a",
+                        "tool": {
+                            "name": "create_file",
+                            "arguments": {"path": "docs/a.md", "content": "# A\n"},
+                        },
+                    },
+                    {
+                        "action": "complete_semantic_step",
+                        "semantic_goal": "a",
+                        "reason_summary": "done",
+                    },
+                ]
+            ),
+            control=RuntimeControl(),
+            max_steps=2,
+            cleanup_after_merge=True,
+        )
+        runtime.start("write docs", success_criteria=["file exists: nope.md"])
+        state = runtime.run()
+        assert state.status.startswith("failed")  # criterion never satisfiable
+        assert state.accepted_steps == 1
+        _maybe_merge(state, tmp_path / "state", False, False, auto_merge=True)
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    repo_handle = GitRepository(repo, tmp_path / "state")
+    # 1. accepted work reached the checkout even though the run failed
+    assert (repo / "docs" / "a.md").read_text() == "# A\n"
+    # 2. the unborn repository got a base commit, with the user's WIP committed, not lost
+    assert (repo / "notes.txt").exists()
+    log = subprocess.run(
+        ["git", "-C", str(repo), "log", "--oneline"], capture_output=True, text=True
+    ).stdout
+    assert "base commit" in log and "gcae:" in log
+    # 3. commits were authored without any configured git identity
+    author = subprocess.run(
+        ["git", "-C", str(repo), "log", "-1", "--format=%ae"], capture_output=True, text=True
+    ).stdout.strip()
+    assert author == "gcae@localhost"
+    # 4. GCAE cleaned up its own worktree; the branch survives for undo/re-merge
+    assert not Path(state.worktree).exists()
+    branches = subprocess.run(
+        ["git", "-C", str(repo), "branch", "--format=%(refname:short)"],
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+    assert state.branch in branches
+    record = state.merge
+    assert record is not None
+    repo_handle.undo_merge(record.pre_merge_commit, record.merge_commit)
+    assert not (repo / "docs" / "a.md").exists()          # undo still works
+    repo_handle.merge_branch(state.branch)                 # and re-merging is possible
+    assert (repo / "docs" / "a.md").exists()
+    # 5. nothing in the summary tells the user to run git
+    summary = _summary(state, _run_files(state, repo_handle))
+    assert "git merge" not in summary
+    assert "documents: " in summary and str(repo) in summary

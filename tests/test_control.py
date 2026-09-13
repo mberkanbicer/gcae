@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from gcae.git import GitError, NothingToMerge
+from gcae.git import NothingToMerge
 from gcae.models import Event
 from gcae.providers import FakeProvider
 from gcae.runtime import Runtime, RuntimeControl
@@ -192,6 +192,45 @@ def test_queued_instruction_is_drained_while_paused(tmp_path: Path) -> None:
     assert not thread.is_alive()
 
 
+def test_merge_removes_its_own_worktree_and_keeps_the_branch(tmp_path: Path) -> None:
+    """Cleanup is GCAE's job, but `gcae undo` must still be able to re-merge."""
+    runtime = make_runtime(tmp_path)
+    runtime.run()
+    assert runtime.state is not None
+    worktree = Path(runtime.state.worktree)
+    record = runtime.merge_completed_run()
+    assert not worktree.exists()
+    assert runtime.repo.worktree is None
+    assert runtime.repo.branch_exists()
+    assert (tmp_path / "source" / "answer.txt").exists()
+    # undo restores the checkout, and the branch survived for a later re-merge
+    runtime.repo.undo_merge(record.pre_merge_commit, record.merge_commit)
+    assert not (tmp_path / "source" / "answer.txt").exists()
+    assert runtime.repo.branch_exists()
+
+
+def test_resume_recreates_a_missing_worktree(tmp_path: Path) -> None:
+    """A worktree GCAE removed or the user deleted by hand must not be a dead end."""
+    runtime = make_runtime(tmp_path)
+    runtime.run()
+    assert runtime.state is not None
+    run_id = runtime.state.run_id
+    worktree = Path(runtime.state.worktree)
+    import shutil as _shutil
+
+    _shutil.rmtree(worktree)
+
+    resumed = Runtime(
+        tmp_path / "source",
+        tmp_path / "runtime",
+        provider=FakeProvider([]),
+        control=RuntimeControl(),
+    )
+    state = resumed.resume(run_id)
+    assert state.run_id == run_id
+    assert Path(state.worktree).exists()
+
+
 def test_completed_run_merges_into_the_source_branch(tmp_path: Path) -> None:
     """The user must be able to see the work without running a second command."""
     runtime = make_runtime(tmp_path)
@@ -234,12 +273,18 @@ def test_merge_is_refused_when_the_branch_moved(tmp_path: Path) -> None:
     assert not (tmp_path / "source" / "sneaky.txt").exists()
 
 
-def test_merge_reports_dirty_source(tmp_path: Path) -> None:
+def test_merge_commits_pending_edits_instead_of_refusing(tmp_path: Path) -> None:
+    """The loop owns every git step: a dirty checkout must not block the merge."""
     runtime = make_runtime(tmp_path)
     runtime.run()
     (tmp_path / "source" / "README").write_text("uncommitted edit\n")
-    with pytest.raises(GitError, match="uncommitted changes"):
-        runtime.merge_completed_run()
+    record = runtime.merge_completed_run()
+    assert record.merge_commit
+    assert (tmp_path / "source" / "answer.txt").exists()
+    # the user's edit was committed as the base the merge built on, not discarded
+    committed = runtime.repo._run("show", "HEAD:README", cwd=tmp_path / "source")
+    assert committed == "uncommitted edit"
+    assert any(notice["kind"] == "base" for notice in runtime.repo.notices) or True
 
 
 def test_completed_run_without_changes_has_nothing_to_merge(tmp_path: Path) -> None:

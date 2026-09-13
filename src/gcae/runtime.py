@@ -46,6 +46,23 @@ logger = logging.getLogger("gcae")
 EventSubscriber = Callable[[Event], None]
 
 
+def cleanup_merged_worktree(repo: GitRepository, state: AgentState) -> bool:
+    """Remove GCAE's own worktree once its branch is merged. Returns True when removed.
+
+    The branch is deliberately kept: the merge stays reversible with ``gcae undo`` and the
+    accepted commits can be merged again.
+    """
+    if state.merge is None:
+        return False
+    # work from the persisted path: the CLI merge path has no live worktree handle
+    path = Path(state.worktree)
+    if not path.exists():
+        return False
+    repo.worktree = path
+    repo.remove_worktree()
+    return True
+
+
 def merge_verified_run(
     repo: GitRepository,
     state: AgentState,
@@ -89,6 +106,10 @@ def merge_verified_run(
         raise NothingToMerge(
             f"run {state.run_id} produced no file changes; there is nothing to merge"
         )
+    if repo.source_status_entries():
+        # GCAE never leaves the user to stash their own work: commit it as the base the
+        # merge builds on (bounded, reported, reversible with git reset --soft HEAD~1).
+        repo.bootstrap_source_repository()
     target = repo.current_branch()
     pre, merged = repo.merge_branch(state.branch)
     record = MergeRecord(
@@ -161,6 +182,8 @@ class Runtime:
         provider_label: str = "",
         auto_bootstrap: bool = True,
         auto_merge: bool = True,
+        merge_accepted_on_failure: bool = True,
+        cleanup_after_merge: bool = True,
     ) -> None:
         self.source_repo = Path(source_repo).resolve()
         self.runtime_dir = Path(runtime_dir).expanduser().resolve()
@@ -180,6 +203,8 @@ class Runtime:
         self.provider_label = provider_label
         self.auto_bootstrap = auto_bootstrap
         self.auto_merge = auto_merge
+        self.merge_accepted_on_failure = merge_accepted_on_failure
+        self.cleanup_after_merge = cleanup_after_merge
         self.validator_commands = list(validator_commands or [])
         self.max_steps = max_steps
         self.command_timeout = command_timeout
@@ -337,9 +362,8 @@ class Runtime:
         self.memory = MemoryStore(self.runtime_dir / "memory.db")
         self.events = EventLog(path / "events.jsonl")
         self.repo.validate_source()
-        if not self.repo.worktree.exists():
-            raise RuntimeError(f"persisted agent worktree does not exist: {self.repo.worktree}")
-        self.repo.assert_registered_worktree()
+        # GCAE owns its worktree: recreate it from the run branch instead of giving up
+        self.repo.ensure_worktree(self.state.branch, Path(self.state.worktree))
         if self.state.accepted_commit:
             self.repo.rollback(self.state.accepted_commit)
         if self.state.status != "complete":
@@ -955,6 +979,13 @@ class Runtime:
             RunPhase.COMPLETE,
             payload=record.model_dump(mode="json"),
         )
+        self._publish_repository_notices()
+        if self.cleanup_after_merge and cleanup_merged_worktree(self.repo, self.state):
+            self._event(
+                "worktree_cleaned",
+                RunPhase.COMPLETE,
+                payload={"worktree": self.state.worktree, "branch": self.state.branch},
+            )
         logger.info(
             "merged %s into %s (%s -> %s)",
             record.branch,

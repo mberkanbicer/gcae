@@ -247,7 +247,7 @@ class GcaeApp(App[None]):
         if event.event_type in {"run_completed", "run_failed", "run_stopped"}:
             self.agent_done = True
         auto_merge_due = (
-            event.event_type == "run_completed"
+            (event.event_type == "run_completed" or self._rescue_due(event.event_type))
             and self.runtime.auto_merge
             and not self._merge_attempted
         )
@@ -256,6 +256,17 @@ class GcaeApp(App[None]):
             self._merge_attempted = True
             self.run_worker(self._merge_task, thread=True, name="auto-merge", exit_on_error=False)
         self._refresh_panels({name for name in changed if name in PANELS})
+
+    def _rescue_due(self, event_type: str) -> bool:
+        """A failed or stopped run still owns the checkpoints it accepted."""
+        if event_type not in {"run_failed", "run_stopped"}:
+            return False
+        state = self.runtime.state
+        return bool(
+            self.runtime.merge_accepted_on_failure
+            and state is not None
+            and state.accepted_steps > 0
+        )
 
     # ------------------------------------------------------------------ rendering
 

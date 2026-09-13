@@ -1144,23 +1144,80 @@ def test_failed_run_offers_to_rescue_accepted_work(tmp_path: Path) -> None:
 
     async def scenario() -> None:
         async with app.run_test(size=(130, 40)) as pilot:
-            await wait_for(pilot, lambda: app.agent_done)
+            await wait_for(
+                pilot, lambda: "merged into" in str(app.query_one(BannerPanel).body.plain)
+            )
             assert runtime.state is not None
             assert runtime.state.status.startswith("failed")
-            assert runtime.state.accepted_steps >= 1
+            assert runtime.state.merge is not None
             banner = str(app.query_one(BannerPanel).body.plain)
             assert "RUN FAILED" in banner
+            assert "final verification did not pass" in banner
+            assert "undo: gcae undo" in banner
+            assert (source / "answer.txt").exists()
+            assert runtime.state.worktree and not Path(runtime.state.worktree).exists()
+
+    asyncio.run(scenario())
+
+
+def test_failed_run_keeps_its_work_when_automatic_rescue_is_off(tmp_path: Path) -> None:
+    """With merge_accepted_on_failure off the dashboard still offers M."""
+    source = tmp_path / "source"
+    source.mkdir()
+    init_repo(source)
+    runtime = Runtime(
+        source,
+        tmp_path / "runtime",
+        provider=FakeProvider(
+            [
+                {
+                    "action": "execute_tool",
+                    "semantic_goal": "create",
+                    "reason_summary": "create it",
+                    "tool": {
+                        "name": "create_file",
+                        "arguments": {"path": "answer.txt", "content": "ok"},
+                    },
+                },
+                {
+                    "action": "complete_semantic_step",
+                    "semantic_goal": "create",
+                    "reason_summary": "done",
+                },
+                {
+                    "action": "execute_tool",
+                    "semantic_goal": "more",
+                    "reason_summary": "keep going",
+                    "tool": {
+                        "name": "create_file",
+                        "arguments": {"path": "second.txt", "content": "more"},
+                    },
+                },
+                {
+                    "action": "complete_semantic_step",
+                    "semantic_goal": "more",
+                    "reason_summary": "done",
+                },
+            ]
+        ),
+        control=RuntimeControl(),
+        max_steps=3,
+        merge_accepted_on_failure=False,
+    )
+    app = GcaeApp(runtime, request="create answer", criteria=["file exists: second.txt"])
+
+    async def scenario() -> None:
+        async with app.run_test(size=(130, 40)) as pilot:
+            await wait_for(pilot, lambda: app.agent_done)
+            assert runtime.state is not None and runtime.state.merge is None
+            banner = str(app.query_one(BannerPanel).body.plain)
             assert "accepted step(s) are on branch" in banner
             assert "[M] Merge accepted work" in str(app.query_one(FooterBar).body.plain)
-
             await pilot.press("M")
             await wait_for(
                 pilot, lambda: "merged into" in str(app.query_one(BannerPanel).body.plain)
             )
             assert (source / "answer.txt").exists()
-            banner = str(app.query_one(BannerPanel).body.plain)
-            assert "final verification did not pass" in banner
-            assert "undo: gcae undo" in banner
 
     asyncio.run(scenario())
 

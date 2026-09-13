@@ -67,6 +67,11 @@ A **failed or stopped** run can still be rescued: `gcae merge` merges the checkp
 accepted (with a warning that final verification did not pass), and the dashboard offers `M` labelled
 *Merge accepted work*. Automatic merging only ever applies to completed runs.
 
+You never need to run git yourself: the loop creates the base commit and the commit identity,
+merges on completion, merges the accepted checkpoints of a failed run, commits a dirty checkout as
+the base the merge builds on, and removes its own worktree afterwards (keeping the branch so
+`gcae undo` still works).
+
 Every merge path applies the same guards — the run must be complete, not already merged, and its
 branch must still point at the verified commit; the source repository must be clean. A run with no
 file changes reports `nothing to merge` rather than failing.

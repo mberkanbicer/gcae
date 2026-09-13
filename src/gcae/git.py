@@ -19,6 +19,10 @@ class GitError(RuntimeError):
     """Raised when a Git safety invariant or command fails."""
 
 
+class NothingToMerge(GitError):
+    """A completed run produced no file changes, so there is no merge to perform."""
+
+
 class GitRepository:
     def __init__(
         self,

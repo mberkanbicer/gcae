@@ -1019,3 +1019,79 @@ def test_formatters() -> None:
     assert formatters.run_badge("complete", paused=False) == ("COMPLETE", "success")
     assert formatters.run_badge("running", paused=True) == ("PAUSED", "warning")
     assert formatters.role_for_phase("evaluate") == "EVAL"
+
+
+def test_completed_run_is_merged_automatically(tmp_path: Path) -> None:
+    """The user must see the work in their checkout when the run completes."""
+    runtime = make_runtime(tmp_path)
+    assert runtime.auto_merge is True
+    app = GcaeApp(runtime)
+
+    async def scenario() -> None:
+        async with app.run_test(size=(130, 40)) as pilot:
+            await wait_for(pilot, lambda: app.agent_done)
+            await wait_for(
+                pilot, lambda: "merged into" in str(app.query_one(BannerPanel).body.plain)
+            )
+            assert runtime.state is not None and runtime.state.merge is not None
+            assert (tmp_path / "source" / "answer.txt").read_text() == "ok"
+            banner = str(app.query_one(BannerPanel).body.plain)
+            assert "gcae undo" in banner
+            texts = [row.text for row in app.ui.timeline]
+            assert any("merged into" in text for text in texts)
+
+    asyncio.run(scenario())
+
+
+def test_auto_merge_off_offers_a_merge_key(tmp_path: Path) -> None:
+    runtime = make_runtime(tmp_path)
+    runtime.auto_merge = False
+    app = GcaeApp(runtime)
+
+    async def scenario() -> None:
+        async with app.run_test(size=(130, 40)) as pilot:
+            await wait_for(pilot, lambda: app.agent_done)
+            assert runtime.state is not None and runtime.state.merge is None
+            assert not (tmp_path / "source" / "answer.txt").exists()
+            footer = str(app.query_one(FooterBar).body.plain)
+            assert "[M] Merge" in footer
+            banner = str(app.query_one(BannerPanel).body.plain)
+            assert "not merged" in banner
+
+            await pilot.press("M")
+            await wait_for(pilot, lambda: runtime.state.merge is not None)
+            assert (tmp_path / "source" / "answer.txt").read_text() == "ok"
+            assert "[M] Merge" not in str(app.query_one(FooterBar).body.plain)
+
+    asyncio.run(scenario())
+
+
+def test_merge_with_nothing_to_merge_is_reported_quietly(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    init_repo(source)
+    runtime = Runtime(
+        source,
+        tmp_path / "runtime",
+        provider=FakeProvider(
+            [
+                {
+                    "action": "finish_candidate",
+                    "semantic_goal": "finish",
+                    "reason_summary": "nothing to do",
+                }
+            ]
+        ),
+        control=RuntimeControl(),
+    )
+    app = GcaeApp(runtime, request="do nothing", criteria=["file exists: README"])
+
+    async def scenario() -> None:
+        async with app.run_test(size=(120, 35)) as pilot:
+            await wait_for(pilot, lambda: app.agent_done)
+            await wait_for(
+                pilot, lambda: any("nothing to merge" in row.text for row in app.ui.timeline)
+            )
+            assert runtime.state is not None and runtime.state.merge is None
+
+    asyncio.run(scenario())

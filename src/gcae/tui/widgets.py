@@ -197,10 +197,20 @@ class BannerPanel(Panel):
             )
             if criteria:
                 lines.append(_row("criteria", f"{passed}/{len(criteria)} passed"))
-            merge_hint = Text(
-                "never automatic · run `gcae merge` when ready", style=STYLES["muted"]
-            )
-            lines.append(_row("merge", merge_hint))
+            merge = state.merge
+            if merge is not None:
+                merge_text = Text(
+                    f"merged into {merge.target_branch} · {short_id(merge.merge_commit)} · "
+                    f"undo: gcae undo <repo> {state.run_id}",
+                    style=STYLES["success"],
+                )
+            else:
+                merge_text = Text(
+                    "not merged · press M to merge into the current branch, or run "
+                    f"`gcae merge <repo> {state.run_id}`",
+                    style=STYLES["warning"],
+                )
+            lines.append(_row("merge", merge_text))
         elif state is not None and state.status == "stopped":
             title = Text("RUN STOPPED", style=f"bold {STYLES['muted']}")
             lines.append(_row("trusted", f"{short_id(state.accepted_commit)} on {state.branch}"))

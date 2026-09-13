@@ -96,15 +96,16 @@ def test_cli_merge_asks_and_undo_reverses(tmp_path, capsys, monkeypatch) -> None
         objective="o",
         original_request="o",
         accepted_commit=accepted,
+        status="complete",
     )
     StateStore(runtime_dir / "runs" / "run-merge" / "state.json").save(state)
 
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
-    _maybe_merge(state, runtime_dir, merge_flag=False, no_merge_flag=False)
+    _maybe_merge(state, runtime_dir, merge_flag=False, no_merge_flag=False, auto_merge=False)
     assert "ready" in capsys.readouterr().err
     assert not (source / "feature.txt").exists()
 
-    _maybe_merge(state, runtime_dir, merge_flag=True, no_merge_flag=False)
+    _maybe_merge(state, runtime_dir, merge_flag=True, no_merge_flag=False, auto_merge=False)
     assert (source / "feature.txt").exists()
     assert state.merge is not None
     capsys.readouterr()
@@ -274,3 +275,92 @@ def test_criterion_failure_evidence_shows_expected_and_found(tmp_path: Path) -> 
     assert result.passed is False
     assert "expected 'hello from gcae'" in result.evidence
     assert "and more" in result.evidence
+
+
+def _completed_run(tmp_path: Path):
+    """A completed run that actually changed a file, built with the fake provider."""
+    from gcae.providers import FakeProvider
+    from gcae.runtime import Runtime, RuntimeControl
+
+    source = _git_repo(tmp_path)
+    runtime = Runtime(
+        source,
+        tmp_path / "state",
+        provider=FakeProvider(
+            [
+                {
+                    "action": "execute_tool",
+                    "semantic_goal": "create",
+                    "reason_summary": "create it",
+                    "tool": {
+                        "name": "create_file",
+                        "arguments": {"path": "answer.txt", "content": "ok\n"},
+                    },
+                },
+                {
+                    "action": "complete_semantic_step",
+                    "semantic_goal": "create",
+                    "reason_summary": "done",
+                },
+            ]
+        ),
+        control=RuntimeControl(),
+    )
+    runtime.start("create answer", success_criteria=["file exists: answer.txt"])
+    assert runtime.run().status == "complete"
+    return runtime
+
+
+def test_auto_merge_puts_the_work_in_the_users_checkout(tmp_path: Path, capsys) -> None:
+    from gcae.cli import _maybe_merge
+
+    runtime = _completed_run(tmp_path)
+    assert runtime.state is not None
+    assert not (tmp_path / "repo" / "answer.txt").exists()
+    _maybe_merge(runtime.state, tmp_path / "state", False, False, auto_merge=True)
+    assert (tmp_path / "repo" / "answer.txt").read_text() == "ok\n"
+    assert runtime.state.merge is not None
+    assert "merged" in capsys.readouterr().err
+
+
+def test_no_merge_flag_wins_over_auto_merge(tmp_path: Path, capsys) -> None:
+    from gcae.cli import _maybe_merge
+
+    runtime = _completed_run(tmp_path)
+    assert runtime.state is not None
+    _maybe_merge(runtime.state, tmp_path / "state", False, True, auto_merge=True)
+    assert not (tmp_path / "repo" / "answer.txt").exists()
+    assert runtime.state.merge is None
+
+
+def test_auto_merge_off_keeps_the_branch_separate(tmp_path: Path, capsys) -> None:
+    from gcae.cli import _maybe_merge
+
+    runtime = _completed_run(tmp_path)
+    assert runtime.state is not None
+    _maybe_merge(runtime.state, tmp_path / "state", False, False, auto_merge=False)
+    assert runtime.state.merge is None
+    assert "merge manually" in capsys.readouterr().err
+
+
+def test_merge_command_reports_nothing_to_merge(tmp_path: Path, capsys) -> None:
+    from gcae.cli import main
+
+    repo = _git_repo(tmp_path)
+    main(
+        [
+            "run",
+            str(repo),
+            "do nothing",
+            "--criterion",
+            "file exists: README.md",
+            "--headless",
+            "--no-merge",
+            "--config",
+            str(_fake_config(tmp_path)),
+        ]
+    )
+    runs = sorted((tmp_path / "state" / "runs").glob("*/state.json"))
+    run_id = runs[-1].parent.name
+    main(["merge", str(repo), run_id, "--config", str(_fake_config(tmp_path))])
+    assert "nothing to merge" in capsys.readouterr().err

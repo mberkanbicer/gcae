@@ -58,6 +58,9 @@ class RuntimeConfig(BaseModel):
     # GCAE creates the base commit a run needs (unborn HEAD, dirty tree) instead of
     # refusing to start. Never touches file contents; bounded and reported.
     auto_bootstrap: bool = True
+    # Merge the verified run branch into the source branch when a run completes, so the
+    # work is visible in the user's checkout. Recorded in state.json; `gcae undo` reverses.
+    auto_merge: bool = True
     max_steps: int = 20
     command_timeout: int = 30
     max_tool_calls_per_step: int = 8

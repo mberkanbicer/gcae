@@ -58,11 +58,17 @@ planner is required to produce at least one). `--criterion` values are merged wi
 
 ## Merge / undo
 
-After a successful run the CLI asks whether to merge the verified branch. `--merge` answers yes
-without asking, `--no-merge` disables the question. `gcae merge` performs the same merge later for
-any completed run whose branch still points at the verified commit. Every merge records the
-pre-merge commit; `gcae undo` resets the source branch back and refuses if the repository is dirty
-or HEAD moved. GCAE never merges on its own.
+A completed run is merged into the branch you currently have checked out, so the work is visible in
+your working tree. `[runtime] auto_merge` (default `on`) controls this; `--no-merge` opts out and
+keeps the branch separate, and `--merge` forces it. With `auto_merge = false` an interactive CLI
+asks instead of merging.
+
+Every merge path applies the same guards — the run must be complete, not already merged, and its
+branch must still point at the verified commit; the source repository must be clean. A run with no
+file changes reports `nothing to merge` rather than failing. The pre-merge and merge commits are
+recorded in `state.json`, so `gcae undo <repo> <run-id>` resets your branch and refuses if it is
+dirty or HEAD moved; `gcae merge <repo> <run-id>` performs the same merge later for any completed
+run.
 
 ## Examples
 

@@ -18,7 +18,7 @@ from textual.css.query import NoMatches
 from textual.widgets import Static
 from textual.worker import Worker
 
-from ..git import GitError
+from ..git import GitError, NothingToMerge
 from ..models import Event
 from ..runtime import Runtime, RuntimeControl
 from . import formatters
@@ -69,6 +69,7 @@ class GcaeApp(App[None]):
         Binding("e", "evaluation", "Evaluation"),
         Binding("t", "plan_detail", "Plan"),
         Binding("i", "instruction", "Instruct"),
+        Binding("M", "merge_run", "Merge"),
         Binding("question_mark", "help", "Help"),
         Binding("enter", "inspect", "Open"),
         Binding("tab", "focus_next_panel", "Next panel", show=False),
@@ -100,6 +101,8 @@ class GcaeApp(App[None]):
         self.focus_order = ["plan", "checkpoint", "validation", "activity", "objective", "timeline"]
         self.focus_index = 0
         self._needs_start = request is not None and runtime.state is None
+        self._merge_attempted = False
+        self.merge_error: str | None = None
         self._agent: Worker[None] | None = None
 
     # ------------------------------------------------------------------ layout
@@ -243,6 +246,15 @@ class GcaeApp(App[None]):
             self.last_error = str(event.payload.get("reason") or "run failed")
         if event.event_type in {"run_completed", "run_failed", "run_stopped"}:
             self.agent_done = True
+        auto_merge_due = (
+            event.event_type == "run_completed"
+            and self.runtime.auto_merge
+            and not self._merge_attempted
+        )
+        if auto_merge_due:
+            # merging changes the user's checkout: do it off the UI thread and report it
+            self._merge_attempted = True
+            self.run_worker(self._merge_task, thread=True, name="auto-merge", exit_on_error=False)
         self._refresh_panels({name for name in changed if name in PANELS})
 
     # ------------------------------------------------------------------ rendering
@@ -312,9 +324,15 @@ class GcaeApp(App[None]):
 
     def _footer_text(self) -> str:
         if self.agent_done:
+            state = self.runtime.state
+            merge_keys = (
+                "[M] Merge  "
+                if state is not None and state.status == "complete" and state.merge is None
+                else ""
+            )
             keys = (
-                "[i] New task  [d] Diff  [l] Logs  [m] Memory  [c] Context  [e] Evaluation  "
-                "[t] Plan  [?] Help  [q] Quit"
+                f"[i] New task  {merge_keys}[d] Diff  [l] Logs  [m] Memory  [c] Context  "
+                "[e] Evaluation  [t] Plan  [?] Help  [q] Quit"
             )
         elif self.control.paused:
             keys = "[r] Resume  [d] Diff  [l] Logs  [m] Memory  [i] Instruct  [?] Help  [q] Quit"
@@ -399,6 +417,38 @@ class GcaeApp(App[None]):
         self._call_ui(self._show_memory, records)
 
     # ------------------------------------------------------------------ actions
+
+    def action_merge_run(self) -> None:
+        state = self.runtime.state
+        if state is None or state.status != "complete" or state.merge is not None:
+            return
+        self.run_worker(self._merge_task, thread=True, name="merge", exit_on_error=False)
+
+    def _merge_task(self) -> None:
+        try:
+            record = self.runtime.merge_completed_run()
+        except NothingToMerge as exc:
+            self._call_ui(self._on_nothing_to_merge, str(exc))
+            return
+        except (GitError, RuntimeError) as exc:
+            self._call_ui(self._on_merge_failed, str(exc))
+            return
+        self._call_ui(self._on_merged, record)
+
+    def _on_nothing_to_merge(self, reason: str) -> None:
+        self.ui.add_note("i", reason, "muted")
+        self._refresh_panels({"banner", "footer", "timeline"})
+
+    def _on_merged(self, record: object) -> None:
+        target = getattr(record, "target_branch", "?")
+        commit = str(getattr(record, "merge_commit", ""))[:7]
+        self.ui.add_note("✓", f"merged into {target} · {commit} · gcae undo reverses it", "success")
+        self._refresh_panels({"banner", "footer", "timeline", "checkpoint"})
+
+    def _on_merge_failed(self, reason: str) -> None:
+        self.merge_error = reason
+        self.ui.add_note("!", f"merge skipped · {reason}", "warning")
+        self._refresh_panels({"banner", "footer", "timeline"})
 
     def action_quit_app(self) -> None:
         if not self.agent_done:

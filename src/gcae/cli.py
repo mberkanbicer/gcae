@@ -10,13 +10,13 @@ from urllib.parse import urlparse
 
 from .config import Config, ProviderConfig, load_config
 from .evaluator import DeterministicEvaluator, Evaluator, LLMEvaluator
-from .git import GitError, GitRepository
+from .git import GitError, GitRepository, NothingToMerge
 from .http_provider import OpenAICompatibleProvider
 from .models import AgentState, MergeRecord
 from .persistence import StateStore
 from .planner import LLMPlanner, Planner
 from .providers import FakeProvider, Provider
-from .runtime import Runtime, RuntimeControl
+from .runtime import Runtime, RuntimeControl, merge_verified_run
 from .verifier import FinalVerifier
 
 ROLES = ("controller", "planner", "evaluator", "verifier", "escalation")
@@ -203,18 +203,12 @@ def _load_run(repository: Path, run_id: str, runtime_dir: Path) -> tuple[AgentSt
 
 
 def _apply_merge(state: AgentState, state_path: Path, repo: GitRepository) -> MergeRecord:
-    target = repo.current_branch()
-    pre, merged = repo.merge_branch(state.branch)
-    record = MergeRecord(
-        branch=state.branch,
-        target_branch=target,
-        pre_merge_commit=pre,
-        merge_commit=merged,
+    record = merge_verified_run(
+        repo, state, persist=lambda: StateStore(state_path).save(state)
     )
-    state.merge = record
-    StateStore(state_path).save(state)
     print(
-        f"gcae: merged {state.branch} into {target} ({pre[:12]} -> {merged[:12]})",
+        f"gcae: merged {record.branch} into {record.target_branch} "
+        f"({record.pre_merge_commit[:12]} -> {record.merge_commit[:12]})",
         file=sys.stderr,
     )
     return record
@@ -238,21 +232,12 @@ def _undo(repository: Path, run_id: str, runtime_dir: Path) -> None:
 
 def _merge_run(repository: Path, run_id: str, runtime_dir: Path) -> None:
     state, state_path = _load_run(repository, run_id, runtime_dir)
-    if state.status != "complete":
-        raise RuntimeError(f"run {run_id} is not complete: {state.status}")
-    if state.merge is not None:
-        raise RuntimeError(
-            f"run {run_id} is already merged into {state.merge.target_branch}; "
-            f"run 'gcae undo {state.source_repo} {run_id}' first"
-        )
     repo = GitRepository(state.source_repo, Path(runtime_dir).expanduser())
-    head = repo.branch_head(state.branch)
-    if state.accepted_commit and head != state.accepted_commit:
-        raise RuntimeError(
-            f"branch {state.branch} moved past the verified commit "
-            f"{state.accepted_commit[:12]}; refusing to merge"
-        )
-    _apply_merge(state, state_path, repo)
+    try:
+        _apply_merge(state, state_path, repo)
+    except NothingToMerge as exc:
+        print(f"gcae: {exc}", file=sys.stderr)
+        return
     print(f"gcae: undo with: gcae undo {state.source_repo} {run_id}", file=sys.stderr)
 
 
@@ -261,10 +246,11 @@ def _maybe_merge(
     runtime_dir: Path,
     merge_flag: bool,
     no_merge_flag: bool,
+    auto_merge: bool = True,
 ) -> None:
     if no_merge_flag or result.merge is not None or not result.branch:
         return
-    if merge_flag:
+    if merge_flag or auto_merge:
         approved = True
     elif sys.stdin.isatty():
         print(
@@ -288,6 +274,8 @@ def _maybe_merge(
     repo = GitRepository(result.source_repo, Path(runtime_dir).expanduser())
     try:
         _apply_merge(result, _state_path(runtime_dir, result.run_id), repo)
+    except NothingToMerge as exc:
+        print(f"gcae: {exc}", file=sys.stderr)
     except GitError as exc:
         print(f"gcae: merge skipped: {exc}", file=sys.stderr)
 
@@ -373,6 +361,7 @@ def _build_runtime(args: argparse.Namespace, config: Config, runtime_dir: Path) 
         provider_label=config.provider.kind.upper(),
         auto_bootstrap=config.runtime.auto_bootstrap
         and not getattr(args, "no_auto_bootstrap", False),
+        auto_merge=config.runtime.auto_merge,
     )
 
 
@@ -456,8 +445,14 @@ def main(argv: list[str] | None = None) -> None:
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"gcae: error: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
-    if args.command == "run" and result.status == "complete":
-        _maybe_merge(result, runtime_dir, args.merge, args.no_merge)
+    if args.command in {"run", "resume"} and result.status == "complete":
+        _maybe_merge(
+            result,
+            runtime_dir,
+            getattr(args, "merge", False),
+            getattr(args, "no_merge", False),
+            auto_merge=config.runtime.auto_merge,
+        )
     print(json.dumps(result.model_dump(mode="json"), indent=2, sort_keys=True))
     print(_summary(result), file=sys.stderr)
     if result.status != "complete":

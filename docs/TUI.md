@@ -47,6 +47,10 @@ Differences from a plain log viewer:
 - **Curated events.** Routine tool successes are not timeline entries; the full stream is one
   keystroke away (`l`). Tool failures, rollbacks, replans, checkpoints, validation results, user
   instructions and terminal states always appear.
+- **Done means visible.** Completing a run merges the verified branch into your current branch in a
+  worker thread; the banner reports the target branch, the merge commit and the `gcae undo`
+  command. If the merge cannot proceed (dirty checkout, moved branch, no changes) the timeline says
+  why and the branch stays for `M` or `gcae merge`.
 - **Failures are diagnosable.** A failed content criterion shows what was expected and what is
   actually there, and a run that ends without completing exits non-zero.
 - **Self-repair is visible.** Git preconditions GCAE fixes appear at the top of the timeline

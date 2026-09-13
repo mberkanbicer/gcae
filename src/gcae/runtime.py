@@ -12,7 +12,7 @@ from pathlib import Path
 from .context import ContextBuilder, estimate_tokens
 from .controller import Controller
 from .evaluator import DeterministicEvaluator, Evaluator
-from .git import GitError, GitRepository
+from .git import GitError, GitRepository, NothingToMerge
 from .memory import EventLog, MemoryStore
 from .models import (
     Action,
@@ -22,6 +22,7 @@ from .models import (
     Event,
     MemoryCandidate,
     MemoryRecord,
+    MergeRecord,
     Observation,
     PlanStep,
     RunPhase,
@@ -43,6 +44,50 @@ from .verifier import FinalVerifier
 logger = logging.getLogger("gcae")
 
 EventSubscriber = Callable[[Event], None]
+
+
+def merge_verified_run(
+    repo: GitRepository,
+    state: AgentState,
+    persist: Callable[[], None],
+) -> MergeRecord:
+    """Guarded merge of a verified run branch into the current source branch.
+
+    Shared by the runtime (after completion) and ``gcae merge`` so both paths apply the
+    same checks: the run must be complete, unmerged, and its branch must still point at
+    the verified commit; the source repository must be clean.
+    """
+    if state.status != "complete":
+        raise RuntimeError(f"run {state.run_id} is not complete: {state.status}")
+    if state.merge is not None:
+        raise RuntimeError(
+            f"run {state.run_id} is already merged into {state.merge.target_branch}; "
+            f"run 'gcae undo {state.source_repo} {state.run_id}' first"
+        )
+    if not state.branch:
+        raise RuntimeError(f"run {state.run_id} has no branch to merge")
+    if state.accepted_commit:
+        head = repo.branch_head(state.branch)
+        if head != state.accepted_commit:
+            raise RuntimeError(
+                f"branch {state.branch} moved past the verified commit "
+                f"{state.accepted_commit[:12]}; refusing to merge"
+            )
+    if state.branch and repo.branch_head(state.branch) == repo.source_commit():
+        raise NothingToMerge(
+            f"run {state.run_id} produced no file changes; there is nothing to merge"
+        )
+    target = repo.current_branch()
+    pre, merged = repo.merge_branch(state.branch)
+    record = MergeRecord(
+        branch=state.branch,
+        target_branch=target,
+        pre_merge_commit=pre,
+        merge_commit=merged,
+    )
+    state.merge = record
+    persist()
+    return record
 
 
 class RuntimeControl:
@@ -103,6 +148,7 @@ class Runtime:
         role_providers: dict[str, Provider] | None = None,
         provider_label: str = "",
         auto_bootstrap: bool = True,
+        auto_merge: bool = True,
     ) -> None:
         self.source_repo = Path(source_repo).resolve()
         self.runtime_dir = Path(runtime_dir).expanduser().resolve()
@@ -121,6 +167,7 @@ class Runtime:
         self.role_providers = dict(role_providers or {})
         self.provider_label = provider_label
         self.auto_bootstrap = auto_bootstrap
+        self.auto_merge = auto_merge
         self.validator_commands = list(validator_commands or [])
         self.max_steps = max_steps
         self.command_timeout = command_timeout
@@ -878,6 +925,30 @@ class Runtime:
             )
         )
         self._emit_memory_counts()
+
+    def merge_completed_run(self) -> MergeRecord:
+        """Merge the verified run branch into the source branch (recorded, reversible).
+
+        Only a completed run whose branch still points at the verified commit is merged;
+        the source repository must be clean, which ``merge_branch`` enforces. The merge is
+        recorded in ``state.json`` so ``gcae undo`` can reverse it.
+        """
+        if self.state is None or self.repo is None:
+            raise RuntimeError("call start or resume before merging a run")
+        record = merge_verified_run(self.repo, self.state, persist=self._persist)
+        self._event(
+            "merge_completed",
+            RunPhase.COMPLETE,
+            payload=record.model_dump(mode="json"),
+        )
+        logger.info(
+            "merged %s into %s (%s -> %s)",
+            record.branch,
+            record.target_branch,
+            record.pre_merge_commit[:12],
+            record.merge_commit[:12],
+        )
+        return record
 
     def _publish_repository_notices(self) -> None:
         """Report every Git precondition GCAE repaired on its own behalf."""

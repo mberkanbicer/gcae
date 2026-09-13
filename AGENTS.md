@@ -20,12 +20,17 @@ and runs. It runs headless or with an interactive Textual TUI.
    the run: GCAE creates the base commit it needs (`auto_bootstrap`, bounded to 2000 files / 50 MB,
    `.gitignore` respected, reported as a notice), while a mid-merge/rebase repository and a
    non-repository directory are refused.
-3. **Only acceptance creates commits.** An accepted step commits `gcae: <goal>`; a passing final
+3. **Verified work reaches the user.** A completed run merges its branch into the source
+   branch (`[runtime] auto_merge`, default on) with the pre-merge and merge commits recorded in
+   `state.json`, so the work is visible in the checkout and `gcae undo` reverses it. A run that
+   cannot be merged (dirty checkout, branch moved, nothing to merge) reports why and leaves the
+   branch intact for `gcae merge`.
+4. **Only acceptance creates commits.** An accepted step commits `gcae: <goal>`; a passing final
    verification with a dirty worktree commits `gcae: verified final state`; rejection does
    `reset --hard accepted_commit` plus cleanup inside the worktree only.
-4. **The model never runs Git checkpoint commands.** Checkpoint management is runtime-owned and
+5. **The model never runs Git checkpoint commands.** Checkpoint management is runtime-owned and
    `git reset|clean|commit|worktree|...` stays blocked in the command tool.
-5. **The unit of progress is a semantic step**, not a tool call. Tools run freely inside a step;
+6. **The unit of progress is a semantic step**, not a tool call. Tools run freely inside a step;
    deterministic validation and evaluation happen only at `complete_semantic_step` or when
    `max_tool_calls_per_step` is exhausted.
 6. **Context is reconstructed per call** from persistent state. Never accumulate a growing

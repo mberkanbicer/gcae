@@ -3,6 +3,9 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
+from gcae.git import GitError, NothingToMerge
 from gcae.models import Event
 from gcae.providers import FakeProvider
 from gcae.runtime import Runtime, RuntimeControl
@@ -187,3 +190,79 @@ def test_queued_instruction_is_drained_while_paused(tmp_path: Path) -> None:
     control.stop()
     thread.join(timeout=10)
     assert not thread.is_alive()
+
+
+def test_completed_run_merges_into_the_source_branch(tmp_path: Path) -> None:
+    """The user must be able to see the work without running a second command."""
+    runtime = make_runtime(tmp_path)
+    runtime.run()
+    assert runtime.state is not None and runtime.state.status == "complete"
+    record = runtime.merge_completed_run()
+    assert record.target_branch in {"main", "master"}
+    assert record.merge_commit != record.pre_merge_commit
+    assert runtime.state.merge is not None
+    # the work is now in the user's checkout
+    assert (tmp_path / "source" / "answer.txt").read_text() == "ok"
+    # and the merge is reversible
+    runtime.repo.undo_merge(record.pre_merge_commit, record.merge_commit)
+    assert not (tmp_path / "source" / "answer.txt").exists()
+
+
+def test_merge_requires_a_completed_run(tmp_path: Path) -> None:
+    runtime = make_runtime(tmp_path)
+    with pytest.raises(RuntimeError, match="not complete"):
+        runtime.merge_completed_run()
+
+
+def test_merge_is_refused_twice(tmp_path: Path) -> None:
+    runtime = make_runtime(tmp_path)
+    runtime.run()
+    runtime.merge_completed_run()
+    with pytest.raises(RuntimeError, match="already merged"):
+        runtime.merge_completed_run()
+
+
+def test_merge_is_refused_when_the_branch_moved(tmp_path: Path) -> None:
+    runtime = make_runtime(tmp_path)
+    runtime.run()
+    assert runtime.state is not None and runtime.repo is not None
+    worktree = Path(runtime.state.worktree)
+    (worktree / "sneaky.txt").write_text("x\n")
+    runtime.repo.checkpoint("gcae: hand-made commit")
+    with pytest.raises(RuntimeError, match="moved past the verified commit"):
+        runtime.merge_completed_run()
+    assert not (tmp_path / "source" / "sneaky.txt").exists()
+
+
+def test_merge_reports_dirty_source(tmp_path: Path) -> None:
+    runtime = make_runtime(tmp_path)
+    runtime.run()
+    (tmp_path / "source" / "README").write_text("uncommitted edit\n")
+    with pytest.raises(GitError, match="uncommitted changes"):
+        runtime.merge_completed_run()
+
+
+def test_completed_run_without_changes_has_nothing_to_merge(tmp_path: Path) -> None:
+    """A no-op run must not look like a merge failure."""
+    source = tmp_path / "source"
+    source.mkdir()
+    init_repo(source)
+    runtime = Runtime(
+        source,
+        tmp_path / "runtime",
+        provider=FakeProvider(
+            [
+                {
+                    "action": "finish_candidate",
+                    "semantic_goal": "finish",
+                    "reason_summary": "nothing to do",
+                }
+            ]
+        ),
+        control=RuntimeControl(),
+    )
+    runtime.start("do nothing", success_criteria=["file exists: README"])
+    assert runtime.run().status == "complete"
+    with pytest.raises(NothingToMerge, match="nothing to merge"):
+        runtime.merge_completed_run()
+    assert runtime.state is not None and runtime.state.merge is None

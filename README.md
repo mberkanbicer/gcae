@@ -37,6 +37,12 @@ gcae list
 gcae inspect <run-id>
 ```
 
+When a run completes, GCAE merges the verified branch into your current branch so the work is
+visible in your checkout (`[runtime] auto_merge`, default on). The merge is recorded, so
+`gcae undo <repo> <run-id>` puts your branch back; `--no-merge` keeps the branch separate for a
+manual `gcae merge`. A run that cannot be merged (dirty checkout, moved branch, no changes) says so
+and leaves the branch intact.
+
 GCAE prepares the repository itself: if it has no commits yet, or the working tree has
 uncommitted changes, GCAE creates the base commit the run needs (`.gitignore` respected, bounded to
 2000 files / 50 MB, reported in the log and timeline) instead of refusing to start. File contents

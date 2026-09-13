@@ -7,6 +7,7 @@ options. `config.example.toml` is the copy-ready template.
 [runtime]
 state_dir = "~/.local/state/gcae"   # memory.db, runs/, worktrees/
 worktree_dir = "~/.local/state/gcae/worktrees"  # optional override
+| `auto_merge` | `true` | Merge the verified run branch into the source branch on completion (`--no-merge` overrides) |
 | `auto_bootstrap` | `true` | Create the base commit a run needs when the repository has none or is dirty; `false` restores refusal |
 | `json_mode` | `true` | Send `response_format=json_object`; disable for reasoning models that deliberate until the output budget is gone |
 max_steps = 20                      # outer loop bound per run

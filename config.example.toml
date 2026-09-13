@@ -4,6 +4,9 @@ worktree_dir = "~/.local/state/gcae/worktrees"
 # Create the base commit a run needs (unborn HEAD, dirty tree) instead of refusing.
 # Never touches file contents; bounded to 2000 files / 50 MB and reported.
 auto_bootstrap = true
+# Merge the verified branch into the current branch when a run completes, so the work
+# is visible in your checkout. Recorded in state.json; `gcae undo` reverses it.
+auto_merge = true
 max_steps = 20
 command_timeout = 30
 max_tool_calls_per_step = 8

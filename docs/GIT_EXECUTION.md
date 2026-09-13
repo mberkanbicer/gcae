@@ -30,10 +30,13 @@ with a non-empty worktree creates the final `gcae: verified final state` checkpo
 `accepted_commit` always equals the verified tree of a completed run. Resume verifies that the
 persisted worktree is registered with the source repository before resetting it.
 
-GCAE never merges on its own. After a successful run the CLI asks the user whether to merge the
-run branch; `--merge` answers yes without prompting and `--no-merge` disables the question. The
-same merge is available later as `gcae merge <repository> <run-id>`, which requires the run to be
-complete and the run branch to still point at the verified commit. The merge requires a clean
+A completed run is merged into the source branch so the work is visible in the checkout.
+`[runtime] auto_merge` (default `true`) controls this; `--merge` forces it, `--no-merge` disables it,
+and with `auto_merge = false` an interactive CLI asks. The dashboard merges off the UI thread and
+offers `M` when the run is complete and unmerged. The same merge is available later as
+`gcae merge <repository> <run-id>`. Every path applies the same guards: the run must be complete, not
+already merged, and its branch must still point at the verified commit; the source repository must
+be clean. A run that produced no changes reports "nothing to merge" instead of failing. The merge requires a clean
 source repository, prefers `--ff-only`, falls back to `--no-ff`, and aborts cleanly on conflicts.
 The pre-merge and merge commits are recorded in `state.json`, and `gcae undo <repository> <run-id>`
 resets the source branch back to the recorded pre-merge commit, refusing when the repository is

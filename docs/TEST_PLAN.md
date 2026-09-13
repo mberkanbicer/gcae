@@ -7,7 +7,8 @@ traversal, deterministic validation, deterministic and LLM evaluators, evaluator
 promotion, runtime lifecycle logging, safeguards, controller prompt contract, HTTP
 headers/generation forwarding, config loading, provider and evaluator kind resolution, resume
 contracts, fail-closed final verification, premature-completion blocking, final checkpointing of
-verified speculative changes, and a mandatory end-to-end bad-then-good rollback trajectory.
+verified speculative changes, merge confirmation and reversible merge undo, and a mandatory
+end-to-end bad-then-good rollback trajectory.
 
 The integration test asserts that the source worktree is untouched, the rejected implementation is
 gone, the accepted commit never changed while the rejected step was evaluated, the failure lesson

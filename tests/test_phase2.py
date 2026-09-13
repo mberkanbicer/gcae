@@ -67,3 +67,42 @@ def test_generated_artifacts_are_cleaned_only_in_worktree(tmp_path: Path) -> Non
     repo.clean_generated_artifacts()
     assert not cache.exists()
     repo.remove_worktree()
+
+
+def test_merge_branch_is_reversible(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    init_repo(source)
+    repo = GitRepository(source, tmp_path / "runtime")
+    worktree, branch, base = repo.create_isolated_worktree("merge")
+    (worktree / "feature.txt").write_text("feature\n")
+    repo.checkpoint("feature")
+    repo.remove_worktree()
+    pre, merged = repo.merge_branch(branch)
+    assert pre == base
+    assert merged != base
+    assert (source / "feature.txt").read_text() == "feature\n"
+    repo.undo_merge(pre, merged)
+    assert not (source / "feature.txt").exists()
+    assert repo.source_commit() == base
+
+
+def test_merge_and_undo_guards(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    init_repo(source)
+    repo = GitRepository(source, tmp_path / "runtime")
+    worktree, branch, _ = repo.create_isolated_worktree("merge")
+    (worktree / "feature.txt").write_text("feature\n")
+    repo.checkpoint("feature")
+    repo.remove_worktree()
+    (source / "dirty.txt").write_text("dirty\n")
+    with pytest.raises(GitError):
+        repo.merge_branch(branch)
+    (source / "dirty.txt").unlink()
+    pre, merged = repo.merge_branch(branch)
+    (source / "later.txt").write_text("later\n")
+    subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(source), "commit", "-qm", "later"], check=True)
+    with pytest.raises(GitError):
+        repo.undo_merge(pre, merged)

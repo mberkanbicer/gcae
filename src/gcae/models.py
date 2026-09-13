@@ -156,6 +156,15 @@ class VerificationReport(BaseModel):
     details: list[str] = Field(default_factory=list)
 
 
+class MergeRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    branch: str
+    target_branch: str
+    pre_merge_commit: str
+    merge_commit: str
+    merged_at: datetime = Field(default_factory=now_utc)
+
+
 class Event(BaseModel):
     model_config = ConfigDict(extra="forbid")
     timestamp: datetime = Field(default_factory=now_utc)
@@ -188,5 +197,6 @@ class AgentState(BaseModel):
     latest_observations: list[str] = Field(default_factory=list)
     latest_validation: ValidationResult | None = None
     last_verification: VerificationReport | None = None
+    merge: MergeRecord | None = None
     created_at: datetime = Field(default_factory=now_utc)
     updated_at: datetime = Field(default_factory=now_utc)

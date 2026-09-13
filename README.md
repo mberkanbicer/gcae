@@ -37,7 +37,19 @@ Resume an interrupted run (waiting for user input or interrupted mid-step):
 
 Each run prints the final `AgentState` as JSON on stdout and a short summary on stderr. The
 verified branch `gcae/<run-id>` and its worktree are left in place for inspection; the runtime
-never merges them into the source branch.
+never merges them on its own.
+
+After a successful run, the CLI asks `merge gcae/<run-id> into the current branch? [y/N]` when
+stdin is interactive. Use `--merge` to merge without asking or `--no-merge` to never merge. The
+merge is recorded in `state.json` and is reversible:
+
+```bash
+.venv/bin/python -m gcae undo /path/to/repository <run-id> --runtime-dir ~/.local/state/gcae
+```
+
+A merge only happens when the source repository is clean; `ff-only` is preferred, otherwise a
+no-ff merge is attempted and aborted cleanly on conflicts. `undo` resets the source branch to the
+recorded pre-merge commit and refuses if the repository is dirty or HEAD has moved since the merge.
 
 ## Provider examples
 

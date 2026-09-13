@@ -65,6 +65,57 @@ def test_evaluator_kind_resolution() -> None:
         _evaluator(Config(evaluator=EvaluatorConfig(kind="bogus")), provider)
 
 
+def test_cli_merge_asks_and_undo_reverses(tmp_path, capsys, monkeypatch) -> None:
+    import subprocess
+    import sys
+
+    from gcae.cli import _maybe_merge, _undo
+    from gcae.git import GitRepository
+    from gcae.models import AgentState
+    from gcae.persistence import StateStore
+
+    source = tmp_path / "source"
+    source.mkdir()
+    subprocess.run(["git", "init", "-q", str(source)], check=True)
+    subprocess.run(["git", "-C", str(source), "config", "user.email", "t@e.f"], check=True)
+    subprocess.run(["git", "-C", str(source), "config", "user.name", "T"], check=True)
+    (source / "base.txt").write_text("base\n")
+    subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(source), "commit", "-qm", "base"], check=True)
+
+    runtime_dir = tmp_path / "runtime"
+    repo = GitRepository(source, runtime_dir)
+    worktree, branch, base = repo.create_isolated_worktree("run-merge")
+    (worktree / "feature.txt").write_text("feature\n")
+    accepted = repo.checkpoint("feature")
+    state = AgentState(
+        run_id="run-merge",
+        source_repo=str(source),
+        worktree=str(worktree),
+        branch=branch,
+        objective="o",
+        original_request="o",
+        accepted_commit=accepted,
+    )
+    StateStore(runtime_dir / "runs" / "run-merge" / "state.json").save(state)
+
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    _maybe_merge(state, runtime_dir, merge_flag=False, no_merge_flag=False)
+    assert "ready" in capsys.readouterr().err
+    assert not (source / "feature.txt").exists()
+
+    _maybe_merge(state, runtime_dir, merge_flag=True, no_merge_flag=False)
+    assert (source / "feature.txt").exists()
+    assert state.merge is not None
+    capsys.readouterr()
+
+    _undo(source, "run-merge", runtime_dir)
+    assert not (source / "feature.txt").exists()
+    assert repo.source_commit() == base
+    reloaded = StateStore(runtime_dir / "runs" / "run-merge" / "state.json").load()
+    assert reloaded.merge is None
+
+
 def test_resume_restores_trusted_state(tmp_path: Path) -> None:
     import subprocess
 

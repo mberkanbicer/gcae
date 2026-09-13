@@ -32,4 +32,5 @@ results, and diff snapshots. The runtime removes generated caches and ignored fi
 isolated worktree before validation and final verification.
 
 `python -m gcae` prints the final `AgentState` as JSON on stdout and a short human-readable summary
-on stderr.
+on stderr. After a verified run the CLI asks whether to merge the run branch; a confirmed merge is
+recorded with its pre-merge commit and can be reversed with `gcae undo`.

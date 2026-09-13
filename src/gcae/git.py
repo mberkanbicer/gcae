@@ -73,6 +73,38 @@ class GitRepository:
             raise GitError("isolated worktree has not been created")
         return self.worktree
 
+    def current_branch(self) -> str:
+        return self._run("rev-parse", "--abbrev-ref", "HEAD")
+
+    def source_commit(self) -> str:
+        return self._run("rev-parse", "HEAD")
+
+    def merge_branch(self, branch: str) -> tuple[str, str]:
+        """Merge branch into the source repository; returns (pre_merge, merge) commits."""
+        if self._run("status", "--porcelain", check=False):
+            raise GitError("source repository has uncommitted changes; refusing to merge")
+        pre = self.source_commit()
+        try:
+            self._run("merge", "--ff-only", branch)
+        except GitError:
+            try:
+                self._run("merge", "--no-ff", "--no-edit", branch)
+            except GitError as exc:
+                self._run("merge", "--abort", check=False)
+                raise GitError(f"cannot merge {branch}: {exc}") from exc
+        merged = self.source_commit()
+        if merged == pre:
+            raise GitError(f"branch {branch} is already merged")
+        return pre, merged
+
+    def undo_merge(self, pre_merge_commit: str, merge_commit: str) -> None:
+        """Reset the source branch to the recorded pre-merge commit."""
+        if self._run("status", "--porcelain", check=False):
+            raise GitError("source repository has uncommitted changes; refusing to undo merge")
+        if self.source_commit() != merge_commit:
+            raise GitError("source HEAD moved since the merge; refusing to undo")
+        self._run("reset", "--hard", pre_merge_commit)
+
     def assert_registered_worktree(self) -> None:
         worktree = self._require_worktree().resolve()
         listing = self._run("worktree", "list", "--porcelain", cwd=self.source)

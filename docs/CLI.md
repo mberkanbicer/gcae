@@ -72,6 +72,10 @@ merges on completion, merges the accepted checkpoints of a failed run, commits a
 the base the merge builds on, and removes its own worktree afterwards (keeping the branch so
 `gcae undo` still works).
 
+A conflicting merge is resolved by the agent: GCAE merges your branch into the run branch inside
+the run's own worktree, hands the conflicting files to the loop as a step, re-verifies, and merges
+again once the conflict is gone. Conflict markers never reach your checkout.
+
 Every merge path applies the same guards — the run must be complete, not already merged, and its
 branch must still point at the verified commit; the source repository must be clean. A run with no
 file changes reports `nothing to merge` rather than failing.

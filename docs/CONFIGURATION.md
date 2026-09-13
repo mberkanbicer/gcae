@@ -7,6 +7,7 @@ options. `config.example.toml` is the copy-ready template.
 [runtime]
 state_dir = "~/.local/state/gcae"   # memory.db, runs/, worktrees/
 worktree_dir = "~/.local/state/gcae/worktrees"  # optional override
+| `resolve_merge_conflicts` | `true` | Hand a conflicting merge to the agent: resolve it in the run worktree, re-verify, retry the merge |
 | `merge_accepted_on_failure` | `true` | Merge the checkpoints a failed/stopped run accepted (labelled unverified) |
 | `cleanup_after_merge` | `true` | Remove GCAE's worktree once its branch is merged; the branch is kept so `gcae undo` still works |
 | `auto_merge` | `true` | Merge the verified run branch into the source branch on completion (`--no-merge` overrides) |

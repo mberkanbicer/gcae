@@ -20,7 +20,9 @@ and runs. It runs headless or with an interactive Textual TUI.
    the run: GCAE creates the base commit it needs (`auto_bootstrap`, bounded to 2000 files / 50 MB,
    `.gitignore` respected, reported as a notice), while a mid-merge/rebase repository and a
    non-repository directory are refused.
-3. **The loop owns every git operation.** Bootstrap (initial commit, identity fallback),
+3. **The loop owns every git operation.** Conflicts included: a conflicting merge is brought into
+   the run's own worktree, resolved by the agent as a normal semantic step, re-verified and
+   retried; markers are never committed or merged into the source branch. Bootstrap (initial commit, identity fallback),
    branches, worktrees, checkpoints, merges and cleanup are performed by the runtime without
    asking the user to run git. The only git a user may still choose to run is inspecting history;
    no workflow may require it. A repository GCAE cannot safely touch (mid-merge/rebase) is

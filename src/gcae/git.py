@@ -23,6 +23,14 @@ class NothingToMerge(GitError):
     """A completed run produced no file changes, so there is no merge to perform."""
 
 
+class MergeConflict(GitError):
+    """The merge stopped on conflicting edits; ``files`` lists the unresolved paths."""
+
+    def __init__(self, message: str, files: list[str] | None = None) -> None:
+        super().__init__(message)
+        self.files = list(files or [])
+
+
 class GitRepository:
     def __init__(
         self,
@@ -280,6 +288,12 @@ class GitRepository:
     def source_commit(self) -> str:
         return self._run("rev-parse", "HEAD")
 
+    def unresolved_paths(self, cwd: Path | None = None) -> list[str]:
+        output = self._run(
+            "diff", "--name-only", "--diff-filter=U", cwd=cwd or self.source, check=False
+        )
+        return [line for line in output.splitlines() if line.strip()]
+
     def merge_branch(self, branch: str) -> tuple[str, str]:
         """Merge branch into the source repository; returns (pre_merge, merge) commits."""
         if self._run("status", "--porcelain", check=False):
@@ -291,12 +305,68 @@ class GitRepository:
             try:
                 self._run("merge", "--no-ff", "--no-edit", branch)
             except GitError as exc:
+                files = self.unresolved_paths()
                 self._run("merge", "--abort", check=False)
+                if files:
+                    raise MergeConflict(
+                        f"merging {branch} conflicts in {len(files)} file(s)", files
+                    ) from exc
                 raise GitError(f"cannot merge {branch}: {exc}") from exc
         merged = self.source_commit()
         if merged == pre:
             raise GitError(f"branch {branch} is already merged")
         return pre, merged
+
+    def stage_all(self) -> None:
+        """Stage the worktree (also clears git's unmerged index entries after a fix)."""
+        self._run("add", "-A", cwd=self._require_worktree())
+
+    def conflict_marker_files(self, limit: int = 1_000_000) -> list[str]:
+        """Worktree files that still contain conflict markers.
+
+        Content is the truth here: staging a file resolves the *index*, not the markers,
+        and the model is not allowed to run git itself.
+        """
+        candidates: set[str] = set(self.unresolved_paths(self.worktree))
+        candidates.update(path for _, path in self.status_entries())
+        worktree = self._require_worktree()
+        marked: list[str] = []
+        for relative in sorted(candidates):
+            target = worktree / relative
+            try:
+                if not target.is_file() or target.stat().st_size > limit:
+                    continue
+                content = target.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            if "\n<<<<<<< " in f"\n{content}" and "\n>>>>>>> " in f"\n{content}":
+                marked.append(relative)
+        return marked
+
+    def merge_into_worktree(self, target: str) -> list[str]:
+        """Merge ``target`` into the run branch *inside its worktree*.
+
+        Returns the conflicting paths, leaving the merge in progress so the agent can
+        resolve the markers; an empty list means the branch now contains ``target``.
+        """
+        worktree = self._require_worktree()
+        if self.status():
+            raise GitError("worktree has uncommitted changes; cannot start a merge")
+        try:
+            self._run("merge", "--no-ff", "--no-edit", target, cwd=worktree)
+        except GitError:
+            return self.unresolved_paths(worktree)
+        return []
+
+    def worktree_merge_in_progress(self) -> bool:
+        worktree = self._require_worktree()
+        return bool(
+            self._run("rev-parse", "--verify", "--quiet", "MERGE_HEAD", cwd=worktree, check=False)
+        )
+
+    def abort_worktree_merge(self) -> None:
+        worktree = self._require_worktree()
+        self._run("merge", "--abort", cwd=worktree, check=False)
 
     def undo_merge(self, pre_merge_commit: str, merge_commit: str) -> None:
         """Reset the source branch to the recorded pre-merge commit."""
@@ -471,14 +541,22 @@ class GitRepository:
     def checkpoint(self, message: str) -> str:
         worktree = self._require_worktree()
         self._run("add", "-A", cwd=worktree)
-        if not self.status():
+        merging = self.worktree_merge_in_progress()
+        if not self.status() and not merging:
             raise GitError("cannot create checkpoint with no changes")
         args = [*self._identity_args(), "commit", "-m", message]
+        if merging:
+            # even when the resolved tree equals one side, the merge commit must record
+            # both parents or the merge stays in progress forever
+            args.append("--allow-empty")
         self._run(*args, cwd=worktree)
         return self.current_commit()
 
     def rollback(self, accepted_commit: str) -> None:
         worktree = self._require_worktree()
+        if self._run("rev-parse", "--verify", "--quiet", "MERGE_HEAD", cwd=worktree, check=False):
+            # reset alone leaves MERGE_HEAD behind, which would make the next commit a merge
+            self._run("merge", "--abort", cwd=worktree, check=False)
         self._run("reset", "--hard", accepted_commit, cwd=worktree)
         self._run("clean", "-fdx", cwd=worktree)
         if self.current_commit() != accepted_commit or self.status():

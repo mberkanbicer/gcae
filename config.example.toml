@@ -9,6 +9,9 @@ auto_bootstrap = true
 auto_merge = true
 # Also hand over the checkpoints a failed or stopped run accepted (marked unverified).
 merge_accepted_on_failure = true
+# A conflicting merge is resolved by the agent inside the run worktree, then re-verified
+# and retried. Conflict markers are never committed or merged.
+resolve_merge_conflicts = true
 # Remove GCAE's worktree once its branch is merged. The branch is kept, so `gcae undo`
 # still reverses the merge and the work can be merged again.
 cleanup_after_merge = true

@@ -72,10 +72,14 @@ class DeterministicValidator:
             f"command {index + 1}: {'passed' if result.success else 'failed'}"
             for index, result in enumerate(command_results)
         ]
+        unresolved = self.repo.conflict_marker_files()
+        if unresolved:
+            warnings.append(f"unresolved merge conflicts: {', '.join(unresolved)}")
         passed = (
             diff_check_passed
             and all(result.success for result in command_results)
             and not scope_violations
+            and not unresolved
         )
         return ValidationResult(
             passed=passed,

@@ -47,6 +47,9 @@ Differences from a plain log viewer:
 - **Curated events.** Routine tool successes are not timeline entries; the full stream is one
   keystroke away (`l`). Tool failures, rollbacks, replans, checkpoints, validation results, user
   instructions and terminal states always appear.
+- **Conflicts are handled too.** A conflicting merge appears in the timeline, the agent resolves
+  the markers in its own worktree, the run re-verifies and the merge is retried — or the branch is
+  left untouched and the banner says why.
 - **The loop owns git.** Base commit, identity, branch, worktree, merge and cleanup happen
   without the user running git; the dashboard reports each of them in the timeline.
 - **You always know where the files are.** The end-of-run banner lists the produced documents and

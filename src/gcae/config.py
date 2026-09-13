@@ -61,6 +61,9 @@ class RuntimeConfig(BaseModel):
     # Merge the verified run branch into the source branch when a run completes, so the
     # work is visible in the user's checkout. Recorded in state.json; `gcae undo` reverses.
     auto_merge: bool = True
+    # A conflicting merge is handed to the agent, which resolves it in the run worktree,
+    # re-verifies, and the merge is retried.
+    resolve_merge_conflicts: bool = True
     # Rescue checkpoints from a run that failed or was stopped without final verification.
     merge_accepted_on_failure: bool = True
     # Remove GCAE's own worktree once its branch is merged (the branch is kept, so

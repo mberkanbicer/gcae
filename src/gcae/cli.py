@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 
 from .config import Config, ProviderConfig, load_config
 from .evaluator import DeterministicEvaluator, Evaluator, LLMEvaluator
-from .git import GitError, GitRepository, NothingToMerge
+from .git import GitError, GitRepository, MergeConflict, NothingToMerge
 from .http_provider import OpenAICompatibleProvider
 from .models import AgentState, MergeRecord
 from .persistence import StateStore
@@ -359,6 +359,8 @@ def _maybe_merge(
                 f"gcae: removed the worktree of the empty run {result.worktree}",
                 file=sys.stderr,
             )
+    except MergeConflict:
+        raise
     except GitError as exc:
         print(f"gcae: merge skipped: {exc}", file=sys.stderr)
 
@@ -445,6 +447,9 @@ def _build_runtime(args: argparse.Namespace, config: Config, runtime_dir: Path) 
         auto_bootstrap=config.runtime.auto_bootstrap
         and not getattr(args, "no_auto_bootstrap", False),
         auto_merge=config.runtime.auto_merge,
+        merge_accepted_on_failure=config.runtime.merge_accepted_on_failure,
+        cleanup_after_merge=config.runtime.cleanup_after_merge,
+        resolve_merge_conflicts=config.runtime.resolve_merge_conflicts,
     )
 
 
@@ -533,18 +538,45 @@ def main(argv: list[str] | None = None) -> None:
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"gcae: error: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
+    merge_options = {
+        "auto_merge": config.runtime.auto_merge,
+        "merge_accepted": config.runtime.merge_accepted_on_failure,
+        "cleanup_after_merge": config.runtime.cleanup_after_merge,
+    }
     if args.command in {"run", "resume"} and (
         result.status == "complete" or result.accepted_steps > 0
     ):
-        _maybe_merge(
-            result,
-            runtime_dir,
-            getattr(args, "merge", False),
-            getattr(args, "no_merge", False),
-            auto_merge=config.runtime.auto_merge,
-            merge_accepted=config.runtime.merge_accepted_on_failure,
-            cleanup_after_merge=config.runtime.cleanup_after_merge,
-        )
+        try:
+            _maybe_merge(
+                result,
+                runtime_dir,
+                getattr(args, "merge", False),
+                getattr(args, "no_merge", False),
+                **merge_options,
+            )
+        except MergeConflict as conflict:
+            print(
+                f"gcae: merge conflicts in {', '.join(conflict.files)}; "
+                "handing them to the agent to resolve and re-verify",
+                file=sys.stderr,
+            )
+            handled = runtime.resolve_merge_conflicts()
+            if handled:
+                result = runtime.run()
+                try:
+                    _maybe_merge(
+                        result,
+                        runtime_dir,
+                        getattr(args, "merge", False),
+                        getattr(args, "no_merge", False),
+                        **merge_options,
+                    )
+                except MergeConflict as still:
+                    print(
+                        f"gcae: conflicts remain in {', '.join(still.files)}; "
+                        f"branch {result.branch} left intact for `gcae merge`",
+                        file=sys.stderr,
+                    )
     files: list[str] = []
     try:
         repo = GitRepository(result.source_repo, Path(runtime_dir).expanduser())

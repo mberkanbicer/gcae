@@ -189,6 +189,7 @@ class Runtime:
         auto_merge: bool = True,
         merge_accepted_on_failure: bool = True,
         cleanup_after_merge: bool = True,
+        resolve_merge_conflicts: bool = True,
     ) -> None:
         self.source_repo = Path(source_repo).resolve()
         self.runtime_dir = Path(runtime_dir).expanduser().resolve()
@@ -210,6 +211,8 @@ class Runtime:
         self.auto_merge = auto_merge
         self.merge_accepted_on_failure = merge_accepted_on_failure
         self.cleanup_after_merge = cleanup_after_merge
+        self.auto_resolve_conflicts = resolve_merge_conflicts
+        self._conflict_resolution = False
         self.validator_commands = list(validator_commands or [])
         self.max_steps = max_steps
         self.command_timeout = command_timeout
@@ -580,6 +583,9 @@ class Runtime:
         assert self.state is not None and self.repo is not None
         self.repo.clean_generated_artifacts()
         self.repo.clean_ignored_artifacts()
+        if self.repo.worktree_merge_in_progress():
+            # the agent edits conflicted files directly; staging is the runtime's job
+            self.repo.stage_all()
         self._transition(RunPhase.VALIDATE)
         validation = DeterministicValidator(
             self.repo,
@@ -634,7 +640,7 @@ class Runtime:
             self._persist()
             return False
         if evaluation.decision == "accept":
-            if validation.changed_files:
+            if validation.changed_files or self.repo.worktree_merge_in_progress():
                 self._transition(RunPhase.CHECKPOINT)
                 self.state.accepted_commit = self.repo.checkpoint(f"gcae: {plan.goal}")
                 logger.info(
@@ -677,6 +683,10 @@ class Runtime:
             return False
 
         self._remember("failure", evaluation.reason, immutable=True)
+        if self._conflict_resolution:
+            # the merge is in progress: rolling back would lose the conflict context
+            self._fail_conflict_resolution([plan.goal])
+            return True
         self._rollback(evaluation.reason)
         if self._replan(plan, evaluation.reason, failed=True):
             self._fail("execution stagnated")
@@ -724,6 +734,22 @@ class Runtime:
         assert self.state is not None and self.repo is not None
         self.repo.clean_generated_artifacts()
         self.repo.clean_ignored_artifacts()
+        if self.repo.worktree_merge_in_progress():
+            self.repo.stage_all()
+        unresolved = self.repo.conflict_marker_files()
+        if unresolved:
+            # never checkpoint conflict markers as if they were the verified result
+            details = f"unresolved merge conflicts: {', '.join(unresolved)}"
+            logger.warning("verification blocked: %s", details)
+            if self._conflict_resolution:
+                self._fail_conflict_resolution(unresolved)
+                return True
+            self._remember("failure", details)
+            self._rollback(details)
+            self.state.plan.extend(next_step(self.state, details))
+            self._transition(RunPhase.PLAN)
+            self._persist()
+            return False
         self._transition(RunPhase.VERIFY)
         self._event("verification_started", RunPhase.VERIFY)
         report = self.verifier.verify(self.state, diff=self.repo.diff())
@@ -966,6 +992,86 @@ class Runtime:
             )
         )
         self._emit_memory_counts()
+
+    def resolve_merge_conflicts(self) -> list[str]:
+        """Let the agent resolve a merge conflict inside its own worktree, then re-verify.
+
+        Returns the conflicting paths handed to the agent (empty when there was nothing to
+        resolve). The merge happens inside the run's worktree — never in the user's
+        checkout — so a failure is aborted and rolled back, leaving the branch as it was.
+        """
+        if self.state is None or self.repo is None:
+            raise RuntimeError("call start or resume before resolving conflicts")
+        if not self.auto_resolve_conflicts:
+            return []
+        state = self.state
+        if not state.branch or state.merge is not None:
+            return []
+        self.repo.ensure_worktree(state.branch, Path(state.worktree))
+        target = self.repo.current_branch()
+        files = self.repo.merge_into_worktree(target)
+        if not files:
+            # the branch already contains the target; the outer merge is a fast-forward now
+            return []
+        self._event(
+            "conflict_detected",
+            RunPhase.PLAN,
+            payload={"target": target, "files": files},
+        )
+        logger.warning("merge conflict in %s; handing it to the agent", ", ".join(files))
+        step = PlanStep(
+            id=f"step-{state.next_step_number}",
+            goal=f"resolve the merge conflict in {', '.join(files)}",
+            rationale=f"merging {target} into the run branch conflicts in those files",
+            expected_result=(
+                "conflict markers removed, both sides' intent preserved, "
+                "the original success criteria still pass"
+            ),
+            intended_scope=list(files),
+            validation_requirements=list(state.success_criteria),
+        )
+        state.next_step_number += 1
+        state.plan.append(step)
+        state.status = "running"
+        state.phase = RunPhase.PLAN
+        state.current_step_id = step.id
+        state.step_tool_calls = 0
+        self.repetition = RepetitionGuard(self.repetition_limit)
+        self._persist()
+        self._conflict_resolution = True
+        try:
+            self.run()
+        finally:
+            self._conflict_resolution = False
+        unfinished = state.status.startswith("failed: merge conflict")
+        if unfinished or self.repo.worktree_merge_in_progress():
+            # the agent did not finish: leave the branch exactly as it was
+            self._fail_conflict_resolution(files)
+            return []
+        self._event(
+            "conflict_resolved",
+            RunPhase.COMPLETE,
+            payload={"files": files, "commit": state.accepted_commit},
+        )
+        return files
+
+    def _fail_conflict_resolution(self, files: list[str]) -> None:
+        """Give up on a merge conflict: abort it and leave the branch exactly as it was."""
+        assert self.state is not None and self.repo is not None
+        state = self.state
+        if self.repo.worktree_merge_in_progress():
+            self.repo.abort_worktree_merge()
+        if state.accepted_commit:
+            try:
+                self.repo.rollback(state.accepted_commit)
+            except GitError:  # pragma: no cover - best effort cleanup
+                logger.exception("rollback after an unresolved conflict failed")
+        state.plan = [step for step in state.plan if not step.id.startswith("step-")]
+        state.status = "failed: merge conflict unresolved"
+        state.phase = RunPhase.FAILED
+        self._remember("failure", f"merge conflict unresolved in {', '.join(files)}")
+        self._event("conflict_unresolved", RunPhase.FAILED, payload={"files": files})
+        self._persist()
 
     def merge_completed_run(self, allow_unverified: bool = False) -> MergeRecord:
         """Merge the verified run branch into the source branch (recorded, reversible).

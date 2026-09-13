@@ -30,7 +30,8 @@ _ALLOWED: dict[RunPhase, set[RunPhase]] = {
     },
     RunPhase.ROLLBACK: {RunPhase.EXECUTE, RunPhase.PLAN, RunPhase.FAILED},
     RunPhase.VERIFY: {RunPhase.COMPLETE, RunPhase.CHECKPOINT, RunPhase.PLAN, RunPhase.FAILED},
-    RunPhase.COMPLETE: set(),
+    # a completed run may be reopened to resolve a merge conflict and re-verify
+    RunPhase.COMPLETE: {RunPhase.PLAN},
     RunPhase.FAILED: set(),
 }
 

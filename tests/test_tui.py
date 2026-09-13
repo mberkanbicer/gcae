@@ -1256,3 +1256,35 @@ def test_unmerged_banner_points_at_the_worktree_folder(tmp_path: Path) -> None:
             assert runtime.state is not None and str(runtime.state.worktree) in banner
 
     asyncio.run(scenario())
+
+
+def test_dashboard_hands_a_merge_conflict_to_the_agent(tmp_path: Path) -> None:
+    """Conflicts are the agent's job in the dashboard too, and the merge is retried."""
+    runtime = make_runtime(tmp_path)
+    app = GcaeApp(runtime, auto_run=False)
+    calls: list[str] = []
+
+    async def scenario() -> None:
+        async with app.run_test(size=(130, 40)):
+            assert runtime.state is not None
+            runtime.state.status = "complete"
+            app.agent_done = True
+            runtime.resolve_merge_conflicts = lambda: calls.append("resolved") or ["app.py"]  # type: ignore[method-assign]
+            runtime.run = lambda: calls.append("ran") or runtime.state  # type: ignore[method-assign]
+            runtime.merge_completed_run = lambda allow_unverified=False: calls.append("merged")  # type: ignore[method-assign,assignment]
+
+            app._on_conflict(["app.py"])
+            for _ in range(60):
+                if "merged" in calls:
+                    break
+                await pilot_pause(app)
+            assert calls == ["resolved", "ran", "merged"]
+            texts = [row.text for row in app.ui.timeline]
+            assert any("merge conflicts" in text for text in texts)
+
+    async def pilot_pause(app: GcaeApp) -> None:
+        import asyncio as _asyncio
+
+        await _asyncio.sleep(0.05)
+
+    asyncio.run(scenario())

@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from gcae.config import Config, EvaluatorConfig, ProviderConfig, load_config
+from gcae.git import MergeConflict
 
 
 def test_config_loading(tmp_path: Path) -> None:
@@ -620,3 +621,160 @@ def test_no_change_run_cleans_up_and_says_so(tmp_path: Path, capsys) -> None:
     summary = _summary(state, [])
     assert "no file changes; nothing to merge" in summary
     assert "documents: none — the run produced no files" in summary
+
+
+def _conflicting_repo(tmp_path: Path) -> tuple[Path, str, str]:
+    """A repo where the run branch and the checked-out branch edit the same line."""
+    import subprocess
+
+    from gcae.providers import FakeProvider
+    from gcae.runtime import Runtime, RuntimeControl
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    (repo / "app.py").write_text("value = 1\n")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.name=T", "-c", "user.email=t@e.f",
+         "commit", "-qm", "base"],
+        check=True,
+    )
+
+    runtime = Runtime(
+        repo,
+        tmp_path / "state",
+        provider=FakeProvider(
+            [
+                {
+                    "action": "execute_tool",
+                    "semantic_goal": "change",
+                    "reason_summary": "set the value",
+                    "tool": {
+                        "name": "write_file",
+                        "arguments": {"path": "app.py", "content": "value = 2\n"},
+                    },
+                },
+                {
+                    "action": "complete_semantic_step",
+                    "semantic_goal": "change",
+                    "reason_summary": "done",
+                },
+            ]
+        ),
+        control=RuntimeControl(),
+        auto_merge=False,
+    )
+    runtime.start("set the value", success_criteria=["command succeeds: test -f app.py"])
+    state = runtime.run()
+    assert state.status == "complete"
+
+    # the user's branch moves on the same line -> a real conflict
+    (repo / "app.py").write_text("value = 99\n")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.name=T", "-c", "user.email=t@e.f",
+         "commit", "-qm", "user edit"],
+        check=True,
+    )
+    return repo, state.run_id, runtime.state.worktree
+
+
+def test_conflicting_merge_is_resolved_by_the_agent(tmp_path: Path) -> None:
+    """The only git process that needed judgement now goes through the loop."""
+    import subprocess
+
+    from gcae.providers import FakeProvider
+    from gcae.runtime import Runtime, RuntimeControl
+
+    repo, run_id, worktree = _conflicting_repo(tmp_path)
+
+    # the merge really conflicts, and the user's checkout is left untouched and clean
+    runtime = Runtime(repo, tmp_path / "state", provider=FakeProvider([]), control=RuntimeControl())
+    runtime.resume(run_id)
+    with pytest.raises(MergeConflict) as conflict:
+        runtime.merge_completed_run()
+    assert conflict.value.files == ["app.py"]
+    assert subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain"], capture_output=True, text=True
+    ).stdout.strip() == ""
+    assert (repo / "app.py").read_text() == "value = 99\n"  # nothing of the run landed yet
+
+    # the agent resolves the conflict inside its own worktree and re-verifies
+    resolver = Runtime(
+        repo,
+        tmp_path / "state",
+        provider=FakeProvider(
+            [
+                {
+                    "action": "execute_tool",
+                    "semantic_goal": "resolve",
+                    "reason_summary": "keep the run's value",
+                    "tool": {
+                        "name": "write_file",
+                        "arguments": {"path": "app.py", "content": "value = 2\n"},
+                    },
+                },
+                {
+                    "action": "complete_semantic_step",
+                    "semantic_goal": "resolve",
+                    "reason_summary": "resolved",
+                },
+            ]
+        ),
+        control=RuntimeControl(),
+        auto_merge=False,
+    )
+    resolver.resume(run_id)
+    assert resolver.resolve_merge_conflicts() == ["app.py"]
+    assert resolver.state is not None and resolver.state.status == "complete"
+    assert Path(worktree).exists() and not resolver.repo.worktree_merge_in_progress()
+
+    # now the merge is a fast-forward and the resolved content reaches the checkout
+    resolver.merge_completed_run()
+    assert (repo / "app.py").read_text() == "value = 2\n"
+    log = subprocess.run(
+        ["git", "-C", str(repo), "log", "--oneline"], capture_output=True, text=True
+    ).stdout
+    assert "gcae:" in log
+
+
+def test_unresolved_conflict_leaves_the_branch_and_checkout_intact(tmp_path: Path) -> None:
+    """An agent that fails to resolve must not deliver conflict markers."""
+    import subprocess
+
+    from gcae.providers import FakeProvider
+    from gcae.runtime import Runtime, RuntimeControl
+
+    repo, run_id, worktree = _conflicting_repo(tmp_path)
+    resolver = Runtime(
+        repo,
+        tmp_path / "state",
+        provider=FakeProvider(
+            [
+                {
+                    "action": "finish_candidate",
+                    "semantic_goal": "give up",
+                    "reason_summary": "cannot resolve",
+                }
+            ]
+        ),
+        control=RuntimeControl(),
+        auto_merge=False,
+        max_steps=3,
+    )
+    resolver.resume(run_id)
+    before = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True
+    ).stdout.strip()
+    assert resolver.resolve_merge_conflicts() == []
+    # no merge commit was created, no markers committed, no merge left in progress
+    assert subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True
+    ).stdout.strip() == before
+    assert (repo / "app.py").read_text() == "value = 99\n"
+    assert "&lt;&lt;&lt;&lt;&lt;&lt;&lt;" not in (repo / "app.py").read_text()
+    assert not resolver.repo.worktree_merge_in_progress()
+    assert subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain"], capture_output=True, text=True
+    ).stdout.strip() == ""

@@ -18,7 +18,7 @@ from textual.css.query import NoMatches
 from textual.widgets import Static
 from textual.worker import Worker
 
-from ..git import GitError, NothingToMerge
+from ..git import GitError, MergeConflict, NothingToMerge
 from ..models import Event
 from ..runtime import Runtime, RuntimeControl, cleanup_idle_worktree
 from . import formatters
@@ -457,10 +457,32 @@ class GcaeApp(App[None]):
         except NothingToMerge as exc:
             self._call_ui(self._on_nothing_to_merge, str(exc))
             return
+        except MergeConflict as conflict:
+            self._call_ui(self._on_conflict, conflict.files)
+            return
         except (GitError, RuntimeError) as exc:
             self._call_ui(self._on_merge_failed, str(exc))
             return
         self._call_ui(self._on_merged, record)
+
+    def _on_conflict(self, files: list[str]) -> None:
+        """Conflicts are the agent's job: resolve in its own worktree, then merge again."""
+        listing = ", ".join(files)
+        self.ui.add_note("!", f"merge conflicts · resolving with the agent · {listing}", "warning")
+        self._refresh_panels({"banner", "timeline"})
+        self.run_worker(
+            self._resolve_conflicts_task, thread=True, name="resolve", exit_on_error=False
+        )
+
+    def _resolve_conflicts_task(self) -> None:
+        try:
+            handled = self.runtime.resolve_merge_conflicts()
+            if handled:
+                self.runtime.run()
+        except (GitError, RuntimeError) as exc:  # pragma: no cover - reported in the timeline
+            self._call_ui(self._on_merge_failed, f"conflict resolution failed: {exc}")
+            return
+        self._call_ui(self._merge_task)
 
     def _on_nothing_to_merge(self, reason: str) -> None:
         self.ui.add_note("i", reason, "muted")

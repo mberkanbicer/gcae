@@ -45,7 +45,27 @@ The loop owns it; the user never has to run git:
 | merge of a failed run's accepted checkpoints | automatic (`merge_accepted_on_failure`), labelled unverified |
 | worktree after a merge | removed by GCAE; the branch is kept so `gcae undo` and re-merging still work |
 | worktree deleted by hand | pruned/recreated on the next run or resume |
+| conflicting merge | the agent resolves it inside the run worktree (`resolve_merge_conflicts`), the run re-verifies, then the merge is retried |
 | mid-merge / rebase / cherry-pick state | **refused** — that state belongs to the user |
+
+### Conflict resolution
+
+A conflicting merge is not a dead end and never touches the user's checkout:
+
+1. the runtime detects the conflict (`MergeConflict` names the files) and aborts the source-side
+   merge, leaving the checkout untouched;
+2. it merges the target into the run branch **inside the run's worktree**, so the conflict markers
+   appear where the agent works and nothing of the user's is modified;
+3. the agent gets an ordinary semantic step (`resolve the merge conflict in <files>`, scope = those
+   files), fixes them with its normal tools, and the runtime stages the result (the model never runs
+   git);
+4. acceptance creates the merge commit — with `--allow-empty` when the resolved tree matches one
+   side, because the commit's two parents are what record the merge — and the run is verified again;
+5. the outer merge then fast-forwards, and `gcae undo` still reverses it.
+
+If the agent fails, the in-worktree merge is aborted, the branch is left exactly as it was, and the
+run is marked `failed: merge conflict unresolved` — conflict markers are never committed or merged.
+Set `[runtime] resolve_merge_conflicts = false` to skip step 2–5 and keep the manual path.
 
 A completed run is merged into the source branch so the work is visible in the checkout.
 `[runtime] auto_merge` (default `true`) controls this; `--merge` forces it, `--no-merge` disables it,

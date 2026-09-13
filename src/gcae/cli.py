@@ -167,7 +167,18 @@ def _planner(config: Config, provider: Provider) -> Planner | LLMPlanner:
     raise ValueError(f"unsupported planner kind: {config.planner.kind!r}")
 
 
-def _summary(state: AgentState) -> str:
+def _run_files(state: AgentState, repo: GitRepository) -> list[str]:
+    """Files this run produced, computed against the right base even after a merge."""
+    base = state.merge.pre_merge_commit if state.merge is not None else repo.current_branch()
+    try:
+        return repo.files_between(base, state.branch)
+    except GitError:
+        validation = state.latest_validation
+        return list(validation.changed_files) if validation is not None else []
+
+
+def _summary(state: AgentState, files: list[str] | None = None) -> str:
+    files = files or []
     verification = state.last_verification
     if verification is None:
         criteria = "no verification"
@@ -180,6 +191,16 @@ def _summary(state: AgentState) -> str:
         branch = (
             f"branch: {state.branch} merged into {state.merge.target_branch} "
             f"(undo: gcae undo {state.source_repo} {state.run_id})"
+        )
+    if files:
+        listing = ", ".join(files[:5]) + (f" (+{len(files) - 5} more)" if len(files) > 5 else "")
+        branch = f"{branch}\nfiles: {listing}"
+    if state.merge is not None:
+        branch = f"{branch}\ndocuments: {state.source_repo} (in your working tree now)"
+    else:
+        branch = (
+            f"{branch}\ndocuments: {state.worktree} (worktree; nothing is in your checkout "
+            "until it is merged)"
         )
     return (
         f"run {state.run_id}: {state.status}\n"
@@ -467,8 +488,15 @@ def main(argv: list[str] | None = None) -> None:
             getattr(args, "no_merge", False),
             auto_merge=config.runtime.auto_merge,
         )
+    files: list[str] = []
+    try:
+        repo = GitRepository(result.source_repo, Path(runtime_dir).expanduser())
+        files = _run_files(result, repo)
+    except (GitError, OSError):
+        validation = result.latest_validation
+        files = list(validation.changed_files) if validation is not None else []
     print(json.dumps(result.model_dump(mode="json"), indent=2, sort_keys=True))
-    print(_summary(result), file=sys.stderr)
+    print(_summary(result, files), file=sys.stderr)
     if result.status != "complete":
         # a scripted caller must be able to tell an unfinished run from a finished one
         raise SystemExit(1)

@@ -1163,3 +1163,39 @@ def test_failed_run_offers_to_rescue_accepted_work(tmp_path: Path) -> None:
             assert "undo: gcae undo" in banner
 
     asyncio.run(scenario())
+
+
+def test_completion_banner_shows_the_documents_and_where_they_are(tmp_path: Path) -> None:
+    """'Show me the documents physically' must be answerable from the dashboard."""
+    runtime = make_runtime(tmp_path)
+    app = GcaeApp(runtime)
+
+    async def scenario() -> None:
+        async with app.run_test(size=(140, 44)) as pilot:
+            await wait_for(
+                pilot, lambda: "merged into" in str(app.query_one(BannerPanel).body.plain)
+            )
+            banner = str(app.query_one(BannerPanel).body.plain)
+            assert "files" in banner
+            assert "answer.txt" in banner
+            # the physical folder is named, so the file can be opened directly
+            assert str(tmp_path / "source") in banner
+
+    asyncio.run(scenario())
+
+
+def test_unmerged_banner_points_at_the_worktree_folder(tmp_path: Path) -> None:
+    runtime = make_runtime(tmp_path)
+    runtime.auto_merge = False
+    app = GcaeApp(runtime)
+
+    async def scenario() -> None:
+        async with app.run_test(size=(140, 44)) as pilot:
+            await wait_for(pilot, lambda: app.agent_done)
+            await pilot.pause(0.4)
+            banner = str(app.query_one(BannerPanel).body.plain)
+            assert "answer.txt" in banner
+            assert "worktree, not merged yet" in banner
+            assert runtime.state is not None and str(runtime.state.worktree) in banner
+
+    asyncio.run(scenario())

@@ -69,7 +69,12 @@ accepted (with a warning that final verification did not pass), and the dashboar
 
 Every merge path applies the same guards — the run must be complete, not already merged, and its
 branch must still point at the verified commit; the source repository must be clean. A run with no
-file changes reports `nothing to merge` rather than failing. The pre-merge and merge commits are
+file changes reports `nothing to merge` rather than failing.
+
+The end-of-run summary always says where the documents are: `files: docs/api.md, docs/guide.md`
+plus `documents: /path/to/repo (in your working tree now)` once merged, or
+`documents: …/worktrees/<run-id> (worktree; nothing is in your checkout until it is merged)` while
+the work is still only on the run branch. The pre-merge and merge commits are
 recorded in `state.json`, so `gcae undo <repo> <run-id>` resets your branch and refuses if it is
 dirty or HEAD moved; `gcae merge <repo> <run-id>` performs the same merge later for any completed
 run.

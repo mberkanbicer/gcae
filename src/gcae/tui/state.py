@@ -76,6 +76,7 @@ class UiState:
     rollback_at: datetime | None = None
     rollbacks: int = 0
     replans: int = 0
+    work_files: list[str] = field(default_factory=list)
     timeline: list[TimelineRow] = field(default_factory=list)
     logs: list[str] = field(default_factory=list)
 
@@ -289,6 +290,9 @@ class UiState:
 
     def _on_step_accepted(self, event: Event, payload: dict[str, Any]) -> set[str]:
         step_id = event.step_id
+        for path in payload.get("changed_files") or []:
+            if path not in self.work_files:
+                self.work_files.append(str(path))
         self.plan = [step for step in self.plan if step.get("id") != step_id]
         self.completed_steps = int(payload.get("accepted_steps") or self.completed_steps)
         self.current_step = None

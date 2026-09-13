@@ -188,6 +188,7 @@ class BannerPanel(Panel):
                     style=STYLES["accent"],
                 )
                 lines.append(_row("recover", rescue))
+                lines.extend(_work_location_rows(state, ui))
         elif state is not None and state.status == "complete":
             title = Text("RUN COMPLETE", style=f"bold {STYLES['success']}")
             verification = ui.verification or {}
@@ -214,6 +215,7 @@ class BannerPanel(Panel):
             )
             if criteria:
                 lines.append(_row("criteria", f"{passed}/{len(criteria)} passed"))
+            lines.extend(_work_location_rows(state, ui))
             merge = state.merge
             if merge is not None:
                 verified = "" if state.status == "complete" else " (accepted work, unverified)"
@@ -259,6 +261,29 @@ class BannerPanel(Panel):
             body.append_text(line)
         self.set_body(body)
         return True
+
+
+def _work_location_rows(state: AgentState, ui: UiState) -> list[Text]:
+    """Tell the user exactly which folder holds the generated documents right now."""
+    files = ui.work_files
+    if not files:
+        return []
+    preview = ", ".join(elide(name, 34) for name in files[:3])
+    if len(files) > 3:
+        preview += f" (+{len(files) - 3} more)"
+    rows = [_row("files", Text(preview))]
+    if state.merge is not None:
+        rows.append(_row("on disk", Text(state.source_repo, style=STYLES["success"])))
+    else:
+        rows.append(
+            _row(
+                "on disk",
+                Text(
+                    f"{state.worktree} (worktree, not merged yet)", style=STYLES["warning"]
+                ),
+            )
+        )
+    return rows
 
 
 class ObjectivePanel(Panel):

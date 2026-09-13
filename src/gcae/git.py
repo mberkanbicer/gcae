@@ -349,6 +349,13 @@ class GitRepository:
         )
         return [(line[:2], line[3:]) for line in output.splitlines() if len(line) >= 4]
 
+    def files_between(self, base_ref: str, other_ref: str) -> list[str]:
+        """Files that differ between two refs — exactly what a merge would bring."""
+        if not base_ref or not other_ref:
+            return []
+        output = self._run("diff", "--name-only", base_ref, other_ref, check=False)
+        return [line for line in output.splitlines() if line.strip()]
+
     def numstat(self) -> dict[str, tuple[int | None, int | None]]:
         """Insertions/deletions per tracked file (None for binary files)."""
         output = self._run("diff", "--numstat", cwd=self._require_worktree())

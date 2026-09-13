@@ -459,3 +459,31 @@ def test_failed_run_without_accepted_work_is_not_mergeable(tmp_path: Path, capsy
         _merge_run(repo, run_id, tmp_path / "state")
     # no misleading "merging 0 accepted step(s)" warning
     assert "0 accepted step" not in capsys.readouterr().err
+
+
+def test_summary_reports_where_the_documents_are(tmp_path: Path, capsys) -> None:
+    """The user must be able to find the produced files without guessing."""
+    from gcae.cli import _summary
+    from gcae.git import GitRepository
+
+    runtime = _completed_run(tmp_path)
+    assert runtime.state is not None
+    assert runtime.repo is not None
+    repo = GitRepository(tmp_path / "repo", tmp_path / "state")
+    files = repo.files_between(repo.current_branch(), runtime.state.branch)
+    assert files == ["answer.txt"]
+
+    summary = _summary(runtime.state, files)
+    assert "files: answer.txt" in summary
+    assert "worktree; nothing is in your checkout" in summary
+    assert str(runtime.state.worktree) in summary
+
+    runtime.merge_completed_run()
+    # after merging, the file list must still be computed (against the pre-merge commit)
+    from gcae.cli import _run_files
+
+    files_after_merge = _run_files(runtime.state, runtime.repo)
+    assert files_after_merge == ["answer.txt"]
+    merged_summary = _summary(runtime.state, files_after_merge)
+    assert f"documents: {tmp_path / 'repo'} (in your working tree now)" in merged_summary
+    assert (tmp_path / "repo" / "answer.txt").exists()

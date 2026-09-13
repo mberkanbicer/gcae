@@ -19,6 +19,7 @@ from .providers import FakeProvider, Provider
 from .runtime import (
     Runtime,
     RuntimeControl,
+    cleanup_idle_worktree,
     cleanup_merged_worktree,
     merge_verified_run,
 )
@@ -190,7 +191,9 @@ def _summary(state: AgentState, files: list[str] | None = None) -> str:
     else:
         passed = sum(1 for item in verification.criteria if item.passed)
         criteria = f"{passed}/{len(verification.criteria)} criteria passed"
-    if state.merge is None:
+    if state.merge is None and not files:
+        branch = f"branch: {state.branch} (no file changes; nothing to merge)"
+    elif state.merge is None:
         branch = (
             f"branch: {state.branch} (not merged yet — GCAE merges automatically; "
             f"run 'gcae merge {state.source_repo} {state.run_id}' if it stayed pending)"
@@ -203,7 +206,9 @@ def _summary(state: AgentState, files: list[str] | None = None) -> str:
     if files:
         listing = ", ".join(files[:5]) + (f" (+{len(files) - 5} more)" if len(files) > 5 else "")
         branch = f"{branch}\nfiles: {listing}"
-    if state.merge is not None:
+    if not files:
+        branch = f"{branch}\ndocuments: none — the run produced no files"
+    elif state.merge is not None:
         branch = f"{branch}\ndocuments: {state.source_repo} (in your working tree now)"
     else:
         branch = (
@@ -292,6 +297,8 @@ def _merge_run(
         _apply_merge(state, state_path, repo, allow_unverified=True, cleanup=cleanup)
     except NothingToMerge as exc:
         print(f"gcae: {exc}", file=sys.stderr)
+        if cleanup and cleanup_idle_worktree(repo, state):
+            print(f"gcae: removed the worktree of the empty run {state.worktree}", file=sys.stderr)
         return
     print(f"gcae: undo with: gcae undo {state.source_repo} {run_id}", file=sys.stderr)
 
@@ -347,6 +354,11 @@ def _maybe_merge(
         )
     except NothingToMerge as exc:
         print(f"gcae: {exc}", file=sys.stderr)
+        if cleanup_after_merge and cleanup_idle_worktree(repo, result):
+            print(
+                f"gcae: removed the worktree of the empty run {result.worktree}",
+                file=sys.stderr,
+            )
     except GitError as exc:
         print(f"gcae: merge skipped: {exc}", file=sys.stderr)
 

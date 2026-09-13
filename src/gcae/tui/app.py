@@ -20,7 +20,7 @@ from textual.worker import Worker
 
 from ..git import GitError, NothingToMerge
 from ..models import Event
-from ..runtime import Runtime, RuntimeControl
+from ..runtime import Runtime, RuntimeControl, cleanup_idle_worktree
 from . import formatters
 from .modals import ConfirmStopModal, HelpModal, InstructionModal, RequestModal
 from .screens import (
@@ -464,7 +464,13 @@ class GcaeApp(App[None]):
 
     def _on_nothing_to_merge(self, reason: str) -> None:
         self.ui.add_note("i", reason, "muted")
-        self._refresh_panels({"banner", "footer", "timeline"})
+        state = self.runtime.state
+        if self.runtime.cleanup_after_merge and self.runtime.repo is not None and state is not None:
+            try:
+                cleanup_idle_worktree(self.runtime.repo, state)
+            except (GitError, OSError):  # pragma: no cover - cleanup is best effort
+                pass
+        self._refresh_panels({"banner", "footer", "timeline", "checkpoint"})
 
     def _on_merged(self, record: object) -> None:
         target = getattr(record, "target_branch", "?")

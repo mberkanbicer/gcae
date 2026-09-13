@@ -46,21 +46,26 @@ logger = logging.getLogger("gcae")
 EventSubscriber = Callable[[Event], None]
 
 
-def cleanup_merged_worktree(repo: GitRepository, state: AgentState) -> bool:
-    """Remove GCAE's own worktree once its branch is merged. Returns True when removed.
+def cleanup_idle_worktree(repo: GitRepository, state: AgentState) -> bool:
+    """Remove GCAE's own worktree once the run no longer needs it. True when removed.
 
-    The branch is deliberately kept: the merge stays reversible with ``gcae undo`` and the
-    accepted commits can be merged again.
+    Used when the run's work is delivered (merged) or empty (nothing to merge). The branch
+    is deliberately kept when a merge happened: the merge stays reversible with
+    ``gcae undo`` and the accepted commits can be merged again.
     """
-    if state.merge is None:
-        return False
-    # work from the persisted path: the CLI merge path has no live worktree handle
     path = Path(state.worktree)
     if not path.exists():
         return False
     repo.worktree = path
     repo.remove_worktree()
     return True
+
+
+def cleanup_merged_worktree(repo: GitRepository, state: AgentState) -> bool:
+    """Remove the worktree of a merged run (see :func:`cleanup_idle_worktree`)."""
+    if state.merge is None:
+        return False
+    return cleanup_idle_worktree(repo, state)
 
 
 def merge_verified_run(

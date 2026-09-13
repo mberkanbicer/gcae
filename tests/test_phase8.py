@@ -585,3 +585,38 @@ def test_cli_handles_every_git_step_without_user_action(tmp_path: Path, capsys) 
     summary = _summary(state, _run_files(state, repo_handle))
     assert "git merge" not in summary
     assert "documents: " in summary and str(repo) in summary
+
+
+def test_no_change_run_cleans_up_and_says_so(tmp_path: Path, capsys) -> None:
+    """An empty run must leave nothing behind and must not ask for a merge."""
+    from gcae.cli import main
+
+    repo = _git_repo(tmp_path)
+    config = _fake_config(tmp_path)
+    main(
+        [
+            "run",
+            str(repo),
+            "do nothing",
+            "--criterion",
+            "file exists: README.md",
+            "--headless",
+            "--config",
+            str(config),
+        ]
+    )
+    errors = capsys.readouterr().err
+    assert "nothing to merge" in errors
+    assert "removed the worktree of the empty run" in errors
+    worktrees = tmp_path / "state" / "worktrees"
+    assert not any(worktrees.iterdir()) if worktrees.exists() else True
+    # and the summary no longer suggests a merge either
+    from gcae.persistence import StateStore
+
+    runs = sorted((tmp_path / "state" / "runs").glob("*/state.json"))
+    state = StateStore(runs[-1]).load()
+    from gcae.cli import _summary
+
+    summary = _summary(state, [])
+    assert "no file changes; nothing to merge" in summary
+    assert "documents: none — the run produced no files" in summary

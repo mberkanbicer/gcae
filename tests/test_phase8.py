@@ -18,6 +18,25 @@ def test_config_uses_xdg_state_home(monkeypatch) -> None:
     assert Config().state_dir == Path("/tmp/gcae-state/gcae")
 
 
+def test_cli_reports_missing_config(capsys) -> None:
+    from gcae.cli import main
+
+    with pytest.raises(SystemExit) as exit_info:
+        main(
+            [
+                "run",
+                "/tmp/does-not-exist",
+                "request",
+                "--config",
+                "/tmp/definitely-missing-gcae-config.toml",
+            ]
+        )
+    assert exit_info.value.code == 1
+    captured = capsys.readouterr()
+    assert "config file not found" in captured.err
+    assert "Traceback" not in captured.err
+
+
 def test_provider_kind_resolution() -> None:
     from gcae.cli import _provider
     from gcae.http_provider import OpenAICompatibleProvider

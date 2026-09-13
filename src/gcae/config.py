@@ -61,6 +61,12 @@ def _default_state_dir() -> str:
 def load_config(path: str | Path | None = None) -> Config:
     if path is None:
         return Config()
-    with Path(path).open("rb") as handle:
-        data: dict[str, Any] = tomllib.load(handle)
+    config_path = Path(path).expanduser()
+    if not config_path.is_file():
+        raise FileNotFoundError(f"config file not found: {config_path}")
+    with config_path.open("rb") as handle:
+        try:
+            data: dict[str, Any] = tomllib.load(handle)
+        except tomllib.TOMLDecodeError as exc:
+            raise ValueError(f"invalid TOML in {config_path}: {exc}") from exc
     return Config.model_validate(data)

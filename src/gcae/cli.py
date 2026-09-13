@@ -81,9 +81,9 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
     logging.getLogger("gcae").setLevel(logging.INFO)
-    config = load_config(args.config)
-    runtime_dir = args.runtime_dir or config.state_dir
     try:
+        config = load_config(args.config)
+        runtime_dir = args.runtime_dir or config.state_dir
         provider = _provider(config)
         runtime = Runtime(
             args.repository,
@@ -105,7 +105,7 @@ def main(argv: list[str] | None = None) -> None:
         else:
             runtime.resume(args.run_id)
         result = runtime.run()
-    except (RuntimeError, ValueError) as exc:
+    except (OSError, RuntimeError, ValueError) as exc:
         print(f"gcae: error: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
     print(json.dumps(result.model_dump(mode="json"), indent=2, sort_keys=True))

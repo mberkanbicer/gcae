@@ -25,6 +25,8 @@ HELP = (
 class InstructionScreen(ModalScreen[str | None]):
     """Modal input for a new user instruction."""
 
+    BINDINGS = [("enter", "submit", "Submit")]
+
     def __init__(
         self,
         title: str = "New instruction (Enter submits, Esc cancels)",
@@ -44,6 +46,10 @@ class InstructionScreen(ModalScreen[str | None]):
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         self.dismiss(event.value)
+
+    def action_submit(self) -> None:
+        """Fallback for when the input does not hold focus (small terminals, clicks)."""
+        self.dismiss(self.query_one("#instruction-input", Input).value)
 
     def key_escape(self) -> None:
         self.dismiss(None)
@@ -115,11 +121,19 @@ class GcaeApp(App[None]):
     ]
     CSS = """
     #body { height: 1fr; }
-    #panels { width: 3fr; }
-    #log { width: 2fr; border: round $accent; }
+    #panels { width: 3fr; min-width: 20; }
+    #log { width: 2fr; min-width: 20; border: round $accent; }
     .panel { border: round $panel; padding: 0 1; margin-bottom: 0; }
     #help-bar { height: 1; color: $text-muted; }
-    #instruction-box { width: 70; height: auto; padding: 1 2; background: $surface; }
+    InstructionScreen, RequestScreen { align: center middle; }
+    #instruction-box {
+        width: 90%;
+        max-width: 70;
+        min-width: 20;
+        height: auto;
+        padding: 1 2;
+        background: $surface;
+    }
     #diff-scroll { height: 1fr; padding: 1 2; background: $surface; }
     #help-body { padding: 2 4; background: $surface; }
     """
@@ -141,6 +155,9 @@ class GcaeApp(App[None]):
         self.constraints = list(constraints or [])
         self.criteria = list(criteria or [])
         self.panel_state: dict[str, str] = {}
+        self.log_visible = True
+        self.last_error: str | None = None
+        self._needs_start = request is not None and runtime.state is None
         self.log_lines: list[str] = []
         self.agent_done = False
         self.last_evaluation = "none"
@@ -166,11 +183,23 @@ class GcaeApp(App[None]):
     def on_mount(self) -> None:
         self.runtime.subscribe(self._on_event_threadsafe)
         self.set_interval(0.4, self._refresh)
+        self._apply_layout()
         if self.runtime.state is None and self.request is None:
             self._prompt_for_request()
         elif self.auto_run:
             self._launch_worker()
         self._refresh()
+
+    def on_resize(self) -> None:
+        self._apply_layout()
+
+    def _apply_layout(self) -> None:
+        """Keep the log visible only when the terminal is wide enough."""
+        try:
+            log = self.query_one("#log", RichLog)
+        except NoMatches:
+            return
+        log.display = self.log_visible and self.size.width >= 90
 
     def _prompt_for_request(self) -> None:
         self._log_line("waiting for the task description")
@@ -181,11 +210,14 @@ class GcaeApp(App[None]):
             self._log_line("no task entered; press q to quit")
             return
         self.request = text.strip()
+        self._needs_start = True
         self._log_line(f"task: {self.request}")
         if self.auto_run:
             self._launch_worker()
 
     def _launch_worker(self) -> None:
+        self.agent_done = False
+        self.last_error = None
         self._worker = self.run_worker(
             self._run_agent, thread=True, name="agent", exit_on_error=False
         )
@@ -194,8 +226,9 @@ class GcaeApp(App[None]):
 
     def _run_agent(self) -> None:
         try:
-            if self.runtime.state is None:
+            if self._needs_start:
                 assert self.request is not None
+                self._needs_start = False
                 self._call_ui(self._log_line, f"starting run for: {self.request}")
                 self.runtime.start(
                     self.request,
@@ -204,9 +237,17 @@ class GcaeApp(App[None]):
                 )
             self.runtime.run()
         except Exception as exc:  # noqa: BLE001 - surfaced in the UI log
-            self._call_ui(self._log_line, f"agent failed: {exc}")
+            self._call_ui(self._on_agent_error, str(exc))
         finally:
             self._call_ui(self._on_finished)
+
+    def _on_agent_error(self, message: str) -> None:
+        self.last_error = message
+        self._log_line(f"agent failed: {message}")
+        self._set_panel(
+            "run",
+            f"failed:\n{message}\n\npress i to enter a new task, q to quit",
+        )
 
     def _on_finished(self) -> None:
         self.agent_done = True
@@ -304,7 +345,13 @@ class GcaeApp(App[None]):
     def _refresh(self) -> None:
         state = self.runtime.state
         if state is None:
-            self._set_panel("run", "waiting for the task description...")
+            if self.last_error:
+                self._set_panel(
+                    "run",
+                    f"failed:\n{self.last_error}\n\npress i to enter a new task, q to quit",
+                )
+            else:
+                self._set_panel("run", "waiting for the task description...")
             self._set_panel("objective", "objective: (not set)\nenter the task to start")
             return
         elapsed = datetime.now(UTC) - state.created_at
@@ -408,11 +455,15 @@ class GcaeApp(App[None]):
         self.push_screen(DiffScreen(diff))
 
     def action_instruction(self) -> None:
+        if self.runtime.state is None or self.agent_done:
+            # nothing running: offer the request screen again so failures are recoverable
+            self.push_screen(RequestScreen(), self._submit_request)
+            return
         self.push_screen(InstructionScreen(), self._submit_instruction)
 
     def action_toggle_logs(self) -> None:
-        log = self.query_one("#log", RichLog)
-        log.display = not log.display
+        self.log_visible = not self.log_visible
+        self._apply_layout()
 
     def action_help(self) -> None:
         self.push_screen(HelpScreen())

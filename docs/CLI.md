@@ -12,9 +12,11 @@ gcae undo <repository> <run-id> [--config PATH] [--runtime-dir PATH]
 
 The request is optional in TUI mode: `gcae run <repository>` opens the TUI and asks for the task,
 and the planner derives the success criteria from it. Headless mode requires a request and exits 1
-without one. `run` and `resume` open the dashboard on a terminal; non-interactive environments
-(or `--headless`) get the event log on stderr plus the final `AgentState` JSON on stdout. The
-summary line reports status, accepted steps, verification, worktree and branch/merge state.
+without one. The source repository must have at least one commit and no uncommitted changes;
+otherwise the run is refused with a clear message. `run` and `resume` open the dashboard on a
+terminal; non-interactive environments (or `--headless`) get the event log on stderr plus the
+final `AgentState` JSON on stdout. The summary line reports status, accepted steps, verification,
+worktree and branch/merge state.
 
 ## Criteria
 

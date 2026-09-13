@@ -18,6 +18,16 @@ are derived from the typed request by the configured planner (`[planner] kind = 
 model for HTTP providers; the planner is required to produce at least one checkable criterion).
 Extra criteria can still be supplied with `--criterion` and are merged, never overwritten.
 
+If the run cannot start (dirty repository, no commits, planner failure), the dashboard shows
+`failed: <reason>` and `i` re-opens the request screen so a corrected task can be entered without
+restarting the app. Failed runs keep whatever state they persisted.
+
+## Responsive layout
+
+The request/instruction modal always fits the terminal (`width: 90%`, capped at 70 columns,
+minimum 20). Below 90 columns the event log is hidden so the status panels keep the width; `l`
+toggles it back. Enter submits the modal even if the input does not hold focus.
+
 ## Architecture
 
 - The runtime runs in a Textual worker thread (`run_worker(..., thread=True)`).

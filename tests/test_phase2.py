@@ -41,6 +41,14 @@ def test_dirty_source_rejected(tmp_path: Path) -> None:
         GitRepository(source, tmp_path / "runtime").create_isolated_worktree("run")
 
 
+def test_repository_without_commits_is_rejected(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    subprocess.run(["git", "init", "-q", str(source)], check=True)
+    with pytest.raises(GitError, match="no commits"):
+        GitRepository(source, tmp_path / "runtime").create_isolated_worktree("run")
+
+
 def test_rollback_removes_ignored_candidate_and_external_runtime_required(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source.mkdir()

@@ -141,6 +141,79 @@ def test_tui_prompts_for_request_and_infers_criteria(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
+def test_request_submission_in_a_small_terminal(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    init_repo(source)
+    runtime = Runtime(
+        source, tmp_path / "runtime", provider=FakeProvider(TRAJECTORY), control=RuntimeControl()
+    )
+    app = GcaeApp(runtime)
+
+    async def scenario() -> None:
+        async with app.run_test(size=(30, 10)) as pilot:
+            await pilot.pause()
+            assert isinstance(app.screen, RequestScreen)
+            for character in "small task":
+                await pilot.press("space" if character == " " else character)
+            await pilot.press("enter")
+            for _ in range(200):
+                if app.agent_done:
+                    break
+                await pilot.pause(0.05)
+            assert app.request == "small task"
+            assert runtime.state is not None
+            assert runtime.state.status == "complete"
+
+    asyncio.run(scenario())
+
+
+def test_tui_recovers_after_a_failed_start(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(source)], check=True)
+    subprocess.run(["git", "-C", str(source), "config", "user.email", "t@e.f"], check=True)
+    subprocess.run(["git", "-C", str(source), "config", "user.name", "T"], check=True)
+    runtime = Runtime(
+        source, tmp_path / "runtime", provider=FakeProvider(TRAJECTORY), control=RuntimeControl()
+    )
+    app = GcaeApp(runtime)
+
+    async def scenario() -> None:
+        async with app.run_test(size=(60, 20)) as pilot:
+            await pilot.pause()
+            for character in "first":
+                await pilot.press(character)
+            await pilot.press("enter")
+            for _ in range(100):
+                if app.agent_done:
+                    break
+                await pilot.pause(0.05)
+            assert app.agent_done
+            assert app.last_error is not None
+            assert "no commits" in app.last_error
+            assert runtime.state is None
+
+            (source / "README").write_text("base\n")
+            subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(source), "commit", "-qm", "base"], check=True)
+
+            await pilot.press("i")
+            await pilot.pause()
+            assert isinstance(app.screen, RequestScreen)
+            for character in "second":
+                await pilot.press(character)
+            await pilot.press("enter")
+            for _ in range(200):
+                if app.agent_done:
+                    break
+                await pilot.pause(0.05)
+            assert runtime.state is not None
+            assert runtime.state.status == "complete"
+
+    asyncio.run(scenario())
+
+
 def test_user_override_submission(tmp_path: Path) -> None:
     runtime = make_runtime(tmp_path)
     app = GcaeApp(runtime, auto_run=False)

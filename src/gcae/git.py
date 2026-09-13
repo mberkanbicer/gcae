@@ -45,6 +45,10 @@ class GitRepository:
             raise GitError(f"source is not a directory: {self.source}")
         if self._run("rev-parse", "--is-inside-work-tree", check=False) != "true":
             raise GitError(f"source is not a Git repository: {self.source}")
+        if not self._run("rev-parse", "--verify", "HEAD", check=False):
+            raise GitError(
+                "source repository has no commits; create a base commit before running GCAE"
+            )
         for directory in (self.runtime_dir, self.worktree_dir):
             if directory == self.source or self.source in directory.parents:
                 raise GitError("runtime directories must be external to the source repository")

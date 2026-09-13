@@ -95,7 +95,9 @@ class FinalVerifier:
             try:
                 path = tools._path(relative.strip())
                 found = path.read_text(encoding="utf-8") if path.is_file() else None
-                passed = found == expected
+                # "exactly" is about the content, not the final byte: a trailing newline at
+                # end of file is conventional, and criteria are often inferred from prose.
+                passed = found is not None and found.rstrip("\n") == expected.rstrip("\n")
                 evidence = evidence_for(path, expected, found)
             except (OSError, UnicodeError, ValueError) as exc:
                 passed = False

@@ -43,6 +43,8 @@ Criteria are verified deterministically; unsupported criteria fail closed unless
 
 - `file exists: path/to/file`
 - `file contains: path/to/file :: expected text`
+- `file contains exactly: path/to/file :: expected text` (a trailing newline at end of file is
+  ignored; anything else must match exactly)
 - `command succeeds: pytest -q`
 
 When no `--criterion` is given, the planner derives criteria from the request (the model-backed

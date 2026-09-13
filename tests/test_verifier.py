@@ -57,10 +57,18 @@ def test_exact_content_criterion(tmp_path: Path) -> None:
     assert FinalVerifier().verify(
         make_state(tmp_path, "file contains exactly: note.txt :: hybrid ok")
     ).passed
+    # a trailing newline at end of file is conventional, not a content difference
     (tmp_path / "note.txt").write_text("hybrid ok\n")
-    assert not FinalVerifier().verify(
+    assert FinalVerifier().verify(
         make_state(tmp_path, "file contains exactly: note.txt :: hybrid ok")
     ).passed
+    # anything beyond the trailing newline is still a failure
+    (tmp_path / "note.txt").write_text("hybrid ok\nextra\n")
+    report = FinalVerifier().verify(
+        make_state(tmp_path, "file contains exactly: note.txt :: hybrid ok")
+    )
+    assert not report.passed
+    assert "found 'hybrid ok\\nextra\\n'" in report.criteria[0].evidence
 
 
 def test_hybrid_verifier_judges_unsupported_criterion(tmp_path: Path) -> None:

@@ -252,18 +252,25 @@ def test_criterion_failure_evidence_shows_expected_and_found(tmp_path: Path) -> 
     from gcae.models import AgentState
     from gcae.verifier import FinalVerifier
 
+    def verify() -> object:
+        state = AgentState(
+            run_id="r",
+            source_repo="/source",
+            worktree=str(tmp_path),
+            branch="b",
+            objective="o",
+            original_request="o",
+            success_criteria=["file contains exactly: NOTES.md :: hello from gcae"],
+        )
+        return FinalVerifier().verify(state)
+
+    # a conventional trailing newline is not a content difference
     (tmp_path / "NOTES.md").write_text("hello from gcae\n")
-    state = AgentState(
-        run_id="r",
-        source_repo="/source",
-        worktree=str(tmp_path),
-        branch="b",
-        objective="o",
-        original_request="o",
-        success_criteria=["file contains exactly: NOTES.md :: hello from gcae"],
-    )
-    report = FinalVerifier().verify(state)
-    result = report.criteria[0]
+    assert verify().criteria[0].passed is True  # type: ignore[attr-defined]
+
+    # extra content is, and the evidence shows both sides
+    (tmp_path / "NOTES.md").write_text("hello from gcae\nand more\n")
+    result = verify().criteria[0]  # type: ignore[attr-defined]
     assert result.passed is False
     assert "expected 'hello from gcae'" in result.evidence
-    assert "found 'hello from gcae\\n'" in result.evidence
+    assert "and more" in result.evidence

@@ -76,6 +76,10 @@ class ContextBuilder:
                 [
                     f"Validation passed: {validation.passed}",
                     f"Validation changed files: {', '.join(validation.changed_files)}",
+                    f"Validation new files: {', '.join(validation.new_files)}",
+                    f"Validation deleted files: {', '.join(validation.deleted_files)}",
+                    f"Validation dependency changes: {', '.join(validation.dependency_changes)}",
+                    f"Validation scope violations: {', '.join(validation.scope_violations)}",
                     f"Validation details: {', '.join(validation.details)}",
                 ]
             )

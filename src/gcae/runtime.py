@@ -1,24 +1,28 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import uuid
 from pathlib import Path
 
 from .context import ContextBuilder
 from .controller import Controller
-from .evaluator import Evaluator
+from .evaluator import DeterministicEvaluator, Evaluator
 from .git import GitRepository
 from .memory import EventLog, MemoryStore
 from .models import (
     Action,
     AgentState,
+    EvaluationInput,
     Event,
+    MemoryCandidate,
     MemoryRecord,
     PlanStep,
     RunPhase,
     SemanticStep,
     ToolResult,
+    ValidationResult,
     now_utc,
 )
 from .persistence import StateStore
@@ -29,6 +33,8 @@ from .state_machine import StateMachine
 from .tools import ToolRegistry
 from .validation import DeterministicValidator
 from .verifier import FinalVerifier
+
+logger = logging.getLogger("gcae")
 
 
 class Runtime:
@@ -58,7 +64,7 @@ class Runtime:
         self.max_steps = max_steps
         self.command_timeout = command_timeout
         self.context_limit = context_limit
-        self.evaluator = evaluator or Evaluator()
+        self.evaluator = evaluator or DeterministicEvaluator()
         self.planner = Planner()
         self.machine = StateMachine()
         self.verifier = FinalVerifier()
@@ -79,8 +85,9 @@ class Runtime:
         run_id = run_id or uuid.uuid4().hex[:12]
         self.repo = GitRepository(self.source_repo, self.runtime_dir, self.worktree_dir)
         worktree, branch, base = self.repo.create_isolated_worktree(run_id)
-        self.memory = MemoryStore(self.runtime_dir / "runs" / run_id / "memory.db")
+        self.memory = MemoryStore(self.runtime_dir / "memory.db")
         self.events = EventLog(self.runtime_dir / "runs" / run_id / "events.jsonl")
+        logger.info("run %s started on branch %s in %s", run_id, branch, worktree)
         self.state = AgentState(
             run_id=run_id,
             source_repo=str(self.source_repo),
@@ -122,7 +129,7 @@ class Runtime:
         self.repo = GitRepository(self.source_repo, self.runtime_dir, self.worktree_dir)
         self.repo.worktree = Path(self.state.worktree)
         self.repo.branch = self.state.branch
-        self.memory = MemoryStore(path / "memory.db")
+        self.memory = MemoryStore(self.runtime_dir / "memory.db")
         self.events = EventLog(path / "events.jsonl")
         self.repo.validate_source()
         if not self.repo.worktree.exists():
@@ -164,6 +171,7 @@ class Runtime:
             context = ContextBuilder(self.memory).build(
                 self.state,
                 step,
+                validation=self.state.latest_validation,
                 budget=self.context_limit,
                 current_diff=self.repo.diff(),
                 active_files=self.repo.changed_files(),
@@ -239,11 +247,30 @@ class Runtime:
                 step_id=plan.id,
                 payload=validation.model_dump(mode="json"),
             )
-            evaluation = self.evaluator.evaluate(decision, validation)
+            self.state.latest_validation = validation
+            payload = EvaluationInput(
+                objective=self.state.objective,
+                semantic_goal=plan.goal,
+                hard_constraints=self.state.hard_constraints,
+                latest_observations=self.state.latest_observations[-5:],
+                accepted_commit=self.state.accepted_commit,
+                context=self._evaluation_context(plan, validation),
+                validation=validation,
+            )
+            try:
+                evaluation = self.evaluator.evaluate(payload)
+            except ProviderOutputError as exc:
+                logger.error("evaluator failure: %s", exc)
+                self._remember("failure", f"evaluator failure: {exc}", immutable=True)
+                self.state.status = "failed: evaluator output"
+                self.state.phase = RunPhase.FAILED
+                self._persist()
+                return self.state
             if not result.success:
                 evaluation = evaluation.model_copy(
-                    update={"outcome": "rollback", "reason": result.error or "tool failed"}
+                    update={"decision": "rollback", "reason": result.error or "tool failed"}
                 )
+            self._promote(evaluation.memories_to_promote)
             self._event(
                 "evaluation",
                 RunPhase.EVALUATE,
@@ -251,24 +278,24 @@ class Runtime:
                 payload=evaluation.model_dump(mode="json"),
             )
 
-            if evaluation.outcome == "continue":
+            if evaluation.decision == "continue":
                 self._transition(RunPhase.EVALUATE)
                 self._transition(RunPhase.EXECUTE)
                 self._persist()
                 continue
-            if evaluation.outcome == "finish_candidate":
+            if evaluation.decision == "finish_candidate":
                 self._transition(RunPhase.EVALUATE)
                 if self._verify_and_route("finish candidate failed verification"):
                     return self.state
                 continue
-            if evaluation.outcome == "replan":
+            if evaluation.decision == "replan":
                 self._remember("observation", evaluation.reason)
                 self._rollback()
                 self._transition(RunPhase.PLAN)
                 self.state.plan = self.planner.replan(self.state, evaluation.reason)
                 self._persist()
                 continue
-            if evaluation.outcome == "accept":
+            if evaluation.decision == "accept":
                 self._transition(RunPhase.EVALUATE)
                 if not validation.changed_files:
                     if self.stagnation.record(False):
@@ -277,6 +304,11 @@ class Runtime:
                     continue
                 self._transition(RunPhase.CHECKPOINT)
                 self.state.accepted_commit = self.repo.checkpoint(f"gcae: {plan.goal}")
+                logger.info(
+                    "checkpoint %s for step %s",
+                    self.state.accepted_commit[:12],
+                    plan.id,
+                )
                 self.state.accepted_steps += 1
                 plan.status = "accepted"
                 self.state.plan = [item for item in self.state.plan if item.id != plan.id]
@@ -311,6 +343,9 @@ class Runtime:
             if self.repo.status():
                 self._transition(RunPhase.CHECKPOINT)
                 self.state.accepted_commit = self.repo.checkpoint("gcae: verified final state")
+                logger.info(
+                    "final checkpoint %s", self.state.accepted_commit[:12]
+                )
                 self.state.accepted_steps += 1
             for plan in self.state.plan:
                 plan.status = "accepted"
@@ -318,8 +353,15 @@ class Runtime:
             self.state.status = "complete"
             self._transition(RunPhase.COMPLETE)
             self._persist()
+            logger.info(
+                "run %s complete with %d accepted steps",
+                self.state.run_id,
+                self.state.accepted_steps,
+            )
             return True
-        details = "; ".join(report.details) or "criteria or hygiene did not pass"
+        missing = report.missing_requirements
+        details = "; ".join([*missing, *report.details]) or "criteria or hygiene did not pass"
+        logger.warning("run %s verification failed: %s", self.state.run_id, details)
         self._remember("failure", f"{failure_reason}: {details}", immutable=True)
         self._transition(RunPhase.PLAN)
         self.state.plan = self.planner.replan(self.state, failure_reason)
@@ -330,15 +372,53 @@ class Runtime:
         assert self.state is not None and self.repo is not None
         if self.state.phase != RunPhase.ROLLBACK:
             self._transition(RunPhase.ROLLBACK)
-        self.repo.rollback(self.state.accepted_commit or self.repo.current_commit())
+        target = self.state.accepted_commit or self.repo.current_commit()
+        logger.warning("rollback to %s", target[:12])
+        self.repo.rollback(target)
         self._event("rollback_completed", RunPhase.ROLLBACK, step_id=self.state.current_step_id)
 
     def _fail(self, reason: str) -> AgentState:
         assert self.state is not None
+        logger.error("run %s failed: %s", self.state.run_id, reason)
         self.state.status = f"failed: {reason}"
         self.state.phase = RunPhase.FAILED
         self._persist()
         return self.state
+
+    def _evaluation_context(self, plan: PlanStep, validation: ValidationResult) -> str:
+        assert self.state is not None and self.repo is not None and self.memory is not None
+        step = SemanticStep(
+            id=plan.id,
+            goal=plan.goal,
+            rationale=plan.rationale,
+            expected_result=plan.expected_result,
+            intended_scope=plan.intended_scope,
+            validation_requirements=plan.validation_requirements,
+        )
+        result = ContextBuilder(self.memory).build(
+            self.state,
+            step,
+            validation=validation,
+            budget=self.context_limit,
+            current_diff=self.repo.diff(),
+            active_files=self.repo.changed_files(),
+            observations=self.state.latest_observations,
+        )
+        return result.text
+
+    def _promote(self, candidates: list[MemoryCandidate]) -> None:
+        assert self.state is not None and self.memory is not None
+        for candidate in candidates:
+            record = candidate.record.model_copy(
+                update={
+                    "id": None,
+                    "run_id": self.state.run_id,
+                    "step_id": self.state.current_step_id,
+                    "commit_sha": self.state.accepted_commit,
+                    "source": "evaluator",
+                }
+            )
+            self.memory.add(record)
 
     def _record_observation(self, observation: str) -> None:
         assert self.state is not None

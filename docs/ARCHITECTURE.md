@@ -10,6 +10,12 @@ the planner is deterministic: the objective, criteria and constraints come from 
 plan is one semantic step, and assumptions are empty. The controller, evaluator and final verifier
 are separate components.
 
+The evaluator receives an `EvaluationInput` (objective, semantic goal, constraints, observations,
+accepted commit, reconstructed context, and deterministic validation) and returns a validated
+`Evaluation`. `DeterministicEvaluator` is the default; `LLMEvaluator` asks the configured model for
+the same contract and can promote failure memories through `memories_to_promote`. Select it with
+`[evaluator] kind = "llm"` in the configuration.
+
 Each run creates one `gcae/<run-id>` branch and one worktree under the configured runtime
 directory. Checkpoint commits are trusted execution state; SQLite memory and JSONL events are
 cumulative knowledge and survive rollback. Only evaluator acceptance, or a passing final
@@ -20,10 +26,10 @@ The context given to the model is rebuilt from persistent state on every call. I
 conversation history and no history is accumulated. `ContextBuilder` budgets the reconstructed
 sections by estimated tokens.
 
-Run artifacts are kept outside target repositories under `runs/<run-id>/`: `state.json`,
-`events.jsonl`, `memory.db`, per-step tool results, and diff snapshots. The runtime removes
-generated caches and ignored files only inside the isolated worktree before validation and final
-verification.
+Run artifacts are kept outside target repositories: `memory.db` at the state root is cumulative
+and shared across runs, while `runs/<run-id>/` retains `state.json`, `events.jsonl`, per-step tool
+results, and diff snapshots. The runtime removes generated caches and ignored files only inside the
+isolated worktree before validation and final verification.
 
 `python -m gcae` prints the final `AgentState` as JSON on stdout and a short human-readable summary
 on stderr.

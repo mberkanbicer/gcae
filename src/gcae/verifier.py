@@ -23,10 +23,12 @@ class FinalVerifier:
         for criterion in state.success_criteria:
             results.append(self._verify_criterion(criterion, tools))
         passed = all(result.passed for result in results)
+        missing = [result.criterion for result in results if not result.passed]
         hygiene_passed = self._hygiene(worktree)
         return VerificationReport(
             passed=passed,
             criteria=results,
+            missing_requirements=missing,
             hygiene_passed=hygiene_passed,
             details=[] if hygiene_passed else ["workspace hygiene failed"],
         )

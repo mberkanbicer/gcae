@@ -100,31 +100,6 @@ class ValidationResult(BaseModel):
     details: list[str] = Field(default_factory=list)
 
 
-class Evaluation(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    outcome: Literal["accept", "rollback", "replan", "continue", "finish_candidate"]
-    reason: str
-    progress: bool = False
-    requirement_compliant: bool = False
-    clean: bool = False
-    next_goal: str | None = None
-
-
-class CriterionResult(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    criterion: str
-    passed: bool
-    evidence: str = ""
-
-
-class VerificationReport(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    passed: bool
-    criteria: list[CriterionResult] = Field(default_factory=list)
-    hygiene_passed: bool = True
-    details: list[str] = Field(default_factory=list)
-
-
 class MemoryRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
     id: int | None = None
@@ -143,6 +118,42 @@ class MemoryCandidate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     record: MemoryRecord
     score: float = 0.0
+
+
+class Evaluation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    decision: Literal["accept", "rollback", "replan", "continue", "finish_candidate"]
+    reason: str
+    progress_score: float = 0.0
+    next_goal: str | None = None
+    memories_to_promote: list[MemoryCandidate] = Field(default_factory=list)
+
+
+class EvaluationInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    objective: str
+    semantic_goal: str
+    hard_constraints: list[str] = Field(default_factory=list)
+    latest_observations: list[str] = Field(default_factory=list)
+    accepted_commit: str | None = None
+    context: str = ""
+    validation: ValidationResult
+
+
+class CriterionResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    criterion: str
+    passed: bool
+    evidence: str = ""
+
+
+class VerificationReport(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    passed: bool
+    criteria: list[CriterionResult] = Field(default_factory=list)
+    missing_requirements: list[str] = Field(default_factory=list)
+    hygiene_passed: bool = True
+    details: list[str] = Field(default_factory=list)
 
 
 class Event(BaseModel):
@@ -175,6 +186,7 @@ class AgentState(BaseModel):
     status: str = "running"
     latest_user_instruction: str | None = None
     latest_observations: list[str] = Field(default_factory=list)
+    latest_validation: ValidationResult | None = None
     last_verification: VerificationReport | None = None
     created_at: datetime = Field(default_factory=now_utc)
     updated_at: datetime = Field(default_factory=now_utc)

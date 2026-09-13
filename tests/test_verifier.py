@@ -35,4 +35,5 @@ def test_verifier_rejects_unsupported_criterion(tmp_path: Path) -> None:
     )
     report = FinalVerifier().verify(state)
     assert not report.passed
+    assert report.missing_requirements == ["the implementation is correct"]
     assert "unsupported criterion" in report.criteria[0].evidence

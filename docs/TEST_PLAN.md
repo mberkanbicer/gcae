@@ -1,9 +1,11 @@
 # Test plan
 
 Tests cover Pydantic/state persistence, bounded provider repair, Git isolation and rollback,
-generated-artifact cleanup, immutable FTS memory, FTS refresh after update, punctuation-safe
-retrieval, pinned context budgeting, tool boundaries and patch traversal, deterministic validation,
-safeguards, controller prompt contract, HTTP headers/generation forwarding, config loading, resume
+generated-artifact cleanup, immutable FTS memory, FTS refresh after update, cross-run memory
+sharing, punctuation-safe retrieval, pinned context budgeting, tool boundaries and patch
+traversal, deterministic validation, deterministic and LLM evaluators, evaluator memory
+promotion, runtime lifecycle logging, safeguards, controller prompt contract, HTTP
+headers/generation forwarding, config loading, provider and evaluator kind resolution, resume
 contracts, fail-closed final verification, premature-completion blocking, final checkpointing of
 verified speculative changes, and a mandatory end-to-end bad-then-good rollback trajectory.
 

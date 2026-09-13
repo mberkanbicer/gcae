@@ -35,9 +35,14 @@ class ValidationConfig(BaseModel):
     commands: list[str] = Field(default_factory=list)
 
 
+class EvaluatorConfig(BaseModel):
+    kind: str = "deterministic"
+
+
 class Config(BaseModel):
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     provider: ProviderConfig = Field(default_factory=ProviderConfig)
+    evaluator: EvaluatorConfig = Field(default_factory=EvaluatorConfig)
     validation: ValidationConfig = Field(default_factory=ValidationConfig)
 
     @property

@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from gcae.config import Config, ProviderConfig, load_config
+from gcae.config import Config, EvaluatorConfig, ProviderConfig, load_config
 
 
 def test_config_loading(tmp_path: Path) -> None:
@@ -29,6 +29,21 @@ def test_provider_kind_resolution() -> None:
     live.close()
     with pytest.raises(ValueError):
         _provider(Config(provider=ProviderConfig(kind="bogus")))
+
+
+def test_evaluator_kind_resolution() -> None:
+    from gcae.cli import _evaluator
+    from gcae.evaluator import DeterministicEvaluator, LLMEvaluator
+    from gcae.providers import FakeProvider
+
+    provider = FakeProvider([])
+    assert isinstance(_evaluator(Config(), provider), DeterministicEvaluator)
+    assert isinstance(
+        _evaluator(Config(evaluator=EvaluatorConfig(kind="llm")), provider),
+        LLMEvaluator,
+    )
+    with pytest.raises(ValueError):
+        _evaluator(Config(evaluator=EvaluatorConfig(kind="bogus")), provider)
 
 
 def test_resume_restores_trusted_state(tmp_path: Path) -> None:

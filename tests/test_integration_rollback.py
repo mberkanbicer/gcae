@@ -1,7 +1,7 @@
 import subprocess
 from pathlib import Path
 
-from gcae.models import Decision, Evaluation, ValidationResult
+from gcae.models import Evaluation, EvaluationInput
 from gcae.providers import FakeProvider
 from gcae.runtime import Runtime
 
@@ -46,23 +46,21 @@ def test_end_to_end_rollback_trajectory(tmp_path: Path) -> None:
     observed_commits: list[str | None] = []
 
     class TrajectoryEvaluator:
-        def evaluate(self, decision: Decision, validation: ValidationResult) -> Evaluation:
-            del decision, validation
+        def evaluate(self, payload: EvaluationInput) -> Evaluation:
+            del payload
             assert runtime.state is not None
             worktree = Path(runtime.state.worktree)
             observed_commits.append(runtime.state.accepted_commit)
             if (worktree / "bad.txt").exists():
-                return Evaluation(outcome="rollback", reason="bad implementation")
+                return Evaluation(decision="rollback", reason="bad implementation")
             candidate = worktree / "result.txt"
             if candidate.exists() and candidate.read_text() == "good":
                 return Evaluation(
-                    outcome="accept",
+                    decision="accept",
                     reason="correct implementation",
-                    progress=True,
-                    requirement_compliant=True,
-                    clean=True,
+                    progress_score=1.0,
                 )
-            return Evaluation(outcome="rollback", reason="unexpected candidate")
+            return Evaluation(decision="rollback", reason="unexpected candidate")
 
     runtime = Runtime(
         source,

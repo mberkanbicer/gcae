@@ -26,7 +26,8 @@ Use deterministic completion criteria when possible:
 
 See `config.example.toml` and `docs/` for the implemented contracts. `context_limit` is the
 token budget used when the runtime reconstructs controller context (and the request's maximum
-output tokens for the HTTP provider).
+output tokens for the HTTP provider). The evaluator defaults to deterministic validation rules;
+`[evaluator] kind = "llm"` asks the configured model to evaluate each step instead.
 
 Resume an interrupted run (waiting for user input or interrupted mid-step):
 

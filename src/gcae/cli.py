@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from pathlib import Path
 
 from .config import Config, load_config
+from .evaluator import DeterministicEvaluator, Evaluator, LLMEvaluator
 from .http_provider import OpenAICompatibleProvider
 from .models import AgentState
 from .providers import FakeProvider, Provider
@@ -50,6 +52,15 @@ def _provider(config: Config) -> Provider:
     raise ValueError(f"unsupported provider kind: {config.provider.kind!r}")
 
 
+def _evaluator(config: Config, provider: Provider) -> Evaluator:
+    kind = config.evaluator.kind.lower()
+    if kind == "deterministic":
+        return DeterministicEvaluator()
+    if kind == "llm":
+        return LLMEvaluator(provider)
+    raise ValueError(f"unsupported evaluator kind: {config.evaluator.kind!r}")
+
+
 def _summary(state: AgentState) -> str:
     verification = state.last_verification
     if verification is None:
@@ -68,36 +79,30 @@ def _summary(state: AgentState) -> str:
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
+    logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
+    logging.getLogger("gcae").setLevel(logging.INFO)
     config = load_config(args.config)
     runtime_dir = args.runtime_dir or config.state_dir
     try:
+        provider = _provider(config)
+        runtime = Runtime(
+            args.repository,
+            runtime_dir,
+            worktree_dir=config.runtime.worktree_dir,
+            provider=provider,
+            validator_commands=config.validation.commands,
+            max_steps=config.runtime.max_steps,
+            command_timeout=config.runtime.command_timeout,
+            context_limit=config.provider.context_limit,
+            evaluator=_evaluator(config, provider),
+        )
         if args.command == "run":
-            runtime = Runtime(
-                args.repository,
-                runtime_dir,
-                worktree_dir=config.runtime.worktree_dir,
-                provider=_provider(config),
-                validator_commands=config.validation.commands,
-                max_steps=config.runtime.max_steps,
-                command_timeout=config.runtime.command_timeout,
-                context_limit=config.provider.context_limit,
-            )
             runtime.start(
                 args.request,
                 hard_constraints=args.constraint,
                 success_criteria=args.criterion,
             )
         else:
-            runtime = Runtime(
-                args.repository,
-                runtime_dir,
-                worktree_dir=config.runtime.worktree_dir,
-                provider=_provider(config),
-                validator_commands=config.validation.commands,
-                max_steps=config.runtime.max_steps,
-                command_timeout=config.runtime.command_timeout,
-                context_limit=config.provider.context_limit,
-            )
             runtime.resume(args.run_id)
         result = runtime.run()
     except (RuntimeError, ValueError) as exc:

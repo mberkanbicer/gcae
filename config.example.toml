@@ -17,5 +17,9 @@ context_limit = 8192
 temperature = 0.0
 max_tokens = 1024
 
+[evaluator]
+# "deterministic" uses validation rules; "llm" asks the configured model.
+kind = "deterministic"
+
 [validation]
 commands = []

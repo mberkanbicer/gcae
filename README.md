@@ -238,7 +238,7 @@ matching `v*` publish a GitHub release with the build artifacts.
 | [`docs/TUI.md`](./docs/TUI.md) | dashboard layout, keys, screens, responsive behavior |
 | [`docs/CLI.md`](./docs/CLI.md) · [`docs/CONFIGURATION.md`](./docs/CONFIGURATION.md) | commands and every setting |
 | [`docs/TEST_PLAN.md`](./docs/TEST_PLAN.md) | suites, mandatory end-to-end scenarios, commands |
-| [Wiki](https://github.com/mberkanbicer/gcae/wiki) | task-oriented guides built from these documents |
+| [Wiki](https://github.com/mberkanbicer/gcae/wiki) | task-oriented guides built from these documents; sources live in [`wiki/`](./wiki) and publish with `tools/publish_wiki.sh` |
 | [`CHANGELOG.md`](./CHANGELOG.md) | released features and fixes |
 
 ## License

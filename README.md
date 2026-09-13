@@ -24,7 +24,19 @@ Use deterministic completion criteria when possible:
   --criterion "command succeeds: pytest -q"
 ```
 
-See `config.example.toml` and `docs/` for the implemented contracts.
+See `config.example.toml` and `docs/` for the implemented contracts. `context_limit` is the
+token budget used when the runtime reconstructs controller context (and the request's maximum
+output tokens for the HTTP provider).
+
+Resume an interrupted run (waiting for user input or interrupted mid-step):
+
+```bash
+.venv/bin/python -m gcae resume /path/to/repository <run-id> --runtime-dir ~/.local/state/gcae
+```
+
+Each run prints the final `AgentState` as JSON on stdout and a short summary on stderr. The
+verified branch `gcae/<run-id>` and its worktree are left in place for inspection; the runtime
+never merges them into the source branch.
 
 ## Provider examples
 

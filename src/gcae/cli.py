@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 from .config import Config, load_config
 from .http_provider import OpenAICompatibleProvider
+from .models import AgentState
 from .providers import FakeProvider, Provider
 from .runtime import Runtime
 
@@ -25,6 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument("repository", type=Path)
     resume.add_argument("run_id")
     resume.add_argument("--config", type=Path)
+    resume.add_argument("--runtime-dir", type=Path)
     return parser
 
 
@@ -44,32 +47,58 @@ def _provider(config: Config) -> Provider:
     )
 
 
+def _summary(state: AgentState) -> str:
+    verification = state.last_verification
+    if verification is None:
+        criteria = "no verification"
+    else:
+        passed = sum(1 for item in verification.criteria if item.passed)
+        criteria = f"{passed}/{len(verification.criteria)} criteria passed"
+    return (
+        f"run {state.run_id}: {state.status}\n"
+        f"accepted steps: {state.accepted_steps}, commit: {state.accepted_commit or 'none'}\n"
+        f"verification: {criteria}\n"
+        f"worktree: {state.worktree}"
+    )
+
+
 def main(argv: list[str] | None = None) -> None:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
     config = load_config(args.config)
     runtime_dir = args.runtime_dir or config.state_dir
-    if args.command == "run":
-        runtime = Runtime(
-            args.repository,
-            runtime_dir,
-            worktree_dir=config.runtime.worktree_dir,
-            provider=_provider(config),
-            validator_commands=config.validation.commands,
-            max_steps=config.runtime.max_steps,
-            command_timeout=config.runtime.command_timeout,
-        )
-        runtime.start(
-            args.request,
-            hard_constraints=args.constraint,
-            success_criteria=args.criterion,
-        )
-    else:
-        runtime = Runtime(
-            args.repository,
-            runtime_dir,
-            worktree_dir=config.runtime.worktree_dir,
-            provider=_provider(config),
-        )
-        runtime.resume(args.run_id)
-    result = runtime.run()
+    try:
+        if args.command == "run":
+            runtime = Runtime(
+                args.repository,
+                runtime_dir,
+                worktree_dir=config.runtime.worktree_dir,
+                provider=_provider(config),
+                validator_commands=config.validation.commands,
+                max_steps=config.runtime.max_steps,
+                command_timeout=config.runtime.command_timeout,
+                context_limit=config.provider.context_limit,
+            )
+            runtime.start(
+                args.request,
+                hard_constraints=args.constraint,
+                success_criteria=args.criterion,
+            )
+        else:
+            runtime = Runtime(
+                args.repository,
+                runtime_dir,
+                worktree_dir=config.runtime.worktree_dir,
+                provider=_provider(config),
+                validator_commands=config.validation.commands,
+                max_steps=config.runtime.max_steps,
+                command_timeout=config.runtime.command_timeout,
+                context_limit=config.provider.context_limit,
+            )
+            runtime.resume(args.run_id)
+        result = runtime.run()
+    except (RuntimeError, ValueError) as exc:
+        print(f"gcae: error: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
     print(json.dumps(result.model_dump(mode="json"), indent=2, sort_keys=True))
+    print(_summary(result), file=sys.stderr)

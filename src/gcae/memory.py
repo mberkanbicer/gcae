@@ -36,6 +36,11 @@ class MemoryStore:
             CREATE TRIGGER IF NOT EXISTS memory_ai AFTER INSERT ON memory BEGIN
                 INSERT INTO memory_fts(rowid, content, kind) VALUES (new.id, new.content, new.kind);
             END;
+            CREATE TRIGGER IF NOT EXISTS memory_au AFTER UPDATE ON memory BEGIN
+                INSERT INTO memory_fts(memory_fts, rowid, content, kind)
+                    VALUES ('delete', old.id, old.content, old.kind);
+                INSERT INTO memory_fts(rowid, content, kind) VALUES (new.id, new.content, new.kind);
+            END;
             """
         )
         self.connection.commit()

@@ -88,11 +88,4 @@ class FinalVerifier:
 
     @staticmethod
     def _hygiene(worktree: Path) -> bool:
-        if not check_hygiene(worktree).passed:
-            return False
-        bad = [
-            path
-            for path in worktree.rglob("*")
-            if path.is_file() and (path.name.endswith("~") or path.name.endswith(".log"))
-        ]
-        return not bad
+        return check_hygiene(worktree).passed

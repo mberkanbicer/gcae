@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from gcae.config import load_config
+from gcae.config import Config, load_config
 
 
 def test_config_loading(tmp_path: Path) -> None:
@@ -9,6 +9,11 @@ def test_config_loading(tmp_path: Path) -> None:
     config = load_config(path)
     assert config.runtime.max_steps == 3
     assert config.provider.kind == "http"
+
+
+def test_config_uses_xdg_state_home(monkeypatch) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", "/tmp/gcae-state")
+    assert Config().state_dir == Path("/tmp/gcae-state/gcae")
 
 
 def test_resume_restores_trusted_state(tmp_path: Path) -> None:

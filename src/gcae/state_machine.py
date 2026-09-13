@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .models import AgentState, RunPhase
+from .models import AgentState, RunPhase, now_utc
 
 _ALLOWED: dict[RunPhase, set[RunPhase]] = {
     RunPhase.ANALYZE: {RunPhase.PLAN, RunPhase.FAILED},
@@ -21,9 +21,14 @@ _ALLOWED: dict[RunPhase, set[RunPhase]] = {
         RunPhase.VERIFY,
         RunPhase.FAILED,
     },
-    RunPhase.CHECKPOINT: {RunPhase.EXECUTE, RunPhase.VERIFY, RunPhase.FAILED},
+    RunPhase.CHECKPOINT: {
+        RunPhase.EXECUTE,
+        RunPhase.VERIFY,
+        RunPhase.COMPLETE,
+        RunPhase.FAILED,
+    },
     RunPhase.ROLLBACK: {RunPhase.EXECUTE, RunPhase.PLAN, RunPhase.FAILED},
-    RunPhase.VERIFY: {RunPhase.COMPLETE, RunPhase.PLAN, RunPhase.FAILED},
+    RunPhase.VERIFY: {RunPhase.COMPLETE, RunPhase.CHECKPOINT, RunPhase.PLAN, RunPhase.FAILED},
     RunPhase.COMPLETE: set(),
     RunPhase.FAILED: set(),
 }
@@ -34,10 +39,5 @@ class StateMachine:
         if target not in _ALLOWED[state.phase]:
             raise ValueError(f"invalid transition {state.phase} -> {target}")
         state.phase = target
-        state.updated_at = state.updated_at.__class__.now(state.updated_at.tzinfo)
-        return state
-
-    def fail(self, state: AgentState, reason: str) -> AgentState:
-        state.status = f"failed: {reason}"
-        state.phase = RunPhase.FAILED
+        state.updated_at = now_utc()
         return state

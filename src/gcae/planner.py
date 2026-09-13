@@ -1,19 +1,24 @@
 from __future__ import annotations
 
-from .models import AgentState, PlanStep
+from .models import AgentState, InitialPlan, PlanStep
 
 
 class Planner:
-    def plan(self, state: AgentState) -> list[PlanStep]:
-        return [
-            PlanStep(
-                id="step-1",
-                goal=state.objective,
-                rationale="Implement the smallest change that satisfies the request.",
-                expected_result="The requested behavior exists and is validated.",
-                validation_requirements=state.success_criteria,
-            )
-        ]
+    def plan(self, state: AgentState) -> InitialPlan:
+        return InitialPlan(
+            objective=state.objective,
+            success_criteria=list(state.success_criteria),
+            hard_constraints=list(state.hard_constraints),
+            steps=[
+                PlanStep(
+                    id="step-1",
+                    goal=state.objective,
+                    rationale="Implement the smallest change that satisfies the request.",
+                    expected_result="The requested behavior exists and is validated.",
+                    validation_requirements=state.success_criteria,
+                )
+            ],
+        )
 
     def replan(self, state: AgentState, reason: str) -> list[PlanStep]:
         numbers = [

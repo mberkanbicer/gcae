@@ -81,3 +81,13 @@ def test_event_log(tmp_path: Path) -> None:
     path = tmp_path / "events.jsonl"
     EventLog(path).append(Event(run_id="r", event_type="started"))
     assert path.read_text().count("started") == 1
+
+
+def test_memory_update_refreshes_fts(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path / "memory.db")
+    record = store.add(MemoryRecord(kind="fact", content="alpha failure", run_id="r"))
+    store.update(record.id or 0, "beta lesson")
+    assert store.search("alpha", 5) == []
+    found = store.search("beta", 5)
+    assert found and found[0].record.content == "beta lesson"
+    store.close()

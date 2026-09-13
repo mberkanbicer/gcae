@@ -7,6 +7,11 @@ from .memory import MemoryStore
 from .models import AgentState, MemoryRecord, SemanticStep, ValidationResult
 
 
+def estimate_tokens(text: str) -> int:
+    """Conservative token estimate for mixed English and code text."""
+    return max(1, (len(text) + 3) // 4)
+
+
 @dataclass(frozen=True)
 class Context:
     text: str
@@ -82,7 +87,7 @@ class ContextBuilder:
         )
 
         pinned_text = "\n".join(pinned_lines)
-        if budget <= len(pinned_text):
+        if budget <= estimate_tokens(pinned_text):
             return Context(
                 text=pinned_text,
                 pinned_ids=tuple(sorted(pinned_ids)),
@@ -94,17 +99,18 @@ class ContextBuilder:
             )
 
         lines = [pinned_text]
-        used = len(pinned_text)
+        used = estimate_tokens(pinned_text)
         omitted: list[int] = []
         optional_records = [
             record for record in records if record.id is not None and record.id not in pinned_ids
         ]
         for line in optional_lines:
             separator_length = 1 if lines else 0
-            if used + separator_length + len(line) > budget:
+            cost = estimate_tokens(line) + separator_length
+            if used + cost > budget:
                 continue
             lines.append(line)
-            used += separator_length + len(line)
+            used += cost
         rendered = "\n".join(lines)
         included_text = rendered
         for record in optional_records:

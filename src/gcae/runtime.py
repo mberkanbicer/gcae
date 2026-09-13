@@ -41,6 +41,7 @@ class Runtime:
         validator_commands: list[str] | None = None,
         max_steps: int = 20,
         command_timeout: int = 30,
+        context_limit: int = 8192,
         evaluator: Evaluator | None = None,
     ) -> None:
         self.source_repo = Path(source_repo).resolve()
@@ -56,6 +57,7 @@ class Runtime:
         self.validator_commands = list(validator_commands or [])
         self.max_steps = max_steps
         self.command_timeout = command_timeout
+        self.context_limit = context_limit
         self.evaluator = evaluator or Evaluator()
         self.planner = Planner()
         self.machine = StateMachine()
@@ -91,7 +93,9 @@ class Runtime:
             accepted_commit=base,
             latest_user_instruction=request,
         )
-        self.state.plan = self.planner.plan(self.state)
+        initial_plan = self.planner.plan(self.state)
+        self.state.plan = initial_plan.steps
+        self.state.assumptions = list(initial_plan.assumptions)
         self._transition(RunPhase.PLAN)
         self._remember("user_instruction", request, immutable=True)
         for constraint in self.state.hard_constraints:
@@ -123,6 +127,7 @@ class Runtime:
         self.repo.validate_source()
         if not self.repo.worktree.exists():
             raise RuntimeError(f"persisted agent worktree does not exist: {self.repo.worktree}")
+        self.repo.assert_registered_worktree()
         if self.state.accepted_commit:
             self.repo.rollback(self.state.accepted_commit)
         if self.state.status != "complete":
@@ -159,13 +164,16 @@ class Runtime:
             context = ContextBuilder(self.memory).build(
                 self.state,
                 step,
-                budget=8192,
+                budget=self.context_limit,
                 current_diff=self.repo.diff(),
                 active_files=self.repo.changed_files(),
                 observations=self.state.latest_observations,
             )
+            tools = ToolRegistry(self.state.worktree, self.command_timeout)
             try:
-                decision = Controller(DecisionProvider(self.provider)).decide(context.text)
+                decision = Controller(DecisionProvider(self.provider), tools.names()).decide(
+                    context.text
+                )
             except ProviderOutputError as exc:
                 self._remember("failure", f"provider failure: {exc}", immutable=True)
                 self.state.status = "failed: provider output"
@@ -213,7 +221,6 @@ class Runtime:
                 self._persist()
                 continue
 
-            tools = ToolRegistry(self.state.worktree, self.command_timeout)
             result = tools.execute(decision.tool)
             self._save_tool_result(result, plan.id)
             observation = result.output.strip() or result.error or decision.reason_summary
@@ -301,6 +308,13 @@ class Runtime:
         report = self.verifier.verify(self.state)
         self.state.last_verification = report
         if report.passed and report.hygiene_passed:
+            if self.repo.status():
+                self._transition(RunPhase.CHECKPOINT)
+                self.state.accepted_commit = self.repo.checkpoint("gcae: verified final state")
+                self.state.accepted_steps += 1
+            for plan in self.state.plan:
+                plan.status = "accepted"
+            self.state.plan = []
             self.state.status = "complete"
             self._transition(RunPhase.COMPLETE)
             self._persist()

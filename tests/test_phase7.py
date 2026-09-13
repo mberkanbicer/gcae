@@ -2,8 +2,10 @@ import json
 
 import httpx
 
+from gcae.controller import Controller
 from gcae.http_provider import OpenAICompatibleProvider
 from gcae.models import Decision
+from gcae.providers import DecisionProvider
 
 
 def test_openai_compatible_provider() -> None:
@@ -45,3 +47,26 @@ def test_openai_compatible_provider() -> None:
     assert received["temperature"] == 0.2
     assert received["top_p"] == 0.8
     assert authorization == "Bearer secret"
+
+
+class RecordingProvider:
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+
+    def complete(self, prompt: str, schema: type[Decision]) -> Decision:
+        del schema
+        self.prompts.append(prompt)
+        return Decision(action="replan", semantic_goal="goal", reason_summary="reason")
+
+
+def test_controller_prompt_includes_decision_contract() -> None:
+    provider = RecordingProvider()
+    controller = Controller(DecisionProvider(provider), ["read_file", "run_command"])
+    decision = controller.decide("CTX")
+    assert decision.action.value == "replan"
+    prompt = provider.prompts[0]
+    assert "execute_tool" in prompt
+    assert "Decision JSON schema" in prompt
+    assert "read_file" in prompt
+    assert "run_command" in prompt
+    assert "CTX" in prompt

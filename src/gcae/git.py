@@ -73,6 +73,17 @@ class GitRepository:
             raise GitError("isolated worktree has not been created")
         return self.worktree
 
+    def assert_registered_worktree(self) -> None:
+        worktree = self._require_worktree().resolve()
+        listing = self._run("worktree", "list", "--porcelain", cwd=self.source)
+        registered = {
+            Path(line.removeprefix("worktree ")).resolve()
+            for line in listing.splitlines()
+            if line.startswith("worktree ")
+        }
+        if worktree not in registered:
+            raise GitError(f"worktree is not registered with the source repository: {worktree}")
+
     def current_commit(self) -> str:
         return self._run("rev-parse", "HEAD", cwd=self._require_worktree())
 

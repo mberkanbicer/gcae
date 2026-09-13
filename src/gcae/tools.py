@@ -8,6 +8,20 @@ from typing import Any
 
 from .models import ToolCall, ToolResult
 
+TOOL_DESCRIPTIONS: dict[str, str] = {
+    "list_files": "list worktree-relative files; arguments {'path'?: str, 'pattern'?: str}",
+    "read_file": "read a UTF-8 text file; arguments {'path': str}",
+    "search_text": "search literal text in files; arguments {'query': str, 'path'?: str}",
+    "apply_patch": "apply a unified diff inside the worktree; arguments {'patch': str}",
+    "create_file": (
+        "create one new file and refuse overwrite; arguments {'path': str, 'content': str}"
+    ),
+    "run_command": (
+        "run a shell command in the worktree; arguments {'command': str, 'timeout'?: int}; "
+        "destructive, network, package-install and git-history commands are rejected"
+    ),
+}
+
 
 class WorkspaceViolation(ValueError):
     """Raised when a tool path escapes the active worktree."""
@@ -142,9 +156,9 @@ class ToolRegistry:
         lowered = command.lower()
         blocked = [
             r"\bsudo\b", r"\bshutdown\b", r"\breboot\b", r"\bmkfs(?:\.|\s)",
-            r"\bdd\s+if=", r"rm\s+-rf\s+/(?:\s|$)", r"\bpoweroff\b",
+            r"\bdd\s+if=", r"rm\s+-rf\s+/(?:\s|$|\*)", r"\bpoweroff\b",
             r"\b(?:curl|wget|nc|ssh|scp)\b",
-            r"\b(?:pip|uv|poetry|npm)\s+(?:install|add|sync)\b",
+            r"\b(?:pip3?|uv|poetry|npm)\s+(?:install|add|sync)\b",
             r"\bpython(?:\d+(?:\.\d+)?)?\s+-m\s+pip\s+install\b",
             r"\bgit\s+(?:reset|clean|commit|worktree|checkout|switch|merge|rebase)\b",
         ]

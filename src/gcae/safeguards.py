@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from collections import deque
 from dataclasses import dataclass
@@ -39,10 +38,11 @@ def check_hygiene(worktree: str | Path) -> HygieneReport:
     unexpected = tuple(
         str(path.relative_to(root))
         for path in root.rglob("*")
-        if path.is_file() and (path.name.endswith("~") or path.name.endswith(".pyc"))
+        if path.is_file()
+        and (
+            path.name.endswith("~")
+            or path.name.endswith(".pyc")
+            or path.name.endswith(".log")
+        )
     )
     return HygieneReport(passed=not unexpected, unexpected=unexpected)
-
-
-def trajectory_key(value: object) -> str:
-    return hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()

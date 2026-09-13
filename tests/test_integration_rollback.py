@@ -15,16 +15,6 @@ def init_repo(path: Path) -> None:
     subprocess.run(["git", "-C", str(path), "commit", "-qm", "base"], check=True)
 
 
-class RejectBadAcceptGood:
-    def evaluate(self, decision: Decision, validation: ValidationResult) -> Evaluation:
-        del decision
-        content = Path(validation.changed_files[0]).name if validation.changed_files else ""
-        del content
-        candidate = validation.command_results
-        del candidate
-        return Evaluation(outcome="accept", reason="default")
-
-
 def test_end_to_end_rollback_trajectory(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source.mkdir()
@@ -38,7 +28,7 @@ def test_end_to_end_rollback_trajectory(tmp_path: Path) -> None:
                 "reason_summary": "bad first attempt",
                 "tool": {
                     "name": "create_file",
-                    "arguments": {"path": "result.txt", "content": "bad"},
+                    "arguments": {"path": "bad.txt", "content": "bad"},
                 },
             },
             {
@@ -53,27 +43,25 @@ def test_end_to_end_rollback_trajectory(tmp_path: Path) -> None:
             {"action": "finish", "semantic_goal": "finish", "reason_summary": "verified"},
         ]
     )
+    observed_commits: list[str | None] = []
 
     class TrajectoryEvaluator:
         def evaluate(self, decision: Decision, validation: ValidationResult) -> Evaluation:
-            del decision
-            candidate = (
-                Path(runtime.state.worktree) / validation.changed_files[0]
-                if validation.changed_files and runtime.state is not None
-                else None
-            )
-            if candidate and candidate.name == "result.txt":
-                text = candidate.read_text()
-                if text == "bad":
-                    return Evaluation(outcome="rollback", reason="bad implementation")
-                if text == "good":
-                    return Evaluation(
-                        outcome="accept",
-                        reason="correct implementation",
-                        progress=True,
-                        requirement_compliant=True,
-                        clean=True,
-                    )
+            del decision, validation
+            assert runtime.state is not None
+            worktree = Path(runtime.state.worktree)
+            observed_commits.append(runtime.state.accepted_commit)
+            if (worktree / "bad.txt").exists():
+                return Evaluation(outcome="rollback", reason="bad implementation")
+            candidate = worktree / "result.txt"
+            if candidate.exists() and candidate.read_text() == "good":
+                return Evaluation(
+                    outcome="accept",
+                    reason="correct implementation",
+                    progress=True,
+                    requirement_compliant=True,
+                    clean=True,
+                )
             return Evaluation(outcome="rollback", reason="unexpected candidate")
 
     runtime = Runtime(
@@ -83,14 +71,21 @@ def test_end_to_end_rollback_trajectory(tmp_path: Path) -> None:
         evaluator=TrajectoryEvaluator(),
         max_steps=10,
     )
-    runtime.start("create result", success_criteria=["file exists: result.txt"])
+    state = runtime.start("create result", success_criteria=["file exists: result.txt"])
+    base = state.accepted_commit
     result = runtime.run()
     assert result.status == "complete"
     assert (source / "app.txt").read_text() == original
-    assert (Path(result.worktree) / "result.txt").read_text() == "good"
+    assert not (source / "result.txt").exists()
+    worktree = Path(result.worktree)
+    assert (worktree / "result.txt").read_text() == "good"
+    assert not (worktree / "bad.txt").exists()
     assert runtime.repo is not None
     assert runtime.repo.current_commit() == result.accepted_commit
-    assert not (Path(result.worktree) / "bad.txt").exists()
+    assert result.accepted_commit != base
+    assert observed_commits and all(commit == base for commit in observed_commits)
     assert runtime.memory is not None
     assert any("bad implementation" in item.content for item in runtime.memory.all(result.run_id))
-    assert not (source / "result.txt").exists()
+    run_dir = tmp_path / "runtime" / "runs" / result.run_id
+    assert list((run_dir / "tool-results").glob("*.json"))
+    assert list((run_dir / "diffs").glob("*.diff"))

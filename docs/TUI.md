@@ -22,6 +22,11 @@ If the run cannot start (dirty repository, no commits, planner failure), the das
 `failed: <reason>` and `i` re-opens the request screen so a corrected task can be entered without
 restarting the app. Failed runs keep whatever state they persisted.
 
+The exact request is always visible in the Objective panel and persisted verbatim in the run's
+`state.json`; the event log may wrap in narrow terminals, so use `gcae inspect <run-id>` to read
+the ground truth. The log echoes the character count (`task (N chars): ...`), and the objective
+panel keeps showing the request while the planner works.
+
 ## Responsive layout
 
 The request/instruction modal always fits the terminal (`width: 90%`, capped at 70 columns,

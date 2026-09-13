@@ -214,6 +214,38 @@ def test_tui_recovers_after_a_failed_start(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
+def test_request_text_is_preserved_verbatim(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    init_repo(source)
+    runtime = Runtime(
+        source, tmp_path / "runtime", provider=FakeProvider(TRAJECTORY), control=RuntimeControl()
+    )
+    app = GcaeApp(runtime)
+    task = "create hello.md with lorem ipsum"
+
+    async def scenario() -> None:
+        async with app.run_test(size=(80, 20)) as pilot:
+            await pilot.pause()
+            for character in task:
+                key = {" ": "space", ".": "full_stop"}.get(character, character)
+                await pilot.press(key)
+            await pilot.press("enter")
+            for _ in range(200):
+                if app.agent_done:
+                    break
+                await pilot.pause(0.05)
+            assert runtime.state is not None
+            assert runtime.state.objective == task
+            task_lines = [line for line in app.log_lines if "task (" in line]
+            start_lines = [line for line in app.log_lines if "starting run for" in line]
+            assert task_lines and task_lines[-1].endswith(task)
+            assert start_lines and start_lines[-1].endswith(task)
+            assert "md" in task_lines[-1].rsplit(":", 1)[-1]
+
+    asyncio.run(scenario())
+
+
 def test_user_override_submission(tmp_path: Path) -> None:
     runtime = make_runtime(tmp_path)
     app = GcaeApp(runtime, auto_run=False)

@@ -211,7 +211,7 @@ class GcaeApp(App[None]):
             return
         self.request = text.strip()
         self._needs_start = True
-        self._log_line(f"task: {self.request}")
+        self._log_line(f"task ({len(self.request)} chars): {self.request}")
         if self.auto_run:
             self._launch_worker()
 
@@ -352,7 +352,15 @@ class GcaeApp(App[None]):
                 )
             else:
                 self._set_panel("run", "waiting for the task description...")
-            self._set_panel("objective", "objective: (not set)\nenter the task to start")
+            self._set_panel(
+                "objective",
+                f"objective: {self.request or '(not set)'}\n"
+                + (
+                    "enter the task to start"
+                    if not self.request
+                    else "starting the run..."
+                ),
+            )
             return
         elapsed = datetime.now(UTC) - state.created_at
         self._set_panel(

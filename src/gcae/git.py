@@ -57,18 +57,18 @@ class GitRepository:
             )
         if not self._run("rev-parse", "--verify", "HEAD", check=False):
             raise GitError(
-                "source repository has no commits; create a base commit first "
-                "(git add -A && git commit -m base)"
+                f"source repository has no commits: {self.source} — create a base commit "
+                'first (git add -A; git commit -m "base")'
             )
         if not self._run("config", "user.email", check=False):
             raise GitError(
-                "git user.email is not configured; set it before running GCAE "
-                '(git config --global user.email "you@example.com")'
+                f"git user.email is not configured for {self.source}; set it before running "
+                'GCAE (git config --global user.email "you@example.com")'
             )
         if not self._run("config", "user.name", check=False):
             raise GitError(
-                "git user.name is not configured; set it before running GCAE "
-                '(git config --global user.name "Your Name")'
+                f"git user.name is not configured for {self.source}; set it before running "
+                'GCAE (git config --global user.name "Your Name")'
             )
         for directory in (self.runtime_dir, self.worktree_dir):
             if directory == self.source or self.source in directory.parents:

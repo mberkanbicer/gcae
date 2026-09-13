@@ -27,7 +27,10 @@ without one.
 - remote HTTP providers have an API key (`api_key` or `api_key_env`); local endpoints do not need one;
 - the runtime state directory is writable.
 
-Provider failures report the underlying cause (connection refused, HTTP status, invalid JSON)
+`planner failed` means the model-backed planner could not produce a plan. When you supplied
+`--criterion`, GCAE falls back to a deterministic single-step plan and says so in the timeline
+(`! planner unavailable · single-step plan · <reason>`); without criteria it stops and tells you the
+exact `--criterion` to add. Provider failures report the underlying cause (connection refused, HTTP status, invalid JSON)
 instead of a generic message. `run` and `resume` open the dashboard on a terminal;
 non-interactive environments (or `--headless`) get the event log on stderr plus the final
 `AgentState` JSON on stdout. The summary line reports status, accepted steps, verification,

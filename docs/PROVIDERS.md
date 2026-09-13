@@ -10,6 +10,34 @@ Configurable per provider: `base_url`, `model`, `api_key` or `api_key_env`, `tim
 when a key is configured. Native tool calling is not used: the model returns structured JSON that
 the runtime validates and executes.
 
+## Reasoning models and structured output
+
+Reasoning models (OpenRouter returns `message.reasoning` separately) can spend their whole output
+budget deliberating. GCAE handles the two failure modes it has observed:
+
+| Symptom | Cause | GCAE behaviour |
+| --- | --- | --- |
+| `content` is empty, `finish_reason=length`, huge `reasoning` | `response_format=json_object` makes the model deliberate to the token limit | retries **without** `response_format` (the prompt already demands JSON and the schema is validated) |
+| valid JSON start, cut off mid-document (`Unterminated string`) | `max_tokens` too small for the requested schema | retries with **double** the output budget, bounded by `context_limit` |
+
+Both retries are bounded (`repair_limit`, default 2) and the final error names the real cause:
+`provider returned no text content (finish_reason=length, 8192 chars of reasoning, 8192 completion
+tokens, model=…) — the model hit its output budget; raise [provider.generation] max_tokens or set
+[provider] json_mode = false`.
+
+Recommended settings for reasoning models:
+
+```toml
+[provider]
+json_mode = false          # skip response_format=json_object
+
+[provider.generation]
+max_tokens = 2048          # enough for the planner schema; avoids one wasted round trip
+```
+
+`[provider.generation]` is merged verbatim into the request body, so provider-specific knobs (for
+example OpenRouter's `reasoning` options) can be set there too.
+
 ## Role models
 
 `models.controller`, `models.planner`, `models.evaluator`, `models.verifier` and

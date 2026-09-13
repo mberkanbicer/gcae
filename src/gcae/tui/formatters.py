@@ -251,6 +251,9 @@ def timeline_entry(
         return ("●", f"run started · {elide(str(payload.get('objective', '')), 80)}", "accent")
     if event_type == "run_resumed":
         return ("●", "run resumed", "accent")
+    if event_type == "planner_fallback":
+        reason = elide(str(payload.get("reason") or ""), 70)
+        return ("!", f"planner unavailable · single-step plan · {reason}", "warning")
     if event_type == "repository_notice":
         if payload.get("kind") in {"base", "empty"}:
             file_count = int(payload.get("files") or 0)

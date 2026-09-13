@@ -129,7 +129,10 @@ class ToolRegistry:
     def create_file(self, args: dict[str, Any]) -> ToolResult:
         path = self._path(str(args["path"]))
         if path.exists():
-            raise ValueError("create_file refuses to overwrite an existing file")
+            raise ValueError(
+                "create_file refuses to overwrite an existing file; "
+                "use write_file to replace its contents"
+            )
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(str(args.get("content", "")), encoding="utf-8")
         return ToolResult(

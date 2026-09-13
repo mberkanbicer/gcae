@@ -17,7 +17,7 @@ from gcae.http_provider import OpenAICompatibleProvider
 from gcae.models import AgentState, Evaluation, EvaluationInput
 from gcae.planner import LLMPlanner, Planner
 from gcae.providers import FakeProvider, ProviderOutputError
-from gcae.runtime import Runtime
+from gcae.runtime import Runtime, RuntimeControl
 from gcae.verifier import FinalVerifier
 
 
@@ -264,3 +264,84 @@ def test_evaluator_output_failure_is_reported(tmp_path: Path) -> None:
     runtime.start("create a.txt", success_criteria=["file exists: a.txt"])
     result = runtime.run()
     assert result.status.startswith("failed: evaluator output")
+
+
+class _DeadPlanner:
+    """Planner whose model backend is unavailable."""
+
+    def plan(self, state: AgentState):  # type: ignore[no-untyped-def]
+        raise ProviderOutputError("provider returned no text content (finish_reason=length)")
+
+    def replan(self, state: AgentState, reason: str):  # type: ignore[no-untyped-def]
+        raise ProviderOutputError("provider returned no text content")
+
+
+def _dead_planner_repo(tmp_path: Path) -> Path:
+    source = tmp_path / "source"
+    source.mkdir()
+    subprocess.run(["git", "init", "-q", str(source)], check=True)
+    subprocess.run(["git", "-C", str(source), "config", "user.email", "t@e.f"], check=True)
+    subprocess.run(["git", "-C", str(source), "config", "user.name", "T"], check=True)
+    (source / "README").write_text("base\n")
+    subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(source), "commit", "-qm", "base"], check=True)
+    return source
+
+
+def test_planner_outage_falls_back_when_user_criteria_exist(tmp_path: Path) -> None:
+    """A planner outage must not waste a run the user can already verify."""
+    runtime = Runtime(
+        _dead_planner_repo(tmp_path),
+        tmp_path / "runtime",
+        provider=FakeProvider(
+            [
+                {
+                    "action": "execute_tool",
+                    "semantic_goal": "create",
+                    "reason_summary": "create",
+                    "tool": {
+                        "name": "create_file",
+                        "arguments": {"path": "answer.txt", "content": "ok"},
+                    },
+                },
+                {
+                    "action": "complete_semantic_step",
+                    "semantic_goal": "create",
+                    "reason_summary": "done",
+                },
+            ]
+        ),
+        planner=_DeadPlanner(),  # type: ignore[arg-type]
+        control=RuntimeControl(),
+    )
+    events: list[str] = []
+    runtime.subscribe(lambda event: events.append(event.event_type))
+    runtime.start("create answer", success_criteria=["file exists: answer.txt"])
+    assert runtime.state is not None and runtime.state.plan
+    assert runtime.state.success_criteria == ["file exists: answer.txt"]
+    assert "planner_fallback" in events
+    assert runtime.run().status == "complete"
+
+
+def test_planner_outage_without_criteria_explains_the_way_out(tmp_path: Path) -> None:
+    runtime = Runtime(
+        _dead_planner_repo(tmp_path),
+        tmp_path / "runtime",
+        provider=FakeProvider([]),
+        planner=_DeadPlanner(),  # type: ignore[arg-type]
+        control=RuntimeControl(),
+    )
+    with pytest.raises(RuntimeError) as excinfo:
+        runtime.start("do something vague")
+    message = str(excinfo.value)
+    assert "planner failed" in message
+    assert "--criterion" in message
+
+
+def test_json_mode_is_configurable_and_reaches_the_provider() -> None:
+    provider = _provider(
+        ProviderConfig(kind="http", base_url="http://localhost:11434/v1", json_mode=False)
+    )
+    assert isinstance(provider, OpenAICompatibleProvider)
+    assert provider.json_mode is False
+    assert _provider(ProviderConfig(kind="http", base_url="http://localhost:11434/v1")).json_mode

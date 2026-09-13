@@ -22,6 +22,9 @@ class ProviderConfig(BaseModel):
     timeout: float = 60.0
     context_limit: int = 8192
     generation: GenerationConfig = Field(default_factory=GenerationConfig)
+    # response_format=json_object. Disable for reasoning models that deliberate until the
+    # output budget is exhausted and never emit content.
+    json_mode: bool = True
 
 
 class ModelOverride(BaseModel):

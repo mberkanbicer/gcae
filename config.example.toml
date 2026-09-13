@@ -19,6 +19,9 @@ api_key_env = "OPENAI_API_KEY"
 timeout = 60
 # Token budget for reconstructed context and the provider's maximum output tokens.
 context_limit = 8192
+# response_format=json_object. Reasoning models (e.g. many :free OpenRouter models) can
+# deliberate until the output budget is gone and never emit content; set false for them.
+json_mode = true
 
 [provider.generation]
 temperature = 0.0

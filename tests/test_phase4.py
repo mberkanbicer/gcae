@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from gcae.models import ToolCall
 from gcae.tools import DangerousCommand, ToolRegistry, WorkspaceViolation
 
 
@@ -42,3 +43,15 @@ def test_patch_workspace_escape_rejected(tmp_path: Path) -> None:
                 )
             }
         )
+
+
+def test_create_file_refusal_points_at_the_alternative(tmp_path: Path) -> None:
+    """The model must be told what to do instead, not just that it failed."""
+    registry = ToolRegistry(tmp_path)
+    (tmp_path / "notes.md").write_text("existing\n")
+    result = registry.execute(
+        ToolCall(name="create_file", arguments={"path": "notes.md", "content": "new\n"})
+    )
+    assert result.success is False
+    assert "write_file" in (result.error or "")
+    assert (tmp_path / "notes.md").read_text() == "existing\n"

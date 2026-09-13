@@ -144,6 +144,7 @@ class Runtime:
         self._escalated = False
         self.last_context_info: dict[str, int] = {}
         self.last_context_text = ""
+        self._planner_notice: str | None = None
 
     # ------------------------------------------------------------------ lifecycle
 
@@ -213,11 +214,19 @@ class Runtime:
         try:
             initial_plan = self.planner.plan(self.state)
         except ProviderOutputError as exc:
-            self.state.status = "failed: planner output"
-            self.state.phase = RunPhase.FAILED
-            self._remember("failure", f"planner failure: {exc}", immutable=True)
-            self._persist()
-            raise RuntimeError(f"planner failed: {exc}") from exc
+            if not self.state.success_criteria:
+                self.state.status = "failed: planner output"
+                self.state.phase = RunPhase.FAILED
+                self._remember("failure", f"planner failure: {exc}", immutable=True)
+                self._persist()
+                raise RuntimeError(
+                    f"planner failed: {exc} — re-run with a checkable --criterion "
+                    '(e.g. --criterion "file exists: README.md") to start without the planner'
+                ) from exc
+            # User criteria define done; a planner outage must not waste the whole run.
+            initial_plan = Planner().plan(self.state)
+            self._planner_notice = str(exc)
+            logger.warning("planner unavailable, using the deterministic plan: %s", exc)
         self.state.objective = initial_plan.objective or request
         self.state.assumptions = list(initial_plan.assumptions)
         for criterion in initial_plan.success_criteria:
@@ -235,6 +244,13 @@ class Runtime:
         self.state.next_step_number = max(numbers, default=0) + 1
         self._transition(RunPhase.PLAN)
         self._publish_repository_notices()
+        if self._planner_notice is not None:
+            self._event(
+                "planner_fallback",
+                RunPhase.PLAN,
+                payload={"reason": self._planner_notice},
+            )
+            self._planner_notice = None
         self._emit_plan(reason="initial plan")
         self._remember("user_instruction", request, immutable=True)
         for constraint in self.state.hard_constraints:
@@ -410,9 +426,13 @@ class Runtime:
                 if self._evaluate_step(plan, tools):
                     return self.state
 
+        budget_message = (
+            f"step budget exhausted after {self.max_steps} iterations "
+            "(raise [runtime] max_steps for longer tasks)"
+        )
         if self.repo.status():
-            self._rollback("step budget exhausted")
-        return self._fail("step budget exhausted")
+            self._rollback(budget_message)
+        return self._fail(budget_message)
 
     # ------------------------------------------------------------------ steps
 

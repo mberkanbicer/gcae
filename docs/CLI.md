@@ -75,5 +75,7 @@ gcae merge ~/src/project 3cdf087083c2
 gcae undo  ~/src/project 3cdf087083c2
 ```
 
-Exit codes: `0` success, `1` handled error (bad config, dirty repository, refused merge, failed
-run), `2` argparse usage errors.
+Exit codes: `0` only when a run finished (`status == "complete"`); `1` for a handled error
+(bad config, refused repository, refused merge) and for a run that ended `failed`, `stopped`
+or `waiting_for_user`, so scripted callers can rely on the exit status; `2` argparse usage
+errors.

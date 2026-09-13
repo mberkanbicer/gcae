@@ -15,6 +15,17 @@ from .safeguards import check_hygiene
 from .tools import ToolRegistry
 
 
+def evidence_for(path: Path, expected: str, found: str | None, limit: int = 200) -> str:
+    """Show what was expected and what is actually there, so failures are diagnosable."""
+    if found is None:
+        return f"{path}: file does not exist"
+    if found == expected:
+        return str(path)
+    actual = found if len(found) <= limit else found[:limit] + "…"
+    wanted = expected if len(expected) <= limit else expected[:limit] + "…"
+    return f"{path}: expected {wanted!r}, found {actual!r}"
+
+
 class FinalVerifier:
     """Deterministic verification with an optional, strict model judge.
 
@@ -83,8 +94,9 @@ class FinalVerifier:
                 )
             try:
                 path = tools._path(relative.strip())
-                passed = path.is_file() and path.read_text(encoding="utf-8") == expected
-                evidence = str(path)
+                found = path.read_text(encoding="utf-8") if path.is_file() else None
+                passed = found == expected
+                evidence = evidence_for(path, expected, found)
             except (OSError, UnicodeError, ValueError) as exc:
                 passed = False
                 evidence = str(exc)
@@ -101,8 +113,9 @@ class FinalVerifier:
                 )
             try:
                 path = tools._path(relative.strip())
-                passed = path.is_file() and expected in path.read_text(encoding="utf-8")
-                evidence = str(path)
+                found = path.read_text(encoding="utf-8") if path.is_file() else None
+                passed = found is not None and expected in found
+                evidence = evidence_for(path, expected, found)
             except (OSError, UnicodeError, ValueError) as exc:
                 passed = False
                 evidence = str(exc)

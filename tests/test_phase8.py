@@ -195,3 +195,75 @@ def test_resume_restores_trusted_state(tmp_path: Path) -> None:
     resumed = Runtime(source, tmp_path / "runtime", provider=FakeProvider([])).resume(state.run_id)
     assert resumed.accepted_commit == state.accepted_commit
     assert resumed.worktree == state.worktree
+
+
+def _fake_config(tmp_path: Path) -> Path:
+    config = tmp_path / "config.toml"
+    config.write_text(
+        f'[provider]\nkind = "fake"\n\n[runtime]\nstate_dir = "{tmp_path / "state"}"\n'
+    )
+    return config
+
+
+def _git_repo(tmp_path: Path) -> Path:
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    (repo / "README.md").write_text("base\n")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(
+        [
+            "git", "-C", str(repo),
+            "-c", "user.name=T", "-c", "user.email=t@e.f",
+            "commit", "-qm", "base",
+        ],
+        check=True,
+    )
+    return repo
+
+
+def test_cli_exits_non_zero_when_a_run_does_not_complete(tmp_path: Path, capsys) -> None:
+    """Scripts must be able to tell a failed run from a finished one."""
+    from gcae.cli import main
+
+    repo = _git_repo(tmp_path)
+    with pytest.raises(SystemExit) as exit_info:
+        main(
+            [
+                "run",
+                str(repo),
+                "create the impossible file",
+                "--criterion",
+                "file exists: never-created.txt",
+                "--headless",
+                "--no-merge",
+                "--config",
+                str(_fake_config(tmp_path)),
+            ]
+        )
+    assert exit_info.value.code == 1
+    captured = capsys.readouterr()
+    assert "failed" in captured.err
+
+
+def test_criterion_failure_evidence_shows_expected_and_found(tmp_path: Path) -> None:
+    from gcae.models import AgentState
+    from gcae.verifier import FinalVerifier
+
+    (tmp_path / "NOTES.md").write_text("hello from gcae\n")
+    state = AgentState(
+        run_id="r",
+        source_repo="/source",
+        worktree=str(tmp_path),
+        branch="b",
+        objective="o",
+        original_request="o",
+        success_criteria=["file contains exactly: NOTES.md :: hello from gcae"],
+    )
+    report = FinalVerifier().verify(state)
+    result = report.criteria[0]
+    assert result.passed is False
+    assert "expected 'hello from gcae'" in result.evidence
+    assert "found 'hello from gcae\\n'" in result.evidence

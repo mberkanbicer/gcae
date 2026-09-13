@@ -460,3 +460,6 @@ def main(argv: list[str] | None = None) -> None:
         _maybe_merge(result, runtime_dir, args.merge, args.no_merge)
     print(json.dumps(result.model_dump(mode="json"), indent=2, sort_keys=True))
     print(_summary(result), file=sys.stderr)
+    if result.status != "complete":
+        # a scripted caller must be able to tell an unfinished run from a finished one
+        raise SystemExit(1)

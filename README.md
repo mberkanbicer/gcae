@@ -55,7 +55,7 @@ OpenRouter:
 
 ```toml
 [provider]
-kind = "http"
+kind = "http"  # "openrouter" is accepted as an alias for the same generic endpoint
 base_url = "https://openrouter.ai/api/v1"
 model = "openai/gpt-4o-mini"
 api_key_env = "OPENROUTER_API_KEY"

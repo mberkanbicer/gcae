@@ -32,7 +32,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _provider(config: Config) -> Provider:
-    if config.provider.kind == "http":
+    kind = config.provider.kind.lower()
+    if kind in {"http", "openrouter"}:
         return OpenAICompatibleProvider(
             base_url=config.provider.base_url,
             model=config.provider.model,
@@ -42,9 +43,11 @@ def _provider(config: Config) -> Provider:
             context_limit=config.provider.context_limit,
             generation=config.provider.generation.model_dump(),
         )
-    return FakeProvider(
-        [{"action": "finish", "semantic_goal": "finish", "reason_summary": "fake provider"}]
-    )
+    if kind == "fake":
+        return FakeProvider(
+            [{"action": "finish", "semantic_goal": "finish", "reason_summary": "fake provider"}]
+        )
+    raise ValueError(f"unsupported provider kind: {config.provider.kind!r}")
 
 
 def _summary(state: AgentState) -> str:

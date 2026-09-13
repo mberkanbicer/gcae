@@ -1,6 +1,8 @@
 from pathlib import Path
 
-from gcae.config import Config, load_config
+import pytest
+
+from gcae.config import Config, ProviderConfig, load_config
 
 
 def test_config_loading(tmp_path: Path) -> None:
@@ -14,6 +16,19 @@ def test_config_loading(tmp_path: Path) -> None:
 def test_config_uses_xdg_state_home(monkeypatch) -> None:
     monkeypatch.setenv("XDG_STATE_HOME", "/tmp/gcae-state")
     assert Config().state_dir == Path("/tmp/gcae-state/gcae")
+
+
+def test_provider_kind_resolution() -> None:
+    from gcae.cli import _provider
+    from gcae.http_provider import OpenAICompatibleProvider
+    from gcae.providers import FakeProvider
+
+    assert isinstance(_provider(Config(provider=ProviderConfig(kind="fake"))), FakeProvider)
+    live = _provider(Config(provider=ProviderConfig(kind="openrouter")))
+    assert isinstance(live, OpenAICompatibleProvider)
+    live.close()
+    with pytest.raises(ValueError):
+        _provider(Config(provider=ProviderConfig(kind="bogus")))
 
 
 def test_resume_restores_trusted_state(tmp_path: Path) -> None:

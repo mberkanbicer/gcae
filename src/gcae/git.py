@@ -29,32 +29,59 @@ class GitRepository:
         self.branch: str | None = None
 
     def _run(self, *args: str, cwd: Path | None = None, check: bool = True) -> str:
-        result = subprocess.run(
-            ["git", *args],
-            cwd=cwd or self.source,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        try:
+            result = subprocess.run(
+                ["git", *args],
+                cwd=cwd or self.source,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except FileNotFoundError as exc:
+            raise GitError(
+                "git executable not found; install Git and make sure it is on PATH"
+            ) from exc
         if check and result.returncode != 0:
             raise GitError(result.stderr.strip() or result.stdout.strip() or "git command failed")
-        return result.stdout.strip()
+        return result.stdout.rstrip("\n")
 
     def validate_source(self) -> str:
         if not self.source.is_dir():
             raise GitError(f"source is not a directory: {self.source}")
         if self._run("rev-parse", "--is-inside-work-tree", check=False) != "true":
             raise GitError(f"source is not a Git repository: {self.source}")
+        top = self._run("rev-parse", "--show-toplevel", check=False)
+        if top and Path(top).resolve() != self.source:
+            raise GitError(
+                f"source is a subdirectory of a Git repository; pass the repository root: {top}"
+            )
         if not self._run("rev-parse", "--verify", "HEAD", check=False):
             raise GitError(
-                "source repository has no commits; create a base commit before running GCAE"
+                "source repository has no commits; create a base commit first "
+                "(git add -A && git commit -m base)"
+            )
+        if not self._run("config", "user.email", check=False):
+            raise GitError(
+                "git user.email is not configured; set it before running GCAE "
+                '(git config --global user.email "you@example.com")'
+            )
+        if not self._run("config", "user.name", check=False):
+            raise GitError(
+                "git user.name is not configured; set it before running GCAE "
+                '(git config --global user.name "Your Name")'
             )
         for directory in (self.runtime_dir, self.worktree_dir):
             if directory == self.source or self.source in directory.parents:
                 raise GitError("runtime directories must be external to the source repository")
         status = self._run("status", "--porcelain", "--untracked-files=all")
         if status:
-            raise GitError("source repository has uncommitted changes; refusing to mutate it")
+            lines = status.splitlines()
+            paths = ", ".join(line[3:] for line in lines[:10])
+            more = "" if len(lines) <= 10 else f" (+{len(lines) - 10} more)"
+            raise GitError(
+                "source repository has uncommitted changes; commit or stash them first: "
+                f"{paths}{more}"
+            )
         return self._run("rev-parse", "HEAD")
 
     def create_isolated_worktree(self, run_id: str | None = None) -> tuple[Path, str, str]:

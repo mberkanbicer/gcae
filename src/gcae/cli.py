@@ -3,8 +3,10 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 from .config import Config, ProviderConfig, load_config
 from .evaluator import DeterministicEvaluator, Evaluator, LLMEvaluator
@@ -82,6 +84,18 @@ def build_parser() -> argparse.ArgumentParser:
 def _provider(provider_config: ProviderConfig) -> Provider:
     kind = provider_config.kind.lower()
     if kind in {"http", "openrouter"}:
+        local_hosts = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
+        api_key = provider_config.api_key or (
+            os.environ.get(provider_config.api_key_env)
+            if provider_config.api_key_env
+            else None
+        )
+        host = urlparse(provider_config.base_url).hostname or ""
+        if not api_key and host not in local_hosts:
+            raise ValueError(
+                f"no API key configured for {provider_config.base_url}; "
+                "set provider.api_key or provider.api_key_env"
+            )
         return OpenAICompatibleProvider(
             base_url=provider_config.base_url,
             model=provider_config.model,
@@ -367,7 +381,12 @@ def _run_tui(
     constraints: list[str] | None = None,
     criteria: list[str] | None = None,
 ) -> None:
-    from .tui.app import GcaeApp
+    try:
+        from .tui.app import GcaeApp
+    except ImportError as exc:  # pragma: no cover - dependency is declared
+        raise RuntimeError(
+            "the TUI requires the 'textual' package; run 'pip install -e .' for this project"
+        ) from exc
 
     GcaeApp(
         runtime,

@@ -163,8 +163,13 @@ class Runtime:
         run_id = run_id or uuid.uuid4().hex[:12]
         self.repo = GitRepository(self.source_repo, self.runtime_dir, self.worktree_dir)
         worktree, branch, base = self.repo.create_isolated_worktree(run_id)
-        self.memory = MemoryStore(self.runtime_dir / "memory.db")
-        self.events = EventLog(self.runtime_dir / "runs" / run_id / "events.jsonl")
+        try:
+            self.memory = MemoryStore(self.runtime_dir / "memory.db")
+            self.events = EventLog(self.runtime_dir / "runs" / run_id / "events.jsonl")
+        except OSError as exc:
+            raise RuntimeError(
+                f"runtime state directory is not writable: {self.runtime_dir} ({exc})"
+            ) from exc
         logger.info("run %s started on branch %s in %s", run_id, branch, worktree)
         self.state = AgentState(
             run_id=run_id,

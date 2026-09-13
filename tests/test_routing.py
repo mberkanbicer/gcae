@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from gcae.cli import _planner, _providers, _verifier
+from gcae.cli import _planner, _provider, _providers, _verifier
 from gcae.config import (
     Config,
     ModelOverride,
@@ -67,7 +67,7 @@ def create(path: str, content: str) -> dict[str, object]:
 
 def test_role_models_resolve_from_config() -> None:
     config = Config(
-        provider=ProviderConfig(kind="http", base_url="http://local/v1", model="base"),
+        provider=ProviderConfig(kind="http", base_url="http://localhost/v1", model="base"),
         models=ModelsConfig(evaluator=ModelOverride(model="judge")),
     )
     base, roles = _providers(config)
@@ -121,6 +121,16 @@ def test_llm_planner_requires_criteria() -> None:
     )
     with pytest.raises(ProviderOutputError):
         planner.plan(state)
+
+
+def test_remote_provider_requires_an_api_key() -> None:
+    with pytest.raises(ValueError, match="no API key"):
+        _provider(ProviderConfig(kind="http", base_url="https://openrouter.ai/api/v1"))
+    local = _provider(ProviderConfig(kind="http", base_url="http://localhost:11434/v1"))
+    assert local is not None
+    close = getattr(local, "close", None)
+    if close:
+        close()
 
 
 def test_planner_kind_resolution() -> None:

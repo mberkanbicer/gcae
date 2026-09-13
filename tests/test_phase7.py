@@ -1,11 +1,12 @@
 import json
 
 import httpx
+import pytest
 
 from gcae.controller import Controller
 from gcae.http_provider import OpenAICompatibleProvider
 from gcae.models import Decision
-from gcae.providers import DecisionProvider
+from gcae.providers import DecisionProvider, ProviderOutputError
 
 
 def test_openai_compatible_provider() -> None:
@@ -78,6 +79,16 @@ def test_openai_compatible_provider_retries_empty_content() -> None:
     decision = provider.complete("prompt", Decision)
     assert decision.action.value == "finish_candidate"
     assert calls == 2
+
+
+def test_openai_compatible_provider_reports_connection_errors() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    provider = OpenAICompatibleProvider("http://localhost:11434/v1", "model", client=client)
+    with pytest.raises(ProviderOutputError, match="connection refused"):
+        provider.complete("prompt", Decision)
 
 
 class RecordingProvider:

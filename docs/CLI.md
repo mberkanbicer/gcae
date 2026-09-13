@@ -12,10 +12,22 @@ gcae undo <repository> <run-id> [--config PATH] [--runtime-dir PATH]
 
 The request is optional in TUI mode: `gcae run <repository>` opens the TUI and asks for the task,
 and the planner derives the success criteria from it. Headless mode requires a request and exits 1
-without one. The source repository must have at least one commit and no uncommitted changes;
-otherwise the run is refused with a clear message. `run` and `resume` open the dashboard on a
-terminal; non-interactive environments (or `--headless`) get the event log on stderr plus the
-final `AgentState` JSON on stdout. The summary line reports status, accepted steps, verification,
+without one.
+
+## Preconditions (checked with actionable errors)
+
+- the path is the **repository root** (a subdirectory is refused with the root path);
+- the repository has at least one commit;
+- `git user.name` and `git user.email` resolve (repo, global or system config);
+- the working tree is clean, including untracked files — the error lists the offending paths;
+- `git` is installed and on `PATH`;
+- remote HTTP providers have an API key (`api_key` or `api_key_env`); local endpoints do not need one;
+- the runtime state directory is writable.
+
+Provider failures report the underlying cause (connection refused, HTTP status, invalid JSON)
+instead of a generic message. `run` and `resume` open the dashboard on a terminal;
+non-interactive environments (or `--headless`) get the event log on stderr plus the final
+`AgentState` JSON on stdout. The summary line reports status, accepted steps, verification,
 worktree and branch/merge state.
 
 ## Criteria

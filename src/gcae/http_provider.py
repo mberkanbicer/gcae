@@ -49,7 +49,7 @@ class OpenAICompatibleProvider:
                 response.raise_for_status()
                 body = response.json()
             except (httpx.HTTPError, ValueError) as exc:
-                raise ProviderOutputError("provider request failed") from exc
+                raise ProviderOutputError(f"provider request failed: {exc}") from exc
             try:
                 raw = self._content(body)
             except ProviderOutputError as exc:

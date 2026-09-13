@@ -213,6 +213,7 @@ class Runtime:
         self.cleanup_after_merge = cleanup_after_merge
         self.auto_resolve_conflicts = resolve_merge_conflicts
         self._conflict_resolution = False
+        self._conflict_failed = False
         self.validator_commands = list(validator_commands or [])
         self.max_steps = max_steps
         self.command_timeout = command_timeout
@@ -1038,15 +1039,17 @@ class Runtime:
         state.step_tool_calls = 0
         self.repetition = RepetitionGuard(self.repetition_limit)
         self._persist()
+        previous_status, previous_phase = state.status, state.phase
+        self._conflict_failed = False
         self._conflict_resolution = True
         try:
             self.run()
         finally:
             self._conflict_resolution = False
-        unfinished = state.status.startswith("failed: merge conflict")
-        if unfinished or self.repo.worktree_merge_in_progress():
-            # the agent did not finish: leave the branch exactly as it was
-            self._fail_conflict_resolution(files)
+        if self._conflict_failed or self.repo.worktree_merge_in_progress():
+            # the agent did not finish: leave the branch exactly as it was, and keep the
+            # run's own outcome (the merge is what failed, not the verified work)
+            self._fail_conflict_resolution(files, previous_status, previous_phase)
             return []
         self._event(
             "conflict_resolved",
@@ -1055,7 +1058,12 @@ class Runtime:
         )
         return files
 
-    def _fail_conflict_resolution(self, files: list[str]) -> None:
+    def _fail_conflict_resolution(
+        self,
+        files: list[str],
+        previous_status: str = "complete",
+        previous_phase: RunPhase = RunPhase.COMPLETE,
+    ) -> None:
         """Give up on a merge conflict: abort it and leave the branch exactly as it was."""
         assert self.state is not None and self.repo is not None
         state = self.state
@@ -1066,10 +1074,14 @@ class Runtime:
                 self.repo.rollback(state.accepted_commit)
             except GitError:  # pragma: no cover - best effort cleanup
                 logger.exception("rollback after an unresolved conflict failed")
+        self._conflict_failed = True
         state.plan = [step for step in state.plan if not step.id.startswith("step-")]
-        state.status = "failed: merge conflict unresolved"
-        state.phase = RunPhase.FAILED
-        self._remember("failure", f"merge conflict unresolved in {', '.join(files)}")
+        state.status = previous_status
+        state.phase = previous_phase
+        self._remember(
+            "failure",
+            f"merge conflict unresolved in {', '.join(files)}; the run's own work is unchanged",
+        )
         self._event("conflict_unresolved", RunPhase.FAILED, payload={"files": files})
         self._persist()
 

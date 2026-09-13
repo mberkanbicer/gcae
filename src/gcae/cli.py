@@ -494,12 +494,38 @@ def main(argv: list[str] | None = None) -> None:
             _undo(args.repository, args.run_id, runtime_dir)
             return
         if args.command == "merge":
-            _merge_run(
-                args.repository,
-                args.run_id,
-                runtime_dir,
-                cleanup=config.runtime.cleanup_after_merge,
-            )
+            try:
+                _merge_run(
+                    args.repository,
+                    args.run_id,
+                    runtime_dir,
+                    cleanup=config.runtime.cleanup_after_merge,
+                )
+            except MergeConflict as conflict:
+                # a conflict is the agent's job here too, not the user's
+                print(
+                    f"gcae: merge conflicts in {', '.join(conflict.files)}; "
+                    "handing them to the agent to resolve and re-verify",
+                    file=sys.stderr,
+                )
+                resolver = _build_runtime(args, config, runtime_dir)
+                resolver.resume(args.run_id)
+                if resolver.resolve_merge_conflicts():
+                    resolver.run()
+                    _merge_run(
+                        args.repository,
+                        args.run_id,
+                        runtime_dir,
+                        cleanup=config.runtime.cleanup_after_merge,
+                    )
+                    return
+                branch = resolver.state.branch if resolver.state is not None else args.run_id
+                print(
+                    f"gcae: conflicts remain in {', '.join(conflict.files)}; "
+                    f"branch {branch} left intact for a later merge",
+                    file=sys.stderr,
+                )
+                raise SystemExit(1) from conflict
             return
         if args.command == "list":
             _list_runs(runtime_dir)
@@ -543,6 +569,7 @@ def main(argv: list[str] | None = None) -> None:
         "merge_accepted": config.runtime.merge_accepted_on_failure,
         "cleanup_after_merge": config.runtime.cleanup_after_merge,
     }
+    merge_error: str | None = None
     if args.command in {"run", "resume"} and (
         result.status == "complete" or result.accepted_steps > 0
     ):
@@ -572,11 +599,19 @@ def main(argv: list[str] | None = None) -> None:
                         **merge_options,
                     )
                 except MergeConflict as still:
+                    merge_error = ", ".join(still.files)
                     print(
-                        f"gcae: conflicts remain in {', '.join(still.files)}; "
+                        f"gcae: conflicts remain in {merge_error}; "
                         f"branch {result.branch} left intact for `gcae merge`",
                         file=sys.stderr,
                     )
+            else:
+                merge_error = ", ".join(conflict.files)
+                print(
+                    f"gcae: conflicts remain in {merge_error}; "
+                    f"branch {result.branch} left intact for `gcae merge`",
+                    file=sys.stderr,
+                )
     files: list[str] = []
     try:
         repo = GitRepository(result.source_repo, Path(runtime_dir).expanduser())
@@ -588,4 +623,7 @@ def main(argv: list[str] | None = None) -> None:
     print(_summary(result, files), file=sys.stderr)
     if result.status != "complete":
         # a scripted caller must be able to tell an unfinished run from a finished one
+        raise SystemExit(1)
+    if merge_error:
+        # the run finished but its work is not in the checkout: that is not a success
         raise SystemExit(1)

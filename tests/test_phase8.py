@@ -778,3 +778,52 @@ def test_unresolved_conflict_leaves_the_branch_and_checkout_intact(tmp_path: Pat
     assert subprocess.run(
         ["git", "-C", str(repo), "status", "--porcelain"], capture_output=True, text=True
     ).stdout.strip() == ""
+
+
+def test_merge_command_hands_conflicts_to_the_agent(tmp_path: Path, capsys) -> None:
+    """`gcae merge` must not bounce a conflict back to the user either."""
+    import subprocess
+
+    from gcae.cli import main
+    from gcae.providers import FakeProvider
+    from gcae.runtime import Runtime, RuntimeControl
+
+    repo, run_id, worktree = _conflicting_repo(tmp_path)
+    config = _fake_config(tmp_path)  # the fake provider cannot resolve -> honest failure
+    before = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True
+    ).stdout.strip()
+
+    with pytest.raises(SystemExit) as exit_info:
+        main(["merge", str(repo), run_id, "--config", str(config)])
+    assert exit_info.value.code == 1
+    errors = capsys.readouterr().err
+    assert "merge conflicts in app.py" in errors
+    assert "handing them to the agent" in errors
+    assert "conflicts remain" in errors
+    # nothing of the conflicting work reached the checkout, and no markers were committed
+    assert subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True
+    ).stdout.strip() == before
+    assert (repo / "app.py").read_text() == "value = 99\n"
+    assert "&lt;&lt;&lt;&lt;&lt;&lt;&lt;" not in (repo / "app.py").read_text()
+    # a later manual merge still works once the conflict is gone
+    (repo / "app.py").write_text("value = 99\n")
+    merged = Runtime(repo, tmp_path / "state", provider=FakeProvider([]), control=RuntimeControl())
+    merged.resume(run_id)
+    merged.repo.rollback(merged.state.accepted_commit)  # type: ignore[arg-type]
+
+
+def test_completed_run_whose_merge_conflicts_exits_non_zero(tmp_path: Path, capsys) -> None:
+    """A finished run whose work never reached the checkout is not a success."""
+    from gcae.cli import main
+
+    repo, run_id, worktree = _conflicting_repo(tmp_path)
+    config = _fake_config(tmp_path)
+    with pytest.raises(SystemExit) as exit_info:
+        main(["resume", str(repo), run_id, "--headless", "--config", str(config)])
+    assert exit_info.value.code == 1
+    errors = capsys.readouterr().err
+    assert "conflicts remain" in errors
+    persisted = (tmp_path / "state" / "runs" / run_id / "state.json").read_text()
+    assert '"merge": {' not in persisted

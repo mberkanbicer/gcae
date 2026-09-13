@@ -85,12 +85,21 @@ def _summary(state: AgentState) -> str:
     else:
         passed = sum(1 for item in verification.criteria if item.passed)
         criteria = f"{passed}/{len(verification.criteria)} criteria passed"
+    if state.merge is None:
+        branch = (
+            f"branch: {state.branch} (not merged; apply with: git merge {state.branch})"
+        )
+    else:
+        branch = (
+            f"branch: {state.branch} merged into {state.merge.target_branch} "
+            f"(undo: gcae undo {state.source_repo} {state.run_id})"
+        )
     return (
         f"run {state.run_id}: {state.status}\n"
         f"accepted steps: {state.accepted_steps}, commit: {state.accepted_commit or 'none'}\n"
         f"verification: {criteria}\n"
         f"worktree: {state.worktree}\n"
-        f"branch: {state.branch} (not merged; apply with: git merge {state.branch})"
+        f"{branch}"
     )
 
 
@@ -162,7 +171,6 @@ def _maybe_merge(
         f"gcae: merged {result.branch} into {target} ({pre[:12]} -> {merged[:12]})",
         file=sys.stderr,
     )
-    print(f"gcae: undo with: gcae undo {result.source_repo} {result.run_id}", file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -200,7 +208,7 @@ def main(argv: list[str] | None = None) -> None:
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"gcae: error: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
-    print(json.dumps(result.model_dump(mode="json"), indent=2, sort_keys=True))
-    print(_summary(result), file=sys.stderr)
     if args.command == "run" and result.status == "complete":
         _maybe_merge(result, runtime_dir, args.merge, args.no_merge)
+    print(json.dumps(result.model_dump(mode="json"), indent=2, sort_keys=True))
+    print(_summary(result), file=sys.stderr)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+import sqlite3
 import threading
 import time
 import uuid
@@ -11,7 +12,7 @@ from pathlib import Path
 from .context import ContextBuilder, estimate_tokens
 from .controller import Controller
 from .evaluator import DeterministicEvaluator, Evaluator
-from .git import GitRepository
+from .git import GitError, GitRepository
 from .memory import EventLog, MemoryStore
 from .models import (
     Action,
@@ -100,6 +101,7 @@ class Runtime:
         scope_warning_files: int = 10,
         control: RuntimeControl | None = None,
         role_providers: dict[str, Provider] | None = None,
+        provider_label: str = "",
     ) -> None:
         self.source_repo = Path(source_repo).resolve()
         self.runtime_dir = Path(runtime_dir).expanduser().resolve()
@@ -116,6 +118,7 @@ class Runtime:
             ]
         )
         self.role_providers = dict(role_providers or {})
+        self.provider_label = provider_label
         self.validator_commands = list(validator_commands or [])
         self.max_steps = max_steps
         self.command_timeout = command_timeout
@@ -138,6 +141,7 @@ class Runtime:
         self._consecutive_failures = 0
         self._escalated = False
         self.last_context_info: dict[str, int] = {}
+        self.last_context_text = ""
 
     # ------------------------------------------------------------------ lifecycle
 
@@ -151,6 +155,22 @@ class Runtime:
 
     def active_model(self, role: str = "controller") -> str:
         provider = self.provider_for(role)
+        return str(getattr(provider, "model", provider.__class__.__name__))
+
+    def role_model(self, role: str) -> str | None:
+        """Model actually used for a role; None when the role needs no model."""
+        if role == "controller":
+            return self.active_model("controller")
+        if role == "planner":
+            provider = getattr(self.planner, "provider", None)
+        elif role == "evaluator":
+            provider = getattr(self.evaluator, "provider", None)
+        elif role == "verifier":
+            provider = getattr(self.verifier, "judge", None)
+        else:
+            provider = self.role_providers.get(role)
+        if provider is None:
+            return None
         return str(getattr(provider, "model", provider.__class__.__name__))
 
     def start(
@@ -207,12 +227,14 @@ class Runtime:
         ]
         self.state.next_step_number = max(numbers, default=0) + 1
         self._transition(RunPhase.PLAN)
+        self._emit_plan(reason="initial plan")
         self._remember("user_instruction", request, immutable=True)
         for constraint in self.state.hard_constraints:
             self._remember("user_instruction", f"hard constraint: {constraint}", immutable=True)
         for criterion in self.state.success_criteria:
             self._remember("user_instruction", f"success criterion: {criterion}", immutable=True)
         self._event("run_started", RunPhase.ANALYZE, payload={"objective": self.state.objective})
+        self._emit_candidate_state()
         self._persist()
         return self.state
 
@@ -249,7 +271,7 @@ class Runtime:
         self.state.pending_question = None
         self._remember("user_instruction", f"user override: {text}", immutable=True)
         if self.repo is not None and self.repo.worktree is not None and self.repo.status():
-            self._rollback()
+            self._rollback(f"user override: {text}")
         for plan in self.state.plan:
             if plan.status in {"pending", "active"}:
                 plan.status = "skipped"
@@ -257,6 +279,7 @@ class Runtime:
         self.state.plan.extend(next_step(self.state, f"user override: {text}"))
         self._reset_working_memory()
         self._transition(RunPhase.PLAN)
+        self._emit_plan(reason=f"user override: {text}")
         self._event("user_override", RunPhase.PLAN, payload={"text": text})
         logger.info("user override: %s", text)
         self._persist()
@@ -288,6 +311,24 @@ class Runtime:
                 self.repetition = RepetitionGuard(self.repetition_limit)
                 self.state.working_memory.pending_validations = list(
                     plan.validation_requirements
+                )
+                position = next(
+                    (
+                        index
+                        for index, item in enumerate(self.state.plan)
+                        if item.id == plan.id
+                    ),
+                    0,
+                )
+                self._event(
+                    "step_started",
+                    RunPhase.EXECUTE,
+                    step_id=plan.id,
+                    payload={
+                        "goal": plan.goal,
+                        "index": position + 1,
+                        "total": len(self.state.plan),
+                    },
                 )
             self._transition(RunPhase.EXECUTE)
             step = SemanticStep(
@@ -356,7 +397,7 @@ class Runtime:
                     return self.state
 
         if self.repo.status():
-            self._rollback()
+            self._rollback("step budget exhausted")
         return self._fail("step budget exhausted")
 
     # ------------------------------------------------------------------ steps
@@ -386,6 +427,13 @@ class Runtime:
             "pinned": len(context.pinned_ids),
             "omitted": len(context.omitted_ids),
         }
+        self.last_context_text = context.text
+        self._event(
+            "context_built",
+            RunPhase.EXECUTE,
+            step_id=plan.id,
+            payload=dict(self.last_context_info),
+        )
         try:
             decision = Controller(
                 DecisionProvider(self.provider_for("controller")), tools.names()
@@ -472,11 +520,34 @@ class Runtime:
                 )
                 self.state.accepted_steps += 1
                 self._consecutive_failures = 0
+                self._event(
+                    "checkpoint_created",
+                    RunPhase.CHECKPOINT,
+                    step_id=plan.id,
+                    payload={
+                        "commit": self.state.accepted_commit,
+                        "message": f"gcae: {plan.goal}",
+                        "kind": "step",
+                    },
+                )
             else:
                 logger.info("step %s accepted without file changes", plan.id)
             plan.status = "completed"
             self.state.plan = [item for item in self.state.plan if item.id != plan.id]
             self._settle_working_memory(plan)
+            self._event(
+                "step_accepted",
+                RunPhase.CHECKPOINT,
+                step_id=plan.id,
+                payload={
+                    "goal": plan.goal,
+                    "commit": self.state.accepted_commit,
+                    "changed_files": list(validation.changed_files),
+                    "accepted_steps": self.state.accepted_steps,
+                    "remaining_steps": len(self.state.plan),
+                },
+            )
+            self._emit_candidate_state()
             if self.stagnation.record(bool(validation.changed_files)):
                 self._fail("execution stagnated")
                 return True
@@ -484,7 +555,7 @@ class Runtime:
             return False
 
         self._remember("failure", evaluation.reason, immutable=True)
-        self._rollback()
+        self._rollback(evaluation.reason)
         if self._replan(plan, evaluation.reason, failed=True):
             self._fail("execution stagnated")
             return True
@@ -517,6 +588,7 @@ class Runtime:
         self.repetition = RepetitionGuard(self.repetition_limit)
         self.state.working_memory.hypotheses.append(f"retry after: {reason}")
         self._transition(RunPhase.PLAN)
+        self._emit_plan(reason=reason, replaced=plan.id, failed=failed)
         self._event("replan", RunPhase.PLAN, step_id=plan.id, payload={"reason": reason})
         stagnated = self.stagnation.record(False)
         if stagnated:
@@ -533,18 +605,31 @@ class Runtime:
         self._transition(RunPhase.VERIFY)
         self._event("verification_started", RunPhase.VERIFY)
         report = self.verifier.verify(self.state, diff=self.repo.diff())
+        # criterion commands may generate caches; never let them reach the checkpoint
+        self.repo.clean_generated_artifacts()
+        self.repo.clean_ignored_artifacts()
         self.state.last_verification = report
         self._event(
             "verification_completed",
             RunPhase.VERIFY,
             payload=report.model_dump(mode="json"),
         )
+        self._emit_candidate_state()
         if report.passed and report.hygiene_passed:
             if self.repo.status():
                 self._transition(RunPhase.CHECKPOINT)
                 self.state.accepted_commit = self.repo.checkpoint("gcae: verified final state")
                 logger.info("final checkpoint %s", self.state.accepted_commit[:12])
                 self.state.accepted_steps += 1
+                self._event(
+                    "checkpoint_created",
+                    RunPhase.CHECKPOINT,
+                    payload={
+                        "commit": self.state.accepted_commit,
+                        "message": "gcae: verified final state",
+                        "kind": "verification",
+                    },
+                )
             for plan in self.state.plan:
                 plan.status = "completed"
             self.state.plan = []
@@ -634,6 +719,7 @@ class Runtime:
             step_id=self.state.current_step_id,
             payload=result.model_dump(mode="json"),
         )
+        self._emit_candidate_state()
 
     def _settle_working_memory(self, plan: PlanStep) -> None:
         assert self.state is not None
@@ -644,14 +730,30 @@ class Runtime:
         assert self.state is not None
         self.state.working_memory = WorkingMemory()
 
-    def _rollback(self) -> None:
+    def _rollback(self, reason: str = "") -> None:
         assert self.state is not None and self.repo is not None
         if self.state.phase != RunPhase.ROLLBACK:
             self._transition(RunPhase.ROLLBACK)
         target = self.state.accepted_commit or self.repo.current_commit()
+        source = self.repo.current_commit()
+        try:
+            discarded = [entry["path"] for entry in self.repo.candidate_snapshot()["files"]]
+        except GitError:
+            discarded = []
         logger.warning("rollback to %s", target[:12])
         self.repo.rollback(target)
-        self._event("rollback_completed", RunPhase.ROLLBACK, step_id=self.state.current_step_id)
+        self._event(
+            "rollback_completed",
+            RunPhase.ROLLBACK,
+            step_id=self.state.current_step_id,
+            payload={
+                "from_commit": source,
+                "to_commit": target,
+                "reason": reason,
+                "discarded": discarded,
+            },
+        )
+        self._emit_candidate_state()
 
     def _fail(self, reason: str) -> AgentState:
         assert self.state is not None
@@ -697,6 +799,8 @@ class Runtime:
                 }
             )
             self.memory.add(record)
+        if candidates:
+            self._emit_memory_counts()
 
     def _run_dir(self) -> Path:
         assert self.state is not None
@@ -739,6 +843,49 @@ class Runtime:
                 immutable=immutable,
             )
         )
+        self._emit_memory_counts()
+
+    def _emit_plan(
+        self,
+        reason: str,
+        replaced: str | None = None,
+        failed: bool = False,
+    ) -> None:
+        assert self.state is not None
+        self._event(
+            "plan_updated",
+            self.state.phase,
+            payload={
+                "reason": reason,
+                "steps": [
+                    {"id": step.id, "goal": step.goal, "status": step.status}
+                    for step in self.state.plan
+                ],
+                "completed": self.state.accepted_steps,
+                "replaced": replaced,
+                "failed": failed,
+            },
+        )
+
+    def _emit_candidate_state(self) -> None:
+        """Publish the exact candidate state without making the UI run git itself."""
+        if self.state is None or self.repo is None or self.repo.worktree is None:
+            return
+        try:
+            snapshot = self.repo.candidate_snapshot()
+        except GitError:
+            return
+        snapshot["accepted_commit"] = self.state.accepted_commit
+        self._event("candidate_state", self.state.phase, payload=snapshot)
+
+    def _emit_memory_counts(self) -> None:
+        if self.state is None or self.memory is None:
+            return
+        try:
+            counts = self.memory.counts(self.state.run_id)
+        except sqlite3.Error:
+            return
+        self._event("memory_updated", self.state.phase, payload={"counts": counts})
 
     def _event(
         self,

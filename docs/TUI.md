@@ -4,91 +4,139 @@
 TTY. `--headless` forces the non-interactive path, `--tui` forces the dashboard. Both modes share
 the same engine; `src/gcae/tui/` imports the engine, never the other way round.
 
+The dashboard answers, at a glance: what is the agent trying to do, where is it now, what is it
+doing right now, has real progress been made, what changed in Git, what failed, did it roll back,
+what did it learn, how much context is in use, which model is active, and how to intervene.
+
 ## Starting without a task
 
-`gcae run <repository>` (no request) opens the TUI directly with a request modal:
+`gcae run <repository>` (no request) opens the dashboard with a request modal. On submit the
+runtime plans the task in the worker thread; success criteria are derived from the request by the
+configured planner (`[planner] kind = "auto"` uses the model for HTTP providers and must produce at
+least one checkable criterion). `--criterion` values are merged, never overwritten.
+
+If the run cannot start (dirty repository, no commits, missing git identity, planner failure) the
+failure banner explains the reason and keeps the accepted checkpoint visible; `i` re-opens the task
+prompt so the same session can be retried after the repository is fixed.
+
+## Layout
 
 ```
-Describe the task (Enter starts the run, Esc cancels)
-> Add a --dry-run flag to the importer
+┌ top status bar ───────────────────────────────────────────────────────────────────────┐
+├─────────────────────────────┬─────────────────────────────────────────────────────────┤
+│ OBJECTIVE  (original + NOW) │ ACTIVE      (goal · tool · state · expectation)         │
+│ PLAN       (roadmap)        │ CHECKPOINT  (trusted · candidate · file scope)          │
+│                             │ VALIDATION  (checks · criteria · last decision)         │
+├─────────────────────────────┴─────────────────────────────────────────────────────────┤
+│ completion / failure banner (only when a run ends)                                    │
+├───────────────────────────────────────────────────────────────────────────────────────┤
+│ CTX ███░░ 9.8k/32k (est)   MEM 18 facts · 6 decisions   ITER 12                       │
+├───────────────────────────────────────────────────────────────────────────────────────┤
+│ EVENTS  (curated: checkpoints, accept/rollback/replan, validation, failures, user)     │
+├───────────────────────────────────────────────────────────────────────────────────────┤
+│ [p] Pause  [s] Stop  [d] Diff  [l] Logs  [m] Memory  [c] Context  [i] Instruct  [?] …  │
+└───────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-On submit the runtime plans the task in the worker thread and the agent starts. Success criteria
-are derived from the typed request by the configured planner (`[planner] kind = "auto"` uses the
-model for HTTP providers; the planner is required to produce at least one checkable criterion).
-Extra criteria can still be supplied with `--criterion` and are merged, never overwritten.
+Differences from a plain log viewer:
 
-If the run cannot start (dirty repository, no commits, planner failure), the dashboard shows
-`failed: <reason>` and `i` re-opens the request screen so a corrected task can be entered without
-restarting the app. Failed runs keep whatever state they persisted.
+- **No decorative panels.** Sections use one dim uppercase title row and aligned label columns;
+  borders are reserved for dialogs.
+- **Slack becomes history.** Panels are content sized with caps, and the event timeline takes the
+  remaining rows, so idle screens show more history instead of a blank band.
+- **Curated events.** Routine tool successes are not timeline entries; the full stream is one
+  keystroke away (`l`). Tool failures, rollbacks, replans, checkpoints, validation results, user
+  instructions and terminal states always appear.
+- **Real data only.** Candidate file counts and `+N -M` come from `git diff --numstat` plus a
+  bounded line count for new files; token figures are labelled `(est)`; nothing is synthesized.
 
-The exact request is always visible in the Objective panel and persisted verbatim in the run's
-`state.json`; the event log may wrap in narrow terminals, so use `gcae inspect <run-id>` to read
-the ground truth. The log echoes the character count (`task (N chars): ...`), and the objective
-panel keeps showing the request while the planner works.
+## Responsive behaviour
 
-## Responsive layout
-
-The request/instruction modal always fits the terminal (`width: 90%`, capped at 70 columns,
-minimum 20). Below 90 columns the event log is hidden so the status panels keep the width; `l`
-toggles it back. Enter submits the modal even if the input does not hold focus.
-
-## Architecture
-
-- The runtime runs in a Textual worker thread (`run_worker(..., thread=True)`).
-- The runtime emits typed `Event`s to in-process subscribers; the JSONL history and the live TUI
-  stream use the same model.
-- The app subscribes from the UI thread with `call_from_thread`; a subscriber failure is logged
-  and never stops a run.
-- `RuntimeControl` is the thread-safe channel in the other direction: pause, resume, stop, and a
-  queue of user instructions drained by the runtime at iteration boundaries (including while
-  paused).
-- Panels are refreshed from runtime state every 0.4 s and immediately on events.
-
-## Panels
-
-| Panel | Contents |
+| Width | Behaviour |
 | --- | --- |
-| Run | project, run id, status, phase, iteration, branch, worktree, elapsed time |
-| Objective | original objective, current semantic goal, latest user instruction |
-| Plan | every step with status `pending` / `active` / `completed` / `failed` / `skipped` |
-| Git | accepted commit, accepted steps, candidate file count and names |
-| Action | current action/tool, arguments, expected result, duration, artifact |
-| Validation | deterministic result, diff check, command count, changed files, warnings |
-| Memory | per-kind record counts for the current run |
-| Context | configured token budget, estimated usage, pinned and omitted record counts |
-| Model | provider, active model, controller role, latest evaluation decision |
-| Log | timestamped event stream, scrollable, toggleable with `l` |
+| ≥ 140 | two columns, full status bar (project, run, provider, model, role, elapsed), 12–16 event rows |
+| 100–139 | two columns, metrics strip shows memory and iteration, 8–12 event rows |
+| 90–99 | two columns, metrics strip hidden, timeline 4–8 rows |
+| < 90 | single stacked column in priority order (objective/NOW → plan → active → checkpoint → validation), the main region scrolls, timeline fixed at 4 rows, status bar shortened |
 
-Rollback, replan, user override and completion are explicit log entries so trajectory changes are
-visible.
+Short terminals (< 40 rows) reduce the plan and validation row budgets; below 20 rows the timeline
+is hidden. The status bar, rules and shortcut footer stay pinned at every size.
+
+## Screens
+
+| Key | Screen | Contents |
+| --- | --- | --- |
+| `d` | Diff | file list (`M`/`A`/`D`/`R` + `+N -M`) on the left, colourised unified diff on the right, `j/k`/`↑`/`↓` to switch, `Esc` to close. New files are diffed with `git diff --no-index`; clean trees say so explicitly |
+| `l` | Logs | the full event stream with timestamps; `f` cycles filters (all / model / tools / context / git / validation / evaluation / errors); follows the tail until you scroll up |
+| `m` | Memory | stored records grouped by kind (`USER_INSTRUCTION`, `FACT`, `DECISION`, `FAILURE`, …) with step, commit, timestamp and source provenance |
+| `c` | Context | the request payload actually sent to the model: section list with size share, plus the selected section's content |
+| `e` | Evaluation | latest decision and reason, next goal, promoted memories, verification criteria with evidence, validation command output tails |
+| `t` | Plan | every step with rationale, expected result, intended scope and validation requirements |
+| `Enter` | Inspect | opens the detail screen for the focused section (plan, checkpoint→diff, validation/active→evaluation, objective→context, events→logs) |
 
 ## Keys
 
 ```
-q  quit (stops a running agent safely)
-p  pause before the next model or tool action
-r  resume
-s  stop the run and persist state
-d  inspect the current candidate diff (scrollable modal)
-i  inject a user instruction / override
-l  toggle the event log
-?  help
-Esc closes modals
+q            quit (stops a running agent safely first)
+p / r        pause / resume
+s            stop the run (confirmation dialog; Enter stops, Esc cancels)
+i            inject a user instruction, or re-open the task prompt after a failure
+d l m c e t  diff, logs, memory, context, evaluation, plan detail
+Enter        open the focused section's detail screen
+Tab j k      move focus between sections (Shift+Tab backwards)
+?            help · Esc closes any dialog or screen
 ```
 
 ## Semantics
 
-- **Pause** prevents the next model or tool action. A running subprocess is not killed; state stays
-  consistent.
-- **Stop** sets a flag checked at every iteration boundary. The runtime persists state with status
-  `stopped` and leaves accepted checkpoints intact. A stopped run is resumable.
-- **Quit** stops a running agent, then exits the app.
-- **Override** queues a new instruction; the runtime stores it as immutable memory, discards
-  speculative work, and replans. Accepted commits are never modified by an override.
-- **Diff** shows `git diff` of the isolated worktree (the speculative candidate).
+- **Pause** prevents the next model or tool action; the candidate and accepted checkpoint are left
+  untouched and the status bar shows `PAUSED` with only `[r] Resume` in the footer.
+- **Stop** asks for confirmation, sets a flag checked at every iteration boundary, persists state
+  with status `stopped` and leaves accepted checkpoints intact. A stopped run is resumable.
+- **Instruction** is queued through `RuntimeControl`, stored as immutable memory, discards
+  speculative work and replans; the timeline acknowledges the queued instruction immediately.
+- **Rollback** is never silent: the checkpoint panel and status bar highlight it for ~20 s with the
+  discarded file count and the restore commit, and the timeline keeps a permanent entry.
+- **Quit** stops a running agent before exiting.
+
+## Architecture
+
+```
+src/gcae/tui/
+    app.py         composition, bindings, worker threads, event routing
+    state.py       presentation reducer (events in, panel data out); no runtime truth
+    formatters.py  pure rendering helpers (badges, plan markers, durations, diff colours)
+    widgets.py     one widget per information zone
+    screens.py     diff, logs, memory, context, plan and evaluation viewers
+    modals.py      instruction/request input, stop confirmation, help
+    styles.tcss    semantic layout + focus styles
+```
+
+- The runtime runs in a Textual worker thread; the UI thread never blocks on git, SQLite or the
+  provider. Git status and diffs are collected in a second worker.
+- Runtime events are folded by `UiState.apply`, which returns the set of sections that changed, so
+  updates are targeted instead of a full repaint.
+- A 0.5 s tick only refreshes presentation derived from wall-clock time (elapsed counters,
+  rollback emphasis expiry) and the run badge.
+- Panels read `runtime.state` for authoritative values and never own a second copy of it.
+- High-volume events (`context_built`, `candidate_state`, `memory_updated`, `phase:*`) update
+  metrics without touching the timeline.
+
+## Developer demo
+
+`tools/tui_demo.py` replays a realistic run against a temporary repository using real git
+operations, real validation commands and a real rollback and checkpoint, so the interface can be
+inspected without spending model tokens:
+
+```bash
+.venv/bin/python tools/tui_demo.py                          # interactive
+.venv/bin/python tools/tui_demo.py --plain --size 150x46     # final frame as text
+.venv/bin/python tools/tui_demo.py --plain --size 80x28 --capture 12   # mid-run frame
+```
 
 ## Testing
 
-`tests/test_tui.py` uses Textual's `run_test` pilot: dashboard rendering and completion, pause /
-resume / stop keys, instruction modal submission, diff modal, and event-driven panel updates.
+`tests/test_tui.py` covers rendering for empty/running/paused/completed/failed states, every event
+→ section mapping, the reducer, detail screens, key handling and five terminal sizes (160×45 down
+to 60×18). `tests/test_control.py` and `tests/test_phase2.py` cover the runtime events and git data
+the dashboard renders. Formatters have direct unit tests.

@@ -36,6 +36,7 @@ def make_runtime(
     tmp_path: Path,
     control: RuntimeControl | None = None,
     subscriber=None,  # type: ignore[no-untyped-def]
+    trajectory: list[dict[str, object]] | None = None,
 ) -> Runtime:
     source = tmp_path / "source"
     source.mkdir()
@@ -43,7 +44,7 @@ def make_runtime(
     runtime = Runtime(
         source,
         tmp_path / "runtime",
-        provider=FakeProvider(TRAJECTORY),
+        provider=FakeProvider(trajectory or TRAJECTORY),  # type: ignore[arg-type]
         control=control,
     )
     if subscriber is not None:
@@ -65,6 +66,68 @@ def test_events_are_delivered_to_subscribers(tmp_path: Path) -> None:
         "evaluation",
         "run_completed",
     } <= kinds
+
+
+def test_ui_events_carry_real_state(tmp_path: Path) -> None:
+    received: list[Event] = []
+    runtime = make_runtime(tmp_path, subscriber=received.append)
+    runtime.run()
+    by_type = {event.event_type: event for event in received}
+
+    plan = by_type["plan_updated"].payload
+    assert plan["reason"] == "initial plan"
+    assert [step["id"] for step in plan["steps"]] == ["step-1"]
+
+    started = by_type["step_started"].payload
+    assert started == {"goal": "create answer", "index": 1, "total": 1}
+
+    accepted = by_type["step_accepted"].payload
+    assert accepted["changed_files"] == ["answer.txt"]
+    assert accepted["commit"] == runtime.state.accepted_commit  # type: ignore[union-attr]
+    assert accepted["remaining_steps"] == 0
+
+    checkpoint = by_type["checkpoint_created"].payload
+    assert checkpoint["kind"] == "step"
+    assert checkpoint["commit"] == runtime.state.accepted_commit  # type: ignore[union-attr]
+
+    candidate = by_type["candidate_state"].payload
+    assert candidate["accepted_commit"] == runtime.state.accepted_commit  # type: ignore[union-attr]
+    assert candidate["dirty"] is False
+
+    context = by_type["context_built"].payload
+    assert context["estimated_tokens"] > 0
+    assert context["characters"] > 0
+    assert runtime.last_context_text.startswith("Objective: create answer")
+
+    memory = by_type["memory_updated"].payload
+    assert memory["counts"]["user_instruction"] >= 1
+
+
+def test_rollback_event_carries_commits_and_reason(tmp_path: Path) -> None:
+    received: list[Event] = []
+    runtime = make_runtime(tmp_path, subscriber=received.append)
+    runtime.evaluator = _RejectingEvaluator()  # type: ignore[assignment]
+    runtime.run()
+    rollback = next(event for event in received if event.event_type == "rollback_completed")
+    assert rollback.payload["reason"] == "candidate is wrong"
+    assert rollback.payload["to_commit"] == runtime.state.accepted_commit  # type: ignore[union-attr]
+    assert rollback.payload["discarded"] == ["answer.txt"]
+    state = runtime.state
+    assert state is not None
+    assert not (Path(state.worktree) / "answer.txt").exists()
+
+
+class _RejectingEvaluator:
+    """Evaluator stub that always rejects, forcing a rollback and replan."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def evaluate(self, payload):  # type: ignore[no-untyped-def]
+        from gcae.models import Evaluation
+
+        self.calls += 1
+        return Evaluation(decision="rollback", reason="candidate is wrong")
 
 
 def test_pause_blocks_progress_until_resume(tmp_path: Path) -> None:

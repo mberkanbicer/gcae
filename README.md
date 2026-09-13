@@ -29,6 +29,9 @@ gcae run ~/src/project "Add a --dry-run flag to the importer" \
 # non-interactive: state JSON on stdout, logs on stderr
 gcae run ~/src/project "Add a --dry-run flag" --headless
 
+# dashboard keys: p pause · r resume · s stop · i instruct · d diff · l logs · m memory
+#                  c context · e evaluation · t plan · Enter inspect · ? help · q quit
+
 gcae resume ~/src/project <run-id>
 gcae list
 gcae inspect <run-id>

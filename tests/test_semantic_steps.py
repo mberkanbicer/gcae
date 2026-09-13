@@ -188,3 +188,55 @@ def test_large_output_is_stored_as_artifact(tmp_path: Path) -> None:
     assert Path(result.artifact).is_file()
     assert result.artifact in result.output
     assert len(result.output) < 5000
+
+
+def test_verified_checkpoint_never_commits_generated_artifacts(tmp_path: Path) -> None:
+    """The verified commit must contain the candidate work only, not pytest caches."""
+    source = tmp_path / "source"
+    source.mkdir()
+    init_repo(source)
+    (source / "tests").mkdir()
+    (source / "tests" / "test_ok.py").write_text("def test_ok():\n    assert True\n")
+    subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(source), "commit", "-qm", "tests"], check=True)
+
+    runtime = Runtime(
+        source,
+        tmp_path / "runtime",
+        provider=FakeProvider(
+            [
+                tool("execute_tool", "create_file", path="done.txt", content="x\n"),
+                {
+                    "action": "finish_candidate",
+                    "semantic_goal": "finish",
+                    "reason_summary": "done",
+                },
+            ]
+        ),
+        evaluator=CountingEvaluator(),
+    )
+    runtime.start(
+        "make a change",
+        success_criteria=["command succeeds: python -m pytest -q tests/test_ok.py"],
+    )
+    result = runtime.run()
+    assert result.status == "complete"
+    assert result.last_verification is not None and result.last_verification.hygiene_passed
+    assert result.accepted_commit is not None
+    listing = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(source),
+            "show",
+            "--name-only",
+            "--pretty=format:",
+            result.accepted_commit,
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    committed = listing.stdout.split()
+    assert "done.txt" in committed
+    assert not [name for name in committed if ".pyc" in name or "__pycache__" in name]

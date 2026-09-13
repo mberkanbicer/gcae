@@ -364,6 +364,7 @@ def _build_runtime(args: argparse.Namespace, config: Config, runtime_dir: Path) 
         scope_warning_files=config.runtime.scope_warning_files,
         control=control,
         role_providers=role_providers,
+        provider_label=config.provider.kind.upper(),
     )
 
 

@@ -79,6 +79,7 @@ class DeterministicValidator:
         )
         return ValidationResult(
             passed=passed,
+            commands=list(self.commands),
             command_results=command_results,
             diff_check_passed=diff_check_passed,
             diff_stat=diff_stat,

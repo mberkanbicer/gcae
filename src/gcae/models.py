@@ -109,6 +109,7 @@ class Decision(BaseModel):
 class ValidationResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
     passed: bool
+    commands: list[str] = Field(default_factory=list)
     command_results: list[ToolResult] = Field(default_factory=list)
     diff_check_passed: bool = True
     diff_stat: str = ""

@@ -25,7 +25,7 @@ TUI.
 | Provider | `providers.py`, `http_provider.py` | KEEP, extend (role models, escalation) |
 | Config | `config.py` | KEEP, extend (step budgets, role models, planner kind) |
 | CLI | `cli.py` | REPAIR: run/resume/undo/merge exist; list, inspect, headless/TUI modes missing |
-| TUI | — | MISSING |
+| TUI | `tui/` | REPAIR: dashboard implemented (see `docs/TUI.md`); the audit below records the starting state |
 | Runtime events for subscribers | `memory.py` `EventLog` | REPAIR: JSONL only, no live in-process subscribers |
 | User overrides during a run | — | MISSING |
 | Working memory | — | MISSING |

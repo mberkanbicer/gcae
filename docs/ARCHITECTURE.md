@@ -25,7 +25,7 @@ model.
 | `safeguards.py` | repetition, stagnation, hygiene |
 | `providers.py`, `http_provider.py` | structured-output providers |
 | `cli.py` | run/resume/list/inspect/merge/undo, headless and TUI modes |
-| `tui/` | Textual dashboard; consumes runtime events |
+| `tui/` | Textual dashboard: presentation reducer, widgets, viewers, dialogs (see `docs/TUI.md`) |
 
 ## Execution state vs knowledge state
 

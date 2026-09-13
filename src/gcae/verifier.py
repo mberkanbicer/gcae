@@ -36,12 +36,15 @@ class FinalVerifier:
             )
 
         tools = ToolRegistry(worktree)
+        # Hygiene describes the candidate as the agent left it, so it is measured before
+        # criterion commands run: a criterion that runs pytest creates __pycache__ and
+        # would otherwise fail its own run's hygiene check.
+        hygiene_passed = self._hygiene(worktree)
         results: list[CriterionResult] = []
         for criterion in state.success_criteria:
             results.append(self._verify_criterion(criterion, tools, state, diff))
         passed = all(result.passed for result in results)
         missing = [result.criterion for result in results if not result.passed]
-        hygiene_passed = self._hygiene(worktree)
         return VerificationReport(
             passed=passed,
             criteria=results,

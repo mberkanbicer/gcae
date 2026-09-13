@@ -1,107 +1,54 @@
+"""GCAE dashboard.
+
+The app owns no runtime truth: it renders ``runtime.state`` plus the presentation
+reducer in :mod:`gcae.tui.state`, runs the agent in a worker thread, and performs the
+few remaining slow reads (git diff, git status, memory listing) off the UI thread.
+"""
+
 from __future__ import annotations
 
-import json
 from collections.abc import Callable
-from datetime import UTC, datetime
 from typing import Any
 
+from rich.text import Text
 from textual.app import App, ComposeResult
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.binding import Binding
+from textual.containers import Vertical
 from textual.css.query import NoMatches
-from textual.screen import ModalScreen
-from textual.widgets import Footer, Header, Input, RichLog, Static
+from textual.widgets import Static
 from textual.worker import Worker
 
 from ..git import GitError
 from ..models import Event
 from ..runtime import Runtime, RuntimeControl
-
-HELP = (
-    "q quit  ·  p pause  ·  r resume  ·  s stop  ·  d diff  ·  "
-    "i instruction  ·  l logs  ·  ? help"
+from . import formatters
+from .modals import ConfirmStopModal, HelpModal, InstructionModal, RequestModal
+from .screens import (
+    ContextScreen,
+    DiffScreen,
+    EvaluationScreen,
+    LogsScreen,
+    MemoryScreen,
+    PlanScreen,
+)
+from .state import PANELS, UiState
+from .widgets import (
+    ActivityPanel,
+    BannerPanel,
+    CheckpointPanel,
+    FooterBar,
+    MetricsPanel,
+    ObjectivePanel,
+    PlanPanel,
+    StatusBar,
+    TimelinePanel,
+    ValidationPanel,
 )
 
-
-class InstructionScreen(ModalScreen[str | None]):
-    """Modal input for a new user instruction."""
-
-    BINDINGS = [("enter", "submit", "Submit")]
-
-    def __init__(
-        self,
-        title: str = "New instruction (Enter submits, Esc cancels)",
-        placeholder: str = "e.g. preserve streaming behavior",
-    ) -> None:
-        super().__init__()
-        self.title_text = title
-        self.placeholder = placeholder
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="instruction-box"):
-            yield Static(self.title_text)
-            yield Input(placeholder=self.placeholder, id="instruction-input")
-
-    def on_mount(self) -> None:
-        self.query_one("#instruction-input", Input).focus()
-
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        self.dismiss(event.value)
-
-    def action_submit(self) -> None:
-        """Fallback for when the input does not hold focus (small terminals, clicks)."""
-        self.dismiss(self.query_one("#instruction-input", Input).value)
-
-    def key_escape(self) -> None:
-        self.dismiss(None)
-
-
-class RequestScreen(InstructionScreen):
-    """First-run modal that asks for the task; the planner derives criteria from it."""
-
-    def __init__(self) -> None:
-        super().__init__(
-            title="Describe the task (Enter starts the run, Esc cancels)",
-            placeholder="e.g. Add a --dry-run flag to the importer",
-        )
-
-
-class DiffScreen(ModalScreen[None]):
-    """Scrollable candidate diff."""
-
-    def __init__(self, diff: str) -> None:
-        super().__init__()
-        self.diff = diff
-
-    def compose(self) -> ComposeResult:
-        with VerticalScroll(id="diff-scroll"):
-            yield Static(self.diff or "(no candidate diff)", id="diff-body")
-        yield Footer()
-
-    def key_escape(self) -> None:
-        self.dismiss(None)
-
-    def key_q(self) -> None:
-        self.dismiss(None)
-
-
-class HelpScreen(ModalScreen[None]):
-    def compose(self) -> ComposeResult:
-        yield Static(
-            "GCAE keys\n\n"
-            "q  quit (stops a running agent safely)\n"
-            "p  pause before the next model or tool action\n"
-            "r  resume a paused agent\n"
-            "s  stop the run and persist state\n"
-            "d  inspect the current candidate diff\n"
-            "i  inject a user instruction / override\n"
-            "l  toggle the event log\n"
-            "?  this help\n\n"
-            "Esc closes this help.",
-            id="help-body",
-        )
-
-    def key_escape(self) -> None:
-        self.dismiss(None)
+WIDTH_NORMAL = 100
+WIDTH_LARGE = 140
+HEIGHT_TALL = 40
+HEIGHT_SHORT = 30
 
 
 class GcaeApp(App[None]):
@@ -109,34 +56,26 @@ class GcaeApp(App[None]):
 
     TITLE = "GCAE"
     SUB_TITLE = "Git-Checkpointed Adaptive Execution"
+    CSS_PATH = "styles.tcss"
     BINDINGS = [
-        ("q", "quit_app", "Quit"),
-        ("p", "pause", "Pause"),
-        ("r", "resume", "Resume"),
-        ("s", "stop", "Stop"),
-        ("d", "diff", "Diff"),
-        ("i", "instruction", "Instruction"),
-        ("l", "toggle_logs", "Logs"),
-        ("question_mark", "help", "Help"),
+        Binding("q", "quit_app", "Quit"),
+        Binding("p", "pause", "Pause"),
+        Binding("r", "resume", "Resume"),
+        Binding("s", "stop", "Stop"),
+        Binding("d", "diff", "Diff"),
+        Binding("l", "logs", "Logs"),
+        Binding("m", "memory", "Memory"),
+        Binding("c", "context", "Context"),
+        Binding("e", "evaluation", "Evaluation"),
+        Binding("t", "plan_detail", "Plan"),
+        Binding("i", "instruction", "Instruct"),
+        Binding("question_mark", "help", "Help"),
+        Binding("enter", "inspect", "Open"),
+        Binding("tab", "focus_next_panel", "Next panel", show=False),
+        Binding("shift+tab", "focus_previous_panel", "Previous panel", show=False),
+        Binding("j", "focus_next_panel", "Next panel", show=False),
+        Binding("k", "focus_previous_panel", "Previous panel", show=False),
     ]
-    CSS = """
-    #body { height: 1fr; }
-    #panels { width: 3fr; min-width: 20; }
-    #log { width: 2fr; min-width: 20; border: round $accent; }
-    .panel { border: round $panel; padding: 0 1; margin-bottom: 0; }
-    #help-bar { height: 1; color: $text-muted; }
-    InstructionScreen, RequestScreen { align: center middle; }
-    #instruction-box {
-        width: 90%;
-        max-width: 70;
-        min-width: 20;
-        height: auto;
-        padding: 1 2;
-        background: $surface;
-    }
-    #diff-scroll { height: 1fr; padding: 1 2; background: $surface; }
-    #help-body { padding: 2 4; background: $surface; }
-    """
 
     def __init__(
         self,
@@ -154,107 +93,134 @@ class GcaeApp(App[None]):
         self.request = request
         self.constraints = list(constraints or [])
         self.criteria = list(criteria or [])
-        self.panel_state: dict[str, str] = {}
-        self.log_visible = True
+        self.ui = UiState(request=request)
         self.last_error: str | None = None
-        self._needs_start = request is not None and runtime.state is None
-        self.log_lines: list[str] = []
+        self.checkpoint_subject = ""
         self.agent_done = False
-        self.last_evaluation = "none"
-        self._worker: Worker[None] | None = None
+        self.focus_order = ["plan", "checkpoint", "validation", "activity", "objective", "timeline"]
+        self.focus_index = 0
+        self._needs_start = request is not None and runtime.state is None
+        self._agent: Worker[None] | None = None
+
+    # ------------------------------------------------------------------ layout
 
     def compose(self) -> ComposeResult:
-        yield Header(show_clock=True)
-        with Horizontal(id="body"):
-            with VerticalScroll(id="panels"):
-                yield Static("", id="run", classes="panel")
-                yield Static("", id="objective", classes="panel")
-                yield Static("", id="plan", classes="panel")
-                yield Static("", id="git", classes="panel")
-                yield Static("", id="action", classes="panel")
-                yield Static("", id="validation", classes="panel")
-                yield Static("", id="memory", classes="panel")
-                yield Static("", id="context", classes="panel")
-                yield Static("", id="model", classes="panel")
-            yield RichLog(id="log", highlight=False, markup=False, wrap=True)
-        yield Static(HELP, id="help-bar")
-        yield Footer()
+        yield StatusBar()
+        with Vertical(id="main") as main:
+            main.set_class(False, "stacked")
+            with Vertical(id="column-left"):
+                yield ObjectivePanel()
+                yield PlanPanel()
+            with Vertical(id="column-right"):
+                yield ActivityPanel()
+                yield CheckpointPanel()
+                yield ValidationPanel()
+        yield BannerPanel()
+        yield MetricsPanel()
+        yield Static("", id="rule-top", classes="rule")
+        yield TimelinePanel()
+        yield Static("", id="rule-bottom", classes="rule")
+        yield FooterBar()
 
     def on_mount(self) -> None:
         self.runtime.subscribe(self._on_event_threadsafe)
-        self.set_interval(0.4, self._refresh)
-        self._apply_layout()
-        if self.runtime.state is None and self.request is None:
+        state = self.runtime.state
+        if state is not None:
+            self.ui.seed_from_state(state)
+        self.set_interval(0.5, self._tick)
+        self._apply_responsive()
+        self._refresh_panels(set(PANELS))
+        self._refresh_git_state()
+        if state is None and self.request is None:
             self._prompt_for_request()
         elif self.auto_run:
-            self._launch_worker()
-        self._refresh()
+            self._launch_agent()
+        try:
+            self.query_one(PlanPanel).focus()
+        except NoMatches:  # pragma: no cover - composition failure would be fatal anyway
+            pass
 
     def on_resize(self) -> None:
-        self._apply_layout()
+        self._apply_responsive()
+        self._refresh_panels(set(PANELS))
 
-    def _apply_layout(self) -> None:
-        """Keep the log visible only when the terminal is wide enough."""
+    def _apply_responsive(self) -> None:
+        width = self.size.width
+        height = self.size.height
         try:
-            log = self.query_one("#log", RichLog)
-        except NoMatches:
+            main = self.query_one("#main", Vertical)
+            metrics = self.query_one(MetricsPanel)
+            timeline = self.query_one(TimelinePanel)
+            plan = self.query_one(PlanPanel)
+            checkpoint = self.query_one(CheckpointPanel)
+            validation = self.query_one(ValidationPanel)
+        except NoMatches:  # pragma: no cover - resize before composition
             return
-        log.display = self.log_visible and self.size.width >= 90
-
-    def _prompt_for_request(self) -> None:
-        self._log_line("waiting for the task description")
-        self.push_screen(RequestScreen(), self._submit_request)
-
-    def _submit_request(self, text: str | None) -> None:
-        if not text or not text.strip():
-            self._log_line("no task entered; press q to quit")
-            return
-        self.request = text.strip()
-        self._needs_start = True
-        self._log_line(f"task ({len(self.request)} chars): {self.request}")
-        if self.auto_run:
-            self._launch_worker()
-
-    def _launch_worker(self) -> None:
-        self.agent_done = False
-        self.last_error = None
-        self._worker = self.run_worker(
-            self._run_agent, thread=True, name="agent", exit_on_error=False
-        )
+        main.set_class(width < WIDTH_NORMAL, "stacked")
+        timeline.set_class(width < WIDTH_NORMAL, "compact")
+        metrics.display = width >= 90
+        timeline.display = height >= 20
+        stacked = width < WIDTH_NORMAL
+        if stacked:
+            timeline.rows = 3
+        elif height >= HEIGHT_TALL:
+            timeline.rows = 16 if width >= WIDTH_LARGE else 12
+        elif height >= HEIGHT_SHORT:
+            timeline.rows = 8
+        else:
+            timeline.rows = 4
+        plan.max_rows = 5 if stacked or height < HEIGHT_SHORT else 10
+        checkpoint.max_files = 4 if height >= HEIGHT_SHORT else 2
+        validation.max_rows = 4 if height < HEIGHT_SHORT else 8
+        rule = "─" * max(10, width)
+        for rule_id in ("rule-top", "rule-bottom"):
+            rule_widget = self.query_one(f"#{rule_id}", Static)
+            rule_widget.update(Text(rule, style=formatters.STYLES["rule"]))
 
     # ------------------------------------------------------------------ agent worker
+
+    def _launch_agent(self) -> None:
+        self.agent_done = False
+        self.last_error = None
+        self._agent = self.run_worker(
+            self._run_agent, thread=True, name="agent", exit_on_error=False
+        )
 
     def _run_agent(self) -> None:
         try:
             if self._needs_start:
                 assert self.request is not None
                 self._needs_start = False
-                self._call_ui(self._log_line, f"starting run for: {self.request}")
                 self.runtime.start(
                     self.request,
                     hard_constraints=self.constraints,
                     success_criteria=self.criteria,
                 )
+                self._call_ui(self._adopt_state)
             self.runtime.run()
-        except Exception as exc:  # noqa: BLE001 - surfaced in the UI log
+        except Exception as exc:  # noqa: BLE001 - surfaced in the dashboard
             self._call_ui(self._on_agent_error, str(exc))
         finally:
-            self._call_ui(self._on_finished)
+            self._call_ui(self._on_agent_finished)
+
+    def _adopt_state(self) -> None:
+        state = self.runtime.state
+        if state is None:
+            return
+        self.ui.seed_from_state(state)
+        self._refresh_panels({"objective", "plan", "status", "checkpoint", "metrics"})
 
     def _on_agent_error(self, message: str) -> None:
         self.last_error = message
-        self._log_line(f"agent failed: {message}")
-        self._set_panel(
-            "run",
-            f"failed:\n{message}\n\npress i to enter a new task, q to quit",
-        )
+        self.ui.last_error = message
+        self.ui.action = None
+        self._refresh_panels({"banner", "status", "activity", "footer"})
 
-    def _on_finished(self) -> None:
+    def _on_agent_finished(self) -> None:
         self.agent_done = True
-        state = self.runtime.state
-        if state is not None:
-            self._log_line(f"agent finished: {state.status}")
-        self._refresh()
+        self.ui.agent_done = True
+        self._refresh_git_state()
+        self._refresh_panels(set(PANELS))
 
     # ------------------------------------------------------------------ events
 
@@ -265,174 +231,172 @@ class GcaeApp(App[None]):
             callback(*args)
 
     def _on_event_threadsafe(self, event: Event) -> None:
-        self._call_ui(self._on_event, event)
+        self._call_ui(self._consume_event, event)
 
-    def _on_event(self, event: Event) -> None:
-        phase = event.phase.value if event.phase else "-"
-        self._log_line(f"[{event.event_type}] {phase}")
-        payload = event.payload
-        if event.event_type == "decision":
-            tool = payload.get("tool")
-            detail = ""
-            if isinstance(tool, dict):
-                detail = (
-                    f"\ntool: {tool.get('name')}"
-                    f"\nargs: {json.dumps(tool.get('arguments', {}))[:200]}"
-                )
-            self._set_panel(
-                "action",
-                f"action: {payload.get('action')}\nexpected: "
-                f"{payload.get('expected_result') or '-'}{detail}",
-            )
-        elif event.event_type == "tool_result":
-            self._set_panel(
-                "action",
-                f"tool: {payload.get('tool')}\n"
-                f"success: {payload.get('success')}\n"
-                f"duration: {payload.get('duration_ms')} ms\n"
-                f"artifact: {payload.get('artifact') or '-'}",
-            )
-            self._refresh_git_panel()
-        elif event.event_type == "validation":
-            passed = payload.get("passed")
-            commands = payload.get("command_results") or []
-            warnings = payload.get("warnings") or []
-            self._set_panel(
-                "validation",
-                f"passed: {passed}\n"
-                f"diff check: {payload.get('diff_check_passed')}\n"
-                f"commands: {len(commands)}\n"
-                f"changed: {', '.join(payload.get('changed_files') or []) or '-'}\n"
-                f"warnings: {'; '.join(warnings) or '-'}",
-            )
-            self._refresh_git_panel()
-        elif event.event_type == "evaluation":
-            self.last_evaluation = f"{payload.get('decision')}: {payload.get('reason')}"
-            self._log_line(f"[evaluation] {self.last_evaluation}")
-        elif event.event_type == "rollback_completed":
-            self._log_line("[rollback] speculative state discarded")
-        elif event.event_type == "replan":
-            self._log_line(f"[replan] {payload.get('reason')}")
-        elif event.event_type == "user_override":
-            self._log_line(f"[user override] {payload.get('text')}")
-        elif event.event_type == "user_question":
-            self._log_line(f"[question] {payload.get('question')}")
-        elif event.event_type == "run_completed":
-            self._log_line("[complete] run finished")
-        elif event.event_type == "run_failed":
-            self._log_line(f"[failed] {payload.get('reason')}")
-        self._refresh()
+    def _consume_event(self, event: Event) -> None:
+        changed = self.ui.apply(event)
+        if event.event_type == "checkpoint_created":
+            message = str(event.payload.get("message") or "")
+            if message:
+                self.checkpoint_subject = message
+        if event.event_type == "run_failed":
+            self.last_error = str(event.payload.get("reason") or "run failed")
+        if event.event_type in {"run_completed", "run_failed", "run_stopped"}:
+            self.agent_done = True
+        self._refresh_panels({name for name in changed if name in PANELS})
 
-    # ------------------------------------------------------------------ panels
+    # ------------------------------------------------------------------ rendering
 
-    def _log_line(self, line: str) -> None:
-        stamp = datetime.now(UTC).strftime("%H:%M:%S")
-        entry = f"{stamp} {line}"
-        self.log_lines.append(entry)
-        self.log_lines = self.log_lines[-500:]
-        try:
-            self.query_one("#log", RichLog).write(entry)
-        except NoMatches:
-            pass
+    def _tick(self) -> None:
+        self._refresh_panels(
+            {"status", "activity", "checkpoint", "metrics", "timeline", "banner", "footer"}
+        )
 
-    def _set_panel(self, key: str, text: str) -> None:
-        self.panel_state[key] = text
-        try:
-            self.query_one(f"#{key}", Static).update(text)
-        except NoMatches:
-            pass
-
-    def _refresh(self) -> None:
+    def _refresh_panels(self, panels: set[str]) -> None:
         state = self.runtime.state
-        if state is None:
-            if self.last_error:
-                self._set_panel(
-                    "run",
-                    f"failed:\n{self.last_error}\n\npress i to enter a new task, q to quit",
+        ui = self.ui
+        for name in panels:
+            if name == "status":
+                self.query_one(StatusBar).render_state(
+                    state,
+                    ui,
+                    provider=self._provider_label(),
+                    model=self._model_label(),
+                    paused=self.control.paused,
                 )
-            else:
-                self._set_panel("run", "waiting for the task description...")
-            self._set_panel(
-                "objective",
-                f"objective: {self.request or '(not set)'}\n"
-                + (
-                    "enter the task to start"
-                    if not self.request
-                    else "starting the run..."
-                ),
+            elif name == "objective":
+                self.query_one(ObjectivePanel).render_state(state, ui)
+            elif name == "plan":
+                self.query_one(PlanPanel).render_state(state, ui)
+            elif name == "activity":
+                self.query_one(ActivityPanel).render_state(state, ui)
+            elif name == "checkpoint":
+                self.query_one(CheckpointPanel).render_state(
+                    state, ui, subject=self._checkpoint_subject()
+                )
+            elif name == "validation":
+                self.query_one(ValidationPanel).render_state(state, ui)
+            elif name == "metrics":
+                self.query_one(MetricsPanel).render_state(
+                    state, ui, limit=self.runtime.context_limit
+                )
+            elif name == "timeline":
+                self.query_one(TimelinePanel).render_state(ui)
+            elif name == "banner":
+                banner = self.query_one(BannerPanel)
+                banner.display = banner.render_state(state, ui)
+            elif name == "footer":
+                self.query_one(FooterBar).render_text(self._footer_text())
+
+    def _model_label(self) -> str:
+        role = self.ui.role.lower()
+        mapping = {
+            "plan": ("planner", "controller"),
+            "act": ("controller",),
+            "eval": ("evaluator", "controller"),
+            "verify": ("verifier", "controller"),
+        }
+        for candidate in mapping.get(role, ("controller",)):
+            model = self.runtime.role_model(candidate)
+            if model:
+                return str(model)
+        return str(self.runtime.active_model())
+
+    def _provider_label(self) -> str:
+        return self.runtime.provider_label or self.runtime.provider.__class__.__name__.lower()
+
+    def _checkpoint_subject(self) -> str:
+        if self.checkpoint_subject:
+            return self.checkpoint_subject
+        return "base commit" if self.runtime.state is not None else ""
+
+    def _footer_text(self) -> str:
+        if self.agent_done:
+            keys = (
+                "[i] New task  [d] Diff  [l] Logs  [m] Memory  [c] Context  [e] Evaluation  "
+                "[t] Plan  [?] Help  [q] Quit"
             )
+        elif self.control.paused:
+            keys = "[r] Resume  [d] Diff  [l] Logs  [m] Memory  [i] Instruct  [?] Help  [q] Quit"
+        elif self.control.stopped:
+            keys = "[i] New task  [l] Logs  [?] Help  [q] Quit"
+        else:
+            keys = (
+                "[p] Pause  [s] Stop  [d] Diff  [l] Logs  [m] Memory  [c] Context  "
+                "[i] Instruct  [?] Help  [q] Quit"
+            )
+        return formatters.elide(keys, max(20, self.size.width))
+
+    # ------------------------------------------------------------------ slow reads
+
+    def _refresh_git_state(self) -> None:
+        """Read git state off the UI thread; the UI never blocks on git."""
+        if self.runtime.repo is None or self.runtime.repo.worktree is None:
             return
-        elapsed = datetime.now(UTC) - state.created_at
-        self._set_panel(
-            "run",
-            f"run {state.run_id}  [{state.status}]\n"
-            f"phase {state.phase.value}  iteration {state.iteration}\n"
-            f"branch {state.branch}\n"
-            f"worktree {state.worktree}\n"
-            f"elapsed {str(elapsed).split('.')[0]}",
+        self.run_worker(self._git_state_task, thread=True, name="git-state", exit_on_error=False)
+
+    def _git_state_task(self) -> None:
+        repo = self.runtime.repo
+        assert repo is not None
+        payload: dict[str, Any] = {"subject": ""}
+        try:
+            payload["snapshot"] = repo.candidate_snapshot()
+            payload["subject"] = repo.head_subject()
+        except GitError as exc:
+            payload["snapshot"] = {
+                "dirty": False,
+                "files": [],
+                "added": 0,
+                "deleted": 0,
+                "error": str(exc),
+            }
+        self._call_ui(self._apply_git_state, payload)
+
+    def _apply_git_state(self, payload: dict[str, Any]) -> None:
+        snapshot = payload.get("snapshot")
+        if isinstance(snapshot, dict):
+            self.ui.candidate = snapshot
+        subject = str(payload.get("subject") or "")
+        if subject:
+            self.checkpoint_subject = subject
+        self._refresh_panels({"checkpoint", "metrics"})
+
+    def _show_memory(self, records: list[dict[str, Any]]) -> None:
+        self.push_screen(MemoryScreen(records))
+
+    def _diff_task(self) -> None:
+        repo = self.runtime.repo
+        state = self.runtime.state
+        assert repo is not None
+        payload: dict[str, Any] = {"files": [], "reference": "", "dirty": False, "error": ""}
+        try:
+            payload["files"] = repo.diff_by_file()
+            payload["dirty"] = any(entry.get("diff") for entry in payload["files"])
+        except GitError as exc:
+            payload["error"] = str(exc)
+        if state is not None:
+            payload["reference"] = state.accepted_commit or ""
+        self._call_ui(self._show_diff, payload)
+
+    def _show_diff(self, payload: dict[str, Any]) -> None:
+        self.push_screen(
+            DiffScreen(
+                payload.get("files") or [],
+                str(payload.get("reference") or ""),
+                bool(payload.get("dirty")),
+            )
         )
-        goal = next(
-            (
-                step.goal
-                for step in state.plan
-                if step.status in {"pending", "active"}
-            ),
-            "none",
-        )
-        self._set_panel(
-            "objective",
-            f"objective: {state.objective}\n"
-            f"current goal: {goal}\n"
-            f"latest instruction: {state.latest_user_instruction or 'none'}",
-        )
-        plan_lines = [
-            f"[{step.status}] {step.id}: {step.goal}" for step in state.plan
-        ] or ["(no open steps)"]
-        self._set_panel("plan", "plan:\n" + "\n".join(plan_lines))
-        self._refresh_git_panel()
-        context = self.runtime.last_context_info
-        self._set_panel(
-            "context",
-            f"context limit: {self.runtime.context_limit} tokens\n"
-            f"estimated: {context.get('estimated_tokens', 0)} tokens "
-            f"({context.get('characters', 0)} chars)\n"
-            f"pinned records: {context.get('pinned', 0)}\n"
-            f"omitted records: {context.get('omitted', 0)}",
-        )
-        self._set_panel(
-            "model",
-            f"provider: {self.runtime.provider.__class__.__name__}\n"
-            f"model: {self.runtime.active_model()}\n"
-            f"role: controller\n"
-            f"last evaluation: {self.last_evaluation}",
-        )
-        counts = {}
-        if self.runtime.memory is not None:
+
+    def _memory_task(self) -> None:
+        memory = self.runtime.memory
+        state = self.runtime.state
+        records: list[dict[str, Any]] = []
+        if memory is not None and state is not None:
             try:
-                counts = self.runtime.memory.counts(state.run_id)
-            except Exception:  # noqa: BLE001 - display only
-                counts = {}
-        self._set_panel(
-            "memory",
-            "memory (this run):\n"
-            + "\n".join(f"{kind}: {total}" for kind, total in sorted(counts.items()))
-            if counts
-            else "memory (this run): empty",
-        )
-
-    def _refresh_git_panel(self) -> None:
-        state = self.runtime.state
-        if state is None:
-            return
-        validation = state.latest_validation
-        changed = validation.changed_files if validation is not None else []
-        self._set_panel(
-            "git",
-            f"base commit: {state.accepted_commit or 'none'}\n"
-            f"accepted steps: {state.accepted_steps}\n"
-            f"candidate changes: {len(changed)}\n"
-            f"files: {', '.join(changed[:8]) or '-'}",
-        )
+                records = [record.model_dump(mode="json") for record in memory.all(state.run_id)]
+            except Exception:  # noqa: BLE001 - a memory read failure must not kill the UI
+                records = []
+        self._call_ui(self._show_memory, records)
 
     # ------------------------------------------------------------------ actions
 
@@ -443,48 +407,125 @@ class GcaeApp(App[None]):
 
     def action_pause(self) -> None:
         self.control.pause()
-        self._log_line("[control] paused before next action")
+        self._refresh_panels({"status", "activity", "footer"})
 
     def action_resume(self) -> None:
         self.control.resume()
-        self._log_line("[control] resumed")
+        self._refresh_panels({"status", "footer"})
 
     def action_stop(self) -> None:
+        if self.agent_done:
+            self._refresh_panels({"status", "activity", "footer"})
+            return
+        self.push_screen(ConfirmStopModal(), self._confirm_stop)
+
+    def _confirm_stop(self, result: object) -> None:
+        if result is not True:
+            return
         self.control.stop()
-        self._log_line("[control] stop requested")
+        self._refresh_panels({"status", "activity", "footer"})
 
     def action_diff(self) -> None:
-        diff = ""
-        if self.runtime.repo is not None:
+        if self.runtime.state is None:
+            return
+        self.run_worker(self._diff_task, thread=True, name="diff", exit_on_error=False)
+
+    def action_logs(self) -> None:
+        path = str(getattr(self.runtime.events, "path", "") or "")
+        self.push_screen(LogsScreen(lambda: list(self.ui.logs), path))
+
+    def action_memory(self) -> None:
+        self.run_worker(self._memory_task, thread=True, name="memory", exit_on_error=False)
+
+    def action_context(self) -> None:
+        self.push_screen(
+            ContextScreen(
+                self.runtime.last_context_text,
+                dict(self.runtime.last_context_info or {}),
+                self.runtime.context_limit,
+            )
+        )
+
+    def action_evaluation(self) -> None:
+        self.push_screen(
+            EvaluationScreen(self.ui.evaluation, self.ui.verification, self.ui.validation)
+        )
+
+    def action_plan_detail(self) -> None:
+        state = self.runtime.state
+        steps = state.plan if state is not None else []
+        self.push_screen(PlanScreen(steps, self.ui.plan_reason))
+
+    def action_help(self) -> None:
+        self.push_screen(HelpModal())
+
+    def action_inspect(self) -> None:
+        focused = self.focused
+        panel_id = getattr(focused, "id", None) or "plan"
+        if panel_id == "checkpoint":
+            self.action_diff()
+        elif panel_id in {"validation", "activity"}:
+            self.action_evaluation()
+        elif panel_id == "objective":
+            self.action_context()
+        elif panel_id == "timeline":
+            self.action_logs()
+        else:
+            self.action_plan_detail()
+
+    def action_focus_next_panel(self) -> None:
+        self.focus_index = (self.focus_index + 1) % len(self.focus_order)
+        self._focus_panel()
+
+    def action_focus_previous_panel(self) -> None:
+        self.focus_index = (self.focus_index - 1) % len(self.focus_order)
+        self._focus_panel()
+
+    def _focus_panel(self) -> None:
+        for offset in range(len(self.focus_order)):
+            name = self.focus_order[(self.focus_index + offset) % len(self.focus_order)]
             try:
-                diff = self.runtime.repo.diff()
-            except GitError as exc:
-                diff = f"(diff unavailable: {exc})"
-        self.push_screen(DiffScreen(diff))
+                widget = self.query_one(f"#{name}")
+            except NoMatches:
+                continue
+            if widget.display:
+                widget.focus()
+                return
 
     def action_instruction(self) -> None:
         if self.runtime.state is None or self.agent_done:
-            # nothing running: offer the request screen again so failures are recoverable
-            self.push_screen(RequestScreen(), self._submit_request)
+            self._prompt_for_request()
             return
-        self.push_screen(InstructionScreen(), self._submit_instruction)
+        self.push_screen(InstructionModal(), self._submit_instruction)
 
-    def action_toggle_logs(self) -> None:
-        self.log_visible = not self.log_visible
-        self._apply_layout()
+    def _prompt_for_request(self) -> None:
+        self.push_screen(RequestModal(), self._submit_request)
 
-    def action_help(self) -> None:
-        self.push_screen(HelpScreen())
-
-    def _submit_instruction(self, text: str | None) -> None:
-        if not text or not text.strip():
+    def _submit_request(self, text: object) -> None:
+        if not isinstance(text, str) or not text.strip():
+            self._refresh_panels({"status", "footer"})
             return
-        if self.agent_done:
-            self._log_line("run already finished; instruction ignored")
+        timeline = self.ui.timeline
+        self.ui = UiState(request=text.strip())
+        self.ui.timeline = timeline
+        self.request = text.strip()
+        self.last_error = None
+        self.checkpoint_subject = ""
+        self.agent_done = False
+        self._needs_start = True
+        self.ui.add_note("i", f"task accepted · {formatters.elide(self.request, 70)}", "accent")
+        self._refresh_panels(set(PANELS))
+        if self.auto_run:
+            self._launch_agent()
+
+    def _submit_instruction(self, text: object) -> None:
+        if not isinstance(text, str) or not text.strip():
             return
-        self.control.submit_instruction(text.strip())
-        self._log_line(f"queued instruction: {text.strip()}")
+        instruction = text.strip()
+        self.control.submit_instruction(instruction)
+        self.ui.add_note("i", f"instruction queued · {formatters.elide(instruction, 70)}", "accent")
+        self._refresh_panels({"objective", "timeline", "activity"})
 
     def on_unmount(self) -> None:
-        if not self.agent_done and self.control is not None:
+        if not self.agent_done:
             self.control.stop()

@@ -14,11 +14,11 @@
 | `test_phase8.py` | config loading, XDG state dir, provider/evaluator kind resolution, resume, CLI merge/undo guards |
 | `test_verifier.py` | deterministic criteria, fail-closed unsupported criteria, hybrid judge (evidence required, provider failures fail closed, worktree samples reach the judge) |
 | `test_semantic_steps.py` | tool calls batched inside a step, step tool budget, read-only steps, repeated actions force evaluation, replan discards speculative work, `write_file`/`run_tests`, artifact externalization |
-| `test_control.py` | live event subscribers, pause until resume, stop, immutable user override, queued instructions drained while paused |
+| `test_control.py` | live event subscribers, UI event payloads (plan, step, checkpoint, candidate, context, memory, rollback commits), pause until resume, stop, immutable user override, queued instructions drained while paused |
 | `test_routing.py` | role-model resolution, planner kinds, verifier kinds, LLM planner merge rules, escalation after repeated failures, hybrid verification end to end, evaluator failure handling |
 | `test_context_budget.py` | pinned data survives trimming, low-priority records dropped but retrievable, long-run records intact |
 | `test_cli_commands.py` | `list` and `inspect` output and ordering |
-| `test_tui.py` | dashboard rendering and completion, interactive request screen with planner-derived criteria, pause/resume/stop keys, override modal, diff modal, event-driven panels |
+| `test_tui.py` | dashboard rendering for empty/running/paused/completed/failed states, event→section mapping, presentation reducer, request/instruction/stop dialogs, diff/logs/memory/context/plan/evaluation screens, key handling and five terminal sizes |
 
 ## Mandatory end-to-end scenarios
 
@@ -32,8 +32,12 @@
    the context stays within budget, pinned sources remain, dropped records stay retrievable and the
    persistent history is unchanged.
 3. **TUI lifecycle** (`test_tui.py`): run start through completion renders in the dashboard;
-   rollback/replan events and final status are visible; pause, resume, stop, override and diff
-   inspection all work through the pilot.
+   rollback/replan events, candidate scope and final status are visible; pause, resume, stop
+   (with confirmation), override, diff/logs/memory/context/plan/evaluation inspection and the
+   responsive fallback all work through the pilot.
+4. **Verification hygiene** (`test_verifier.py`, `test_semantic_steps.py`): a criterion that runs
+   pytest creates bytecode caches; hygiene is measured before those commands run and generated
+   artifacts never reach the verified checkpoint.
 
 ## Commands
 

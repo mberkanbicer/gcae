@@ -125,3 +125,23 @@ def test_hybrid_verifier_receives_worktree_samples(tmp_path: Path) -> None:
     assert report.passed
     assert "hybrid ok" in capture.prompts[0]
     assert "worktree_samples" in capture.prompts[0]
+
+
+def test_hygiene_is_measured_before_criterion_commands_run(tmp_path: Path) -> None:
+    """A criterion that runs pytest generates __pycache__; that must not fail hygiene."""
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_ok.py").write_text("def test_ok():\n    assert True\n")
+    state = AgentState(
+        run_id="r",
+        source_repo="/source",
+        worktree=str(tmp_path),
+        branch="b",
+        objective="o",
+        original_request="o",
+        success_criteria=["command succeeds: python -m pytest -q tests/test_ok.py"],
+    )
+    report = FinalVerifier().verify(state)
+    assert report.criteria[0].passed
+    assert report.hygiene_passed
+    # the criterion really did run pytest and really did create caches
+    assert list((tmp_path / "tests").rglob("*.pyc"))

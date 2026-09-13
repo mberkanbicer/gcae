@@ -1,0 +1,247 @@
+/* GCAE dashboard theme.
+ *
+ * Semantic selectors only: status, checkpoint, candidate, validation and focus
+ * states.  Colours come from the Textual theme so terminal themes stay usable.
+ * Text colour inside panels is set by gcae.tui.formatters.STYLES.
+ */
+
+Screen {
+    background: $background;
+}
+
+/* Panels take the container width: content must never set the width, otherwise
+ * a render before the first layout locks the panel into a tiny width. */
+#status,
+#objective,
+#plan,
+#activity,
+#checkpoint,
+#validation,
+#banner,
+#metrics,
+#timeline,
+#footer,
+.rule {
+    width: 1fr;
+}
+
+/* ------------------------------------------------------------------ top bar */
+
+#status {
+    height: 1;
+    padding: 0 1;
+    background: $surface;
+    text-style: bold;
+}
+
+/* ------------------------------------------------------------------ layout */
+
+/* The main area is content sized; the timeline absorbs the slack, so slack becomes
+ * more visible history instead of a blank band. */
+#main {
+    height: auto;
+    layout: horizontal;
+}
+
+#column-left {
+    width: 2fr;
+    height: auto;
+}
+
+#column-right {
+    width: 3fr;
+    height: auto;
+}
+
+/* Stacked (narrow) screens scroll inside the main region so the status bar,
+ * timeline and footer stay pinned and reachable. */
+#main.stacked {
+    layout: vertical;
+    height: 1fr;
+    overflow-y: auto;
+    /* keep panel text clear of the overlay scrollbar */
+    padding-right: 2;
+}
+
+#main.stacked #column-left,
+#main.stacked #column-right {
+    width: 1fr;
+}
+
+/* Panels are content sized with caps: no interior holes, no reflow surprises.
+ * Slack collects in the plan (left) and validation (right) regions, which are the
+ * two places where extra rows are actually useful. */
+#objective {
+    height: auto;
+    min-height: 4;
+    max-height: 5;
+    padding: 0 1;
+}
+
+#plan {
+    height: auto;
+    min-height: 4;
+    max-height: 11;
+    padding: 0 1;
+}
+
+#activity {
+    height: auto;
+    min-height: 4;
+    max-height: 6;
+    padding: 0 1;
+}
+
+#checkpoint {
+    height: auto;
+    min-height: 3;
+    max-height: 9;
+    padding: 0 1;
+}
+
+#validation {
+    height: auto;
+    min-height: 4;
+    max-height: 11;
+    padding: 0 1;
+}
+
+#main.stacked #objective,
+#main.stacked #activity,
+#main.stacked #checkpoint {
+    height: auto;
+    min-height: 4;
+    max-height: 8;
+}
+
+#main.stacked #plan,
+#main.stacked #validation {
+    height: auto;
+    min-height: 4;
+    max-height: 10;
+}
+
+#banner {
+    height: auto;
+    max-height: 6;
+    padding: 0 1;
+    background: $surface;
+}
+
+/* ------------------------------------------------------------- status strip */
+
+#metrics {
+    height: 1;
+    padding: 0 1;
+    background: $surface;
+}
+
+.rule {
+    height: 1;
+    padding: 0 1;
+}
+
+/* ---------------------------------------------------------------- timeline */
+
+#timeline {
+    height: 1fr;
+    min-height: 4;
+    padding: 0 1;
+}
+
+/* Narrow screens: keep the event strip small so the checkpoint and validation
+ * panels fit above it. */
+#timeline.compact {
+    height: 4;
+}
+
+#footer {
+    height: 1;
+    padding: 0 1;
+    background: $surface;
+    color: $text-muted;
+}
+
+/* ---------------------------------------------------------------- focus */
+/* Subtle and reflow-free: only the background changes when a panel is focused. */
+
+#objective:focus,
+#activity:focus,
+#checkpoint:focus,
+#validation:focus,
+#plan:focus,
+#timeline:focus {
+    background: $panel;
+}
+
+/* ------------------------------------------------------------- dialogs */
+
+DialogScreen,
+ViewerScreen {
+    align: center middle;
+}
+
+#dialog {
+    width: 80%;
+    max-width: 90;
+    min-width: 24;
+    height: auto;
+    padding: 1 2;
+    background: $surface;
+    border: round $accent;
+}
+
+#dialog-hint,
+#dialog-body-text {
+    padding: 0 0 1 0;
+    color: $text-muted;
+}
+
+#dialog-input {
+    border: tall $accent;
+}
+
+#viewer {
+    width: 96%;
+    height: 92%;
+    background: $surface;
+    border: round $accent;
+}
+
+#viewer-title {
+    height: 1;
+    padding: 0 1;
+    background: $panel;
+    text-style: bold;
+}
+
+#viewer-hint {
+    height: 1;
+    padding: 0 1;
+    color: $text-muted;
+}
+
+#diff-body,
+#context-body {
+    height: 1fr;
+}
+
+#viewer-scroll,
+#viewer-scroll-list {
+    height: 1fr;
+    padding: 0 1;
+}
+
+#viewer-scroll-list {
+    width: 36;
+    background: $panel;
+}
+
+#diff-files,
+#context-sections {
+    height: auto;
+}
+
+#viewer-scroll-list ListItem {
+    padding: 0 1;
+}

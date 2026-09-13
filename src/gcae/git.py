@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import uuid
 from pathlib import Path
+from typing import Any
 
 
 class GitError(RuntimeError):
@@ -206,12 +207,99 @@ class GitRepository:
         self._run("clean", "-fdX", cwd=self._require_worktree())
 
     def changed_files(self) -> list[str]:
-        output = self._run("status", "--porcelain", cwd=self._require_worktree())
-        return [line[3:] for line in output.splitlines() if len(line) >= 4]
+        return [path for _, path in self.status_entries()]
 
     def status_entries(self) -> list[tuple[str, str]]:
-        output = self._run("status", "--porcelain", cwd=self._require_worktree())
+        """Porcelain status at file level (``-uall`` lists new files, not directories)."""
+        output = self._run(
+            "status", "--porcelain", "--untracked-files=all", cwd=self._require_worktree()
+        )
         return [(line[:2], line[3:]) for line in output.splitlines() if len(line) >= 4]
+
+    def numstat(self) -> dict[str, tuple[int | None, int | None]]:
+        """Insertions/deletions per tracked file (None for binary files)."""
+        output = self._run("diff", "--numstat", cwd=self._require_worktree())
+        stats: dict[str, tuple[int | None, int | None]] = {}
+        for line in output.splitlines():
+            parts = line.split("\t")
+            if len(parts) != 3:
+                continue
+            added, deleted, path = parts
+            stats[path] = (
+                int(added) if added.isdigit() else None,
+                int(deleted) if deleted.isdigit() else None,
+            )
+        return stats
+
+    def count_lines(self, relative: str, limit: int = 1_000_000) -> int | None:
+        """Line count for an untracked file; None for binary or oversized files."""
+        path = self._require_worktree() / relative
+        try:
+            if not path.is_file() or path.stat().st_size > limit:
+                return None
+            data = path.read_bytes()
+        except OSError:
+            return None
+        if b"\x00" in data[:8192]:
+            return None
+        if not data:
+            return 0
+        return data.count(b"\n") + (0 if data.endswith(b"\n") else 1)
+
+    def candidate_snapshot(self) -> dict[str, Any]:
+        """Structured candidate state for the UI: no decoration, no invented numbers."""
+        stats = self.numstat()
+        files: list[dict[str, Any]] = []
+        added_total = 0
+        deleted_total = 0
+        for code, path in self.status_entries():
+            added, deleted = stats.get(path, (None, None))
+            if code == "??":
+                added = self.count_lines(path)
+                deleted = 0 if added is not None else None
+            if added is not None:
+                added_total += added
+            if deleted is not None:
+                deleted_total += deleted
+            files.append({"code": code, "path": path, "added": added, "deleted": deleted})
+        return {
+            "dirty": bool(files),
+            "files": files,
+            "added": added_total,
+            "deleted": deleted_total,
+        }
+
+    def diff_by_file(self, limit: int = 120_000) -> list[dict[str, Any]]:
+        """Unified diff per changed file, including untracked files, bounded in size."""
+        worktree = self._require_worktree()
+        result: list[dict[str, Any]] = []
+        for code, path in self.status_entries():
+            if code == "??":
+                text = self._run(
+                    "diff",
+                    "--no-index",
+                    "--no-ext-diff",
+                    "--",
+                    "/dev/null",
+                    path,
+                    cwd=worktree,
+                    check=False,
+                )
+            else:
+                text = self._run("diff", "--no-ext-diff", "--", path, cwd=worktree)
+            truncated = len(text) > limit
+            result.append(
+                {
+                    "code": code,
+                    "path": path,
+                    "diff": text[:limit],
+                    "truncated": truncated,
+                }
+            )
+        return result
+
+    def head_subject(self, ref: str = "HEAD") -> str:
+        return self._run("log", "-1", "--pretty=%s", ref, cwd=self._require_worktree())
 
     def checkpoint(self, message: str) -> str:
         worktree = self._require_worktree()

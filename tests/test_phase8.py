@@ -116,6 +116,63 @@ def test_cli_merge_asks_and_undo_reverses(tmp_path, capsys, monkeypatch) -> None
     assert reloaded.merge is None
 
 
+def test_cli_merge_command_is_guarded_and_reversible(tmp_path) -> None:
+    import subprocess
+
+    from gcae.cli import _merge_run, _undo
+    from gcae.git import GitRepository
+    from gcae.models import AgentState
+    from gcae.persistence import StateStore
+
+    source = tmp_path / "source"
+    source.mkdir()
+    subprocess.run(["git", "init", "-q", str(source)], check=True)
+    subprocess.run(["git", "-C", str(source), "config", "user.email", "t@e.f"], check=True)
+    subprocess.run(["git", "-C", str(source), "config", "user.name", "T"], check=True)
+    (source / "base.txt").write_text("base\n")
+    subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(source), "commit", "-qm", "base"], check=True)
+
+    runtime_dir = tmp_path / "runtime"
+    repo = GitRepository(source, runtime_dir)
+    worktree, branch, base = repo.create_isolated_worktree("run-merge")
+    (worktree / "feature.txt").write_text("feature\n")
+    accepted = repo.checkpoint("feature")
+    state = AgentState(
+        run_id="run-merge",
+        source_repo=str(source),
+        worktree=str(worktree),
+        branch=branch,
+        objective="o",
+        original_request="o",
+        status="running",
+        accepted_commit=accepted,
+    )
+    state_path = runtime_dir / "runs" / "run-merge" / "state.json"
+    StateStore(state_path).save(state)
+
+    with pytest.raises(RuntimeError):
+        _merge_run(source, "run-merge", runtime_dir)
+
+    state.status = "complete"
+    StateStore(state_path).save(state)
+    (worktree / "drift.txt").write_text("drift\n")
+    repo.checkpoint("drift")
+    with pytest.raises(RuntimeError):
+        _merge_run(source, "run-merge", runtime_dir)
+    repo.rollback(accepted)
+
+    _merge_run(source, "run-merge", runtime_dir)
+    assert (source / "feature.txt").read_text() == "feature\n"
+    assert StateStore(state_path).load().merge is not None
+    with pytest.raises(RuntimeError):
+        _merge_run(source, "run-merge", runtime_dir)
+
+    _undo(source, "run-merge", runtime_dir)
+    assert not (source / "feature.txt").exists()
+    assert repo.source_commit() == base
+
+
 def test_resume_restores_trusted_state(tmp_path: Path) -> None:
     import subprocess
 

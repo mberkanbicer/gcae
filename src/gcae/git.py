@@ -73,6 +73,9 @@ class GitRepository:
             raise GitError("isolated worktree has not been created")
         return self.worktree
 
+    def branch_head(self, branch: str) -> str:
+        return self._run("rev-parse", f"refs/heads/{branch}")
+
     def current_branch(self) -> str:
         return self._run("rev-parse", "--abbrev-ref", "HEAD")
 

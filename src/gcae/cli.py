@@ -47,6 +47,13 @@ def build_parser() -> argparse.ArgumentParser:
     undo.add_argument("run_id")
     undo.add_argument("--config", type=Path)
     undo.add_argument("--runtime-dir", type=Path)
+    merge = subparsers.add_parser(
+        "merge", help="merge a completed run branch into the current branch"
+    )
+    merge.add_argument("repository", type=Path)
+    merge.add_argument("run_id")
+    merge.add_argument("--config", type=Path)
+    merge.add_argument("--runtime-dir", type=Path)
     return parser
 
 
@@ -103,11 +110,38 @@ def _summary(state: AgentState) -> str:
     )
 
 
-def _undo(repository: Path, run_id: str, runtime_dir: Path) -> None:
-    state_path = Path(runtime_dir).expanduser() / "runs" / run_id / "state.json"
+def _state_path(runtime_dir: Path, run_id: str) -> Path:
+    return Path(runtime_dir).expanduser() / "runs" / run_id / "state.json"
+
+
+def _load_run(repository: Path, run_id: str, runtime_dir: Path) -> tuple[AgentState, Path]:
+    state_path = _state_path(runtime_dir, run_id)
     state = StateStore(state_path).load()
     if Path(state.source_repo).resolve() != Path(repository).resolve():
-        raise RuntimeError("undo repository does not match persisted state")
+        raise RuntimeError(f"repository does not match persisted run {run_id}")
+    return state, state_path
+
+
+def _apply_merge(state: AgentState, state_path: Path, repo: GitRepository) -> MergeRecord:
+    target = repo.current_branch()
+    pre, merged = repo.merge_branch(state.branch)
+    record = MergeRecord(
+        branch=state.branch,
+        target_branch=target,
+        pre_merge_commit=pre,
+        merge_commit=merged,
+    )
+    state.merge = record
+    StateStore(state_path).save(state)
+    print(
+        f"gcae: merged {state.branch} into {target} ({pre[:12]} -> {merged[:12]})",
+        file=sys.stderr,
+    )
+    return record
+
+
+def _undo(repository: Path, run_id: str, runtime_dir: Path) -> None:
+    state, state_path = _load_run(repository, run_id, runtime_dir)
     merge = state.merge
     if merge is None:
         raise RuntimeError(f"run {run_id} has no recorded merge to undo")
@@ -120,6 +154,26 @@ def _undo(repository: Path, run_id: str, runtime_dir: Path) -> None:
         f"HEAD is back at {merge.pre_merge_commit[:12]}",
         file=sys.stderr,
     )
+
+
+def _merge_run(repository: Path, run_id: str, runtime_dir: Path) -> None:
+    state, state_path = _load_run(repository, run_id, runtime_dir)
+    if state.status != "complete":
+        raise RuntimeError(f"run {run_id} is not complete: {state.status}")
+    if state.merge is not None:
+        raise RuntimeError(
+            f"run {run_id} is already merged into {state.merge.target_branch}; "
+            f"run 'gcae undo {state.source_repo} {run_id}' first"
+        )
+    repo = GitRepository(state.source_repo, Path(runtime_dir).expanduser())
+    head = repo.branch_head(state.branch)
+    if state.accepted_commit and head != state.accepted_commit:
+        raise RuntimeError(
+            f"branch {state.branch} moved past the verified commit "
+            f"{state.accepted_commit[:12]}; refusing to merge"
+        )
+    _apply_merge(state, state_path, repo)
+    print(f"gcae: undo with: gcae undo {state.source_repo} {run_id}", file=sys.stderr)
 
 
 def _maybe_merge(
@@ -153,24 +207,9 @@ def _maybe_merge(
         return
     repo = GitRepository(result.source_repo, Path(runtime_dir).expanduser())
     try:
-        target = repo.current_branch()
-        pre, merged = repo.merge_branch(result.branch)
+        _apply_merge(result, _state_path(runtime_dir, result.run_id), repo)
     except GitError as exc:
         print(f"gcae: merge skipped: {exc}", file=sys.stderr)
-        return
-    result.merge = MergeRecord(
-        branch=result.branch,
-        target_branch=target,
-        pre_merge_commit=pre,
-        merge_commit=merged,
-    )
-    StateStore(
-        Path(runtime_dir).expanduser() / "runs" / result.run_id / "state.json"
-    ).save(result)
-    print(
-        f"gcae: merged {result.branch} into {target} ({pre[:12]} -> {merged[:12]})",
-        file=sys.stderr,
-    )
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -183,6 +222,9 @@ def main(argv: list[str] | None = None) -> None:
         runtime_dir = (args.runtime_dir or config.state_dir).expanduser()
         if args.command == "undo":
             _undo(args.repository, args.run_id, runtime_dir)
+            return
+        if args.command == "merge":
+            _merge_run(args.repository, args.run_id, runtime_dir)
             return
         provider = _provider(config)
         runtime = Runtime(

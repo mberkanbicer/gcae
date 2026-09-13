@@ -40,16 +40,24 @@ verified branch `gcae/<run-id>` and its worktree are left in place for inspectio
 never merges them on its own.
 
 After a successful run, the CLI asks `merge gcae/<run-id> into the current branch? [y/N]` when
-stdin is interactive. Use `--merge` to merge without asking or `--no-merge` to never merge. The
-merge is recorded in `state.json` and is reversible:
+stdin is interactive. Use `--merge` to merge without asking or `--no-merge` to never merge. You can
+also merge later, without rerunning, using the recorded run state:
+
+```bash
+.venv/bin/python -m gcae merge /path/to/repository <run-id> --runtime-dir ~/.local/state/gcae
+```
+
+The merge is recorded in `state.json` and is reversible:
 
 ```bash
 .venv/bin/python -m gcae undo /path/to/repository <run-id> --runtime-dir ~/.local/state/gcae
 ```
 
 A merge only happens when the source repository is clean; `ff-only` is preferred, otherwise a
-no-ff merge is attempted and aborted cleanly on conflicts. `undo` resets the source branch to the
-recorded pre-merge commit and refuses if the repository is dirty or HEAD has moved since the merge.
+no-ff merge is attempted and aborted cleanly on conflicts. `gcae merge` additionally requires the
+run to be complete and the run branch to still point at the verified commit. `undo` resets the
+source branch to the recorded pre-merge commit and refuses if the repository is dirty or HEAD has
+moved since the merge.
 
 ## Provider examples
 

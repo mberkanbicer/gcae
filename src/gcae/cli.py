@@ -72,7 +72,8 @@ def _summary(state: AgentState) -> str:
         f"run {state.run_id}: {state.status}\n"
         f"accepted steps: {state.accepted_steps}, commit: {state.accepted_commit or 'none'}\n"
         f"verification: {criteria}\n"
-        f"worktree: {state.worktree}"
+        f"worktree: {state.worktree}\n"
+        f"branch: {state.branch} (not merged; apply with: git merge {state.branch})"
     )
 
 

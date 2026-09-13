@@ -49,6 +49,37 @@ def test_openai_compatible_provider() -> None:
     assert authorization == "Bearer secret"
 
 
+def test_openai_compatible_provider_retries_empty_content() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(200, json={"choices": [{"message": {"content": None}}]})
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                '{"action":"finish_candidate","semantic_goal":"done",'
+                                '"reason_summary":"ok"}'
+                            )
+                        }
+                    }
+                ]
+            },
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    provider = OpenAICompatibleProvider("http://local/v1", "model", client=client)
+    decision = provider.complete("prompt", Decision)
+    assert decision.action.value == "finish_candidate"
+    assert calls == 2
+
+
 class RecordingProvider:
     def __init__(self) -> None:
         self.prompts: list[str] = []

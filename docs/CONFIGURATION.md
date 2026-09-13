@@ -51,8 +51,10 @@ commands = ["pytest -q"]            # run before every semantic evaluation
 ## Behavior notes
 
 - `planner.kind = "auto"` uses the model for planning when `provider.kind` is `http`/`openrouter`,
-  and the deterministic planner otherwise. Planned criteria and constraints are merged with the
-  user's; user-provided entries are never overwritten and always stored as immutable memory.
+  and the deterministic planner otherwise. The planner derives success criteria from the request
+  (at least one is required when no `--criterion` is supplied); planned criteria and constraints
+  are merged with the user's, and user-provided entries are never overwritten and always stored as
+  immutable memory.
 - `evaluator.kind = "llm"` sends the reconstructed context and deterministic validation evidence
   to the configured model; it can promote failure memories before a rollback.
 - `verifier.kind = "hybrid"` keeps all deterministic checks and additionally asks the configured

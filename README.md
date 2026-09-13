@@ -17,7 +17,11 @@ python -m venv .venv
 ## Run
 
 ```bash
-# interactive TUI on a terminal; verified work ends on branch gcae/<run-id>
+# interactive TUI on a terminal; it asks for the task, the planner derives criteria,
+# and verified work ends on branch gcae/<run-id>
+gcae run ~/src/project --config ~/.config/gcae/config.toml
+
+# or give the task up front
 gcae run ~/src/project "Add a --dry-run flag to the importer" \
   --criterion "command succeeds: pytest -q" \
   --config ~/.config/gcae/config.toml

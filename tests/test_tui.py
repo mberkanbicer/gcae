@@ -7,9 +7,10 @@ import pytest
 pytest.importorskip("textual")
 
 from gcae.models import Event
+from gcae.planner import LLMPlanner
 from gcae.providers import FakeProvider
 from gcae.runtime import Runtime, RuntimeControl
-from gcae.tui.app import DiffScreen, GcaeApp
+from gcae.tui.app import DiffScreen, GcaeApp, RequestScreen
 
 
 def init_repo(path: Path) -> None:
@@ -85,6 +86,57 @@ def test_pause_resume_and_stop_keys(tmp_path: Path) -> None:
             assert not app.control.paused
             await pilot.press("s")
             assert app.control.stopped
+
+    asyncio.run(scenario())
+
+
+def test_tui_prompts_for_request_and_infers_criteria(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    init_repo(source)
+    plan = {
+        "objective": "build the answer file",
+        "success_criteria": ["file exists: answer.txt"],
+        "hard_constraints": [],
+        "assumptions": [],
+        "steps": [
+            {
+                "id": "step-1",
+                "goal": "create answer.txt",
+                "rationale": "requested",
+                "expected_result": "file exists",
+                "intended_scope": [],
+                "validation_requirements": [],
+            }
+        ],
+    }
+    runtime = Runtime(
+        source,
+        tmp_path / "runtime",
+        provider=FakeProvider(TRAJECTORY),
+        planner=LLMPlanner(FakeProvider([plan])),
+        control=RuntimeControl(),
+    )
+    app = GcaeApp(runtime)  # no request, no state: the TUI must ask for the task
+
+    async def scenario() -> None:
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            assert isinstance(app.screen, RequestScreen)
+            for character in "build":
+                await pilot.press(character)
+            await pilot.press("enter")
+            for _ in range(200):
+                if app.agent_done:
+                    break
+                await pilot.pause(0.05)
+            await pilot.pause(0.3)
+            assert app.agent_done
+            assert runtime.state is not None
+            assert runtime.state.status == "complete"
+            assert runtime.state.objective == "build the answer file"
+            assert runtime.state.success_criteria == ["file exists: answer.txt"]
+            assert "build the answer file" in app.panel_state["objective"]
 
     asyncio.run(scenario())
 

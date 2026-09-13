@@ -47,9 +47,25 @@ class OpenAICompatibleProvider:
                     json=self._payload(messages),
                 )
                 response.raise_for_status()
-                raw = self._content(response.json())
-            except (httpx.HTTPError, KeyError, IndexError, TypeError) as exc:
+                body = response.json()
+            except (httpx.HTTPError, ValueError) as exc:
                 raise ProviderOutputError("provider request failed") from exc
+            try:
+                raw = self._content(body)
+            except ProviderOutputError as exc:
+                if attempt >= self.repair_limit:
+                    raise ProviderOutputError("provider returned no text content") from exc
+                messages = [
+                    {"role": "user", "content": prompt},
+                    {
+                        "role": "user",
+                        "content": (
+                            "Return only valid JSON matching the requested schema. "
+                            "The previous response was empty."
+                        ),
+                    },
+                ]
+                continue
             try:
                 return schema.model_validate(json.loads(raw))
             except (json.JSONDecodeError, ValidationError, TypeError, ValueError) as exc:

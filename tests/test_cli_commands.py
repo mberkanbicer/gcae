@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from gcae.cli import _inspect_run, _list_runs
 from gcae.models import AgentState
 from gcae.persistence import StateStore
@@ -51,3 +53,12 @@ def test_list_and_inspect_runs(tmp_path: Path, capsys) -> None:
 def test_list_runs_reports_empty_state(tmp_path: Path, capsys) -> None:
     _list_runs(tmp_path / "runtime")
     assert "no runs found" in capsys.readouterr().out
+
+
+def test_headless_run_requires_a_request(tmp_path: Path, capsys) -> None:
+    from gcae.cli import main
+
+    with pytest.raises(SystemExit) as exit_info:
+        main(["run", str(tmp_path / "repo"), "--headless"])
+    assert exit_info.value.code == 1
+    assert "request is required" in capsys.readouterr().err

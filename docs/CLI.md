@@ -1,7 +1,7 @@
 # CLI
 
 ```
-gcae run <repository> <request> [--config PATH] [--runtime-dir PATH]
+gcae run <repository> [<request>] [--config PATH] [--runtime-dir PATH]
          [--constraint TEXT]... [--criterion TEXT]... [--merge|--no-merge] [--tui|--headless]
 gcae resume <repository> <run-id> [--config PATH] [--runtime-dir PATH] [--tui|--headless]
 gcae list [--config PATH] [--runtime-dir PATH]
@@ -10,17 +10,23 @@ gcae merge <repository> <run-id> [--config PATH] [--runtime-dir PATH]
 gcae undo <repository> <run-id> [--config PATH] [--runtime-dir PATH]
 ```
 
-`run` and `resume` open the TUI on a terminal; non-interactive environments (or `--headless`) get
-the event log on stderr plus the final `AgentState` JSON on stdout. The summary line reports
-status, accepted steps, verification, worktree and branch/merge state.
+The request is optional in TUI mode: `gcae run <repository>` opens the TUI and asks for the task,
+and the planner derives the success criteria from it. Headless mode requires a request and exits 1
+without one. `run` and `resume` open the dashboard on a terminal; non-interactive environments
+(or `--headless`) get the event log on stderr plus the final `AgentState` JSON on stdout. The
+summary line reports status, accepted steps, verification, worktree and branch/merge state.
 
 ## Criteria
 
-Criteria are verified deterministically; unsupported criteria fail closed.
+Criteria are verified deterministically; unsupported criteria fail closed unless
+`[verifier] kind = "hybrid"` is configured.
 
 - `file exists: path/to/file`
 - `file contains: path/to/file :: expected text`
 - `command succeeds: pytest -q`
+
+When no `--criterion` is given, the planner derives criteria from the request (the model-backed
+planner is required to produce at least one). `--criterion` values are merged with inferred ones.
 
 ## Runs
 

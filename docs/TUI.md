@@ -4,6 +4,20 @@
 TTY. `--headless` forces the non-interactive path, `--tui` forces the dashboard. Both modes share
 the same engine; `src/gcae/tui/` imports the engine, never the other way round.
 
+## Starting without a task
+
+`gcae run <repository>` (no request) opens the TUI directly with a request modal:
+
+```
+Describe the task (Enter starts the run, Esc cancels)
+> Add a --dry-run flag to the importer
+```
+
+On submit the runtime plans the task in the worker thread and the agent starts. Success criteria
+are derived from the typed request by the configured planner (`[planner] kind = "auto"` uses the
+model for HTTP providers; the planner is required to produce at least one checkable criterion).
+Extra criteria can still be supplied with `--criterion` and are merged, never overwritten.
+
 ## Architecture
 
 - The runtime runs in a Textual worker thread (`run_worker(..., thread=True)`).

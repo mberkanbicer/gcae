@@ -14,9 +14,9 @@ from gcae.config import (
 )
 from gcae.evaluator import LLMEvaluator
 from gcae.http_provider import OpenAICompatibleProvider
-from gcae.models import Evaluation, EvaluationInput
+from gcae.models import AgentState, Evaluation, EvaluationInput
 from gcae.planner import LLMPlanner, Planner
-from gcae.providers import FakeProvider
+from gcae.providers import FakeProvider, ProviderOutputError
 from gcae.runtime import Runtime
 from gcae.verifier import FinalVerifier
 
@@ -78,6 +78,49 @@ def test_role_models_resolve_from_config() -> None:
     assert "controller" not in roles
     base.close()
     roles["evaluator"].close()
+
+
+def test_llm_planner_infers_criteria_from_request() -> None:
+    state = AgentState(
+        run_id="r",
+        source_repo="/s",
+        worktree="/w",
+        branch="b",
+        objective="build the answer file",
+        original_request="build the answer file",
+    )
+    plan = {
+        "objective": "build the answer file",
+        "success_criteria": ["file exists: answer.txt"],
+        "steps": [
+            {
+                "id": "step-1",
+                "goal": "create answer.txt",
+                "rationale": "requested",
+                "expected_result": "file exists",
+                "intended_scope": [],
+                "validation_requirements": [],
+            }
+        ],
+    }
+    result = LLMPlanner(FakeProvider([plan])).plan(state)
+    assert result.success_criteria == ["file exists: answer.txt"]
+
+
+def test_llm_planner_requires_criteria() -> None:
+    state = AgentState(
+        run_id="r",
+        source_repo="/s",
+        worktree="/w",
+        branch="b",
+        objective="do something",
+        original_request="do something",
+    )
+    planner = LLMPlanner(
+        FakeProvider([{"objective": "do something", "success_criteria": [], "steps": []}])
+    )
+    with pytest.raises(ProviderOutputError):
+        planner.plan(state)
 
 
 def test_planner_kind_resolution() -> None:

@@ -52,6 +52,17 @@ def make_state(tmp_path: Path, criterion: str) -> AgentState:
     )
 
 
+def test_exact_content_criterion(tmp_path: Path) -> None:
+    (tmp_path / "note.txt").write_text("hybrid ok")
+    assert FinalVerifier().verify(
+        make_state(tmp_path, "file contains exactly: note.txt :: hybrid ok")
+    ).passed
+    (tmp_path / "note.txt").write_text("hybrid ok\n")
+    assert not FinalVerifier().verify(
+        make_state(tmp_path, "file contains exactly: note.txt :: hybrid ok")
+    ).passed
+
+
 def test_hybrid_verifier_judges_unsupported_criterion(tmp_path: Path) -> None:
     (tmp_path / "answer.txt").write_text("correct")
     judge = FakeProvider(

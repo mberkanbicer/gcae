@@ -18,7 +18,7 @@
 | `test_routing.py` | role-model resolution, planner kinds, verifier kinds, LLM planner merge rules, escalation after repeated failures, hybrid verification end to end, evaluator failure handling |
 | `test_context_budget.py` | pinned data survives trimming, low-priority records dropped but retrievable, long-run records intact |
 | `test_cli_commands.py` | `list` and `inspect` output and ordering |
-| `test_tui.py` | dashboard rendering and completion, pause/resume/stop keys, override modal, diff modal, event-driven panels |
+| `test_tui.py` | dashboard rendering and completion, interactive request screen with planner-derived criteria, pause/resume/stop keys, override modal, diff modal, event-driven panels |
 
 ## Mandatory end-to-end scenarios
 

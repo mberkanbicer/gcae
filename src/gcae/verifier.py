@@ -69,6 +69,24 @@ class FinalVerifier:
                 evidence = str(exc)
             return CriterionResult(criterion=criterion, passed=passed, evidence=evidence)
 
+        if command.startswith("file contains exactly: "):
+            value = command.removeprefix("file contains exactly: ")
+            relative, separator, expected = value.partition(" :: ")
+            if not separator:
+                return CriterionResult(
+                    criterion=criterion,
+                    passed=False,
+                    evidence="expected format: file contains exactly: path :: text",
+                )
+            try:
+                path = tools._path(relative.strip())
+                passed = path.is_file() and path.read_text(encoding="utf-8") == expected
+                evidence = str(path)
+            except (OSError, UnicodeError, ValueError) as exc:
+                passed = False
+                evidence = str(exc)
+            return CriterionResult(criterion=criterion, passed=passed, evidence=evidence)
+
         if command.startswith("file contains: "):
             value = command.removeprefix("file contains: ")
             relative, separator, expected = value.partition(" :: ")
@@ -106,7 +124,8 @@ class FinalVerifier:
             passed=False,
             evidence=(
                 "unsupported criterion; use 'file exists: ', 'file contains: ', "
-                "'command succeeds: ' or enable [verifier] kind = \"hybrid\""
+                "'file contains exactly: ', 'command succeeds: ' or enable "
+                '[verifier] kind = "hybrid"'
             ),
         )
 

@@ -25,10 +25,19 @@ HELP = (
 class InstructionScreen(ModalScreen[str | None]):
     """Modal input for a new user instruction."""
 
+    def __init__(
+        self,
+        title: str = "New instruction (Enter submits, Esc cancels)",
+        placeholder: str = "e.g. preserve streaming behavior",
+    ) -> None:
+        super().__init__()
+        self.title_text = title
+        self.placeholder = placeholder
+
     def compose(self) -> ComposeResult:
         with Vertical(id="instruction-box"):
-            yield Static("New instruction (Enter submits, Esc cancels)")
-            yield Input(placeholder="e.g. preserve streaming behavior", id="instruction-input")
+            yield Static(self.title_text)
+            yield Input(placeholder=self.placeholder, id="instruction-input")
 
     def on_mount(self) -> None:
         self.query_one("#instruction-input", Input).focus()
@@ -38,6 +47,16 @@ class InstructionScreen(ModalScreen[str | None]):
 
     def key_escape(self) -> None:
         self.dismiss(None)
+
+
+class RequestScreen(InstructionScreen):
+    """First-run modal that asks for the task; the planner derives criteria from it."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            title="Describe the task (Enter starts the run, Esc cancels)",
+            placeholder="e.g. Add a --dry-run flag to the importer",
+        )
 
 
 class DiffScreen(ModalScreen[None]):
@@ -105,12 +124,22 @@ class GcaeApp(App[None]):
     #help-body { padding: 2 4; background: $surface; }
     """
 
-    def __init__(self, runtime: Runtime, auto_run: bool = True) -> None:
+    def __init__(
+        self,
+        runtime: Runtime,
+        auto_run: bool = True,
+        request: str | None = None,
+        constraints: list[str] | None = None,
+        criteria: list[str] | None = None,
+    ) -> None:
         super().__init__()
         self.runtime = runtime
         self.control: RuntimeControl = runtime.control or RuntimeControl()
         runtime.control = self.control
         self.auto_run = auto_run
+        self.request = request
+        self.constraints = list(constraints or [])
+        self.criteria = list(criteria or [])
         self.panel_state: dict[str, str] = {}
         self.log_lines: list[str] = []
         self.agent_done = False
@@ -137,19 +166,45 @@ class GcaeApp(App[None]):
     def on_mount(self) -> None:
         self.runtime.subscribe(self._on_event_threadsafe)
         self.set_interval(0.4, self._refresh)
-        if self.auto_run:
-            self._worker = self.run_worker(
-                self._run_agent, thread=True, name="agent", exit_on_error=False
-            )
+        if self.runtime.state is None and self.request is None:
+            self._prompt_for_request()
+        elif self.auto_run:
+            self._launch_worker()
         self._refresh()
+
+    def _prompt_for_request(self) -> None:
+        self._log_line("waiting for the task description")
+        self.push_screen(RequestScreen(), self._submit_request)
+
+    def _submit_request(self, text: str | None) -> None:
+        if not text or not text.strip():
+            self._log_line("no task entered; press q to quit")
+            return
+        self.request = text.strip()
+        self._log_line(f"task: {self.request}")
+        if self.auto_run:
+            self._launch_worker()
+
+    def _launch_worker(self) -> None:
+        self._worker = self.run_worker(
+            self._run_agent, thread=True, name="agent", exit_on_error=False
+        )
 
     # ------------------------------------------------------------------ agent worker
 
     def _run_agent(self) -> None:
         try:
+            if self.runtime.state is None:
+                assert self.request is not None
+                self._call_ui(self._log_line, f"starting run for: {self.request}")
+                self.runtime.start(
+                    self.request,
+                    hard_constraints=self.constraints,
+                    success_criteria=self.criteria,
+                )
             self.runtime.run()
         except Exception as exc:  # noqa: BLE001 - surfaced in the UI log
-            self._call_ui(self._log, f"agent crashed: {exc}")
+            self._call_ui(self._log_line, f"agent failed: {exc}")
         finally:
             self._call_ui(self._on_finished)
 
@@ -249,6 +304,8 @@ class GcaeApp(App[None]):
     def _refresh(self) -> None:
         state = self.runtime.state
         if state is None:
+            self._set_panel("run", "waiting for the task description...")
+            self._set_panel("objective", "objective: (not set)\nenter the task to start")
             return
         elapsed = datetime.now(UTC) - state.created_at
         self._set_panel(

@@ -4,7 +4,7 @@ import json
 from typing import Protocol
 
 from .models import AgentState, InitialPlan, PlanStep
-from .providers import Provider
+from .providers import Provider, ProviderOutputError
 
 
 class PlannerLike(Protocol):
@@ -58,8 +58,11 @@ def build_planner_prompt(state: AgentState) -> str:
         "with exactly one JSON object and no other text.\n"
         "Determine the real objective, explicit and implicit success criteria, hard constraints, "
         "assumptions, and a short ordered plan of semantic steps.\n"
-        "Success criteria must be checkable (prefer 'file exists: ', 'file contains: path :: text' "
-        "or 'command succeeds: ' forms) and must include every user-provided criterion unchanged.\n"
+        "Success criteria must use exactly one of these forms and must never be empty: "
+        "'file exists: path', 'file contains: path :: text', "
+        "'file contains exactly: path :: text', 'command succeeds: command'. "
+        "Derive at least one criterion from the request itself and include every user-provided "
+        "criterion unchanged.\n"
         f"InitialPlan JSON schema: {schema}\n"
         f"User request: {state.original_request}\n"
         f"User-provided criteria: {json.dumps(state.success_criteria)}\n"
@@ -84,6 +87,8 @@ class LLMPlanner:
         for constraint in plan.hard_constraints:
             if constraint not in constraints:
                 constraints.append(constraint)
+        if not criteria:
+            raise ProviderOutputError("planner returned no success criteria")
         steps = plan.steps or [PlanStep(id="step-1", goal=plan.objective or state.objective)]
         return plan.model_copy(
             update={

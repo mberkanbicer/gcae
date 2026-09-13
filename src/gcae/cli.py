@@ -34,7 +34,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     run = subparsers.add_parser("run")
     run.add_argument("repository", type=Path)
-    run.add_argument("request")
+    run.add_argument(
+        "request",
+        nargs="?",
+        default=None,
+        help="task description; optional in TUI mode, where it is requested interactively",
+    )
     add_runtime_flags(run)
     run.add_argument("--constraint", action="append", default=[])
     run.add_argument("--criterion", action="append", default=[])
@@ -356,10 +361,20 @@ def _wants_tui(args: argparse.Namespace) -> bool:
     return sys.stdout.isatty() and sys.stdin.isatty()
 
 
-def _run_tui(runtime: Runtime) -> None:
+def _run_tui(
+    runtime: Runtime,
+    request: str | None = None,
+    constraints: list[str] | None = None,
+    criteria: list[str] | None = None,
+) -> None:
     from .tui.app import GcaeApp
 
-    GcaeApp(runtime).run()
+    GcaeApp(
+        runtime,
+        request=request,
+        constraints=constraints,
+        criteria=criteria,
+    ).run()
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -383,7 +398,25 @@ def main(argv: list[str] | None = None) -> None:
             _inspect_run(args.run_id, runtime_dir, args.json)
             return
         runtime = _build_runtime(args, config, runtime_dir)
+        if _wants_tui(args):
+            if args.command == "resume":
+                runtime.resume(args.run_id)
+                _run_tui(runtime)
+            else:
+                if args.request is None and not sys.stdin.isatty():
+                    raise ValueError("a request is required when stdin is not a terminal")
+                _run_tui(
+                    runtime,
+                    request=args.request,
+                    constraints=args.constraint,
+                    criteria=args.criterion,
+                )
+            if runtime.state is not None:
+                print(_summary(runtime.state), file=sys.stderr)
+            return
         if args.command == "run":
+            if not args.request:
+                raise ValueError("a request is required in headless mode")
             runtime.start(
                 args.request,
                 hard_constraints=args.constraint,
@@ -391,11 +424,6 @@ def main(argv: list[str] | None = None) -> None:
             )
         else:
             runtime.resume(args.run_id)
-        if _wants_tui(args):
-            _run_tui(runtime)
-            if runtime.state is not None:
-                print(_summary(runtime.state), file=sys.stderr)
-            return
         result = runtime.run()
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"gcae: error: {exc}", file=sys.stderr)

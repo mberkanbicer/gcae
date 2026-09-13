@@ -102,6 +102,7 @@ class Runtime:
         control: RuntimeControl | None = None,
         role_providers: dict[str, Provider] | None = None,
         provider_label: str = "",
+        auto_bootstrap: bool = True,
     ) -> None:
         self.source_repo = Path(source_repo).resolve()
         self.runtime_dir = Path(runtime_dir).expanduser().resolve()
@@ -119,6 +120,7 @@ class Runtime:
         )
         self.role_providers = dict(role_providers or {})
         self.provider_label = provider_label
+        self.auto_bootstrap = auto_bootstrap
         self.validator_commands = list(validator_commands or [])
         self.max_steps = max_steps
         self.command_timeout = command_timeout
@@ -181,7 +183,12 @@ class Runtime:
         run_id: str | None = None,
     ) -> AgentState:
         run_id = run_id or uuid.uuid4().hex[:12]
-        self.repo = GitRepository(self.source_repo, self.runtime_dir, self.worktree_dir)
+        self.repo = GitRepository(
+            self.source_repo,
+            self.runtime_dir,
+            self.worktree_dir,
+            auto_bootstrap=self.auto_bootstrap,
+        )
         worktree, branch, base = self.repo.create_isolated_worktree(run_id)
         try:
             self.memory = MemoryStore(self.runtime_dir / "memory.db")
@@ -227,6 +234,7 @@ class Runtime:
         ]
         self.state.next_step_number = max(numbers, default=0) + 1
         self._transition(RunPhase.PLAN)
+        self._publish_repository_notices()
         self._emit_plan(reason="initial plan")
         self._remember("user_instruction", request, immutable=True)
         for constraint in self.state.hard_constraints:
@@ -243,7 +251,12 @@ class Runtime:
         self.state = StateStore(path / "state.json").load()
         if Path(self.state.source_repo).resolve() != self.source_repo:
             raise RuntimeError("resume source repository does not match persisted state")
-        self.repo = GitRepository(self.source_repo, self.runtime_dir, self.worktree_dir)
+        self.repo = GitRepository(
+            self.source_repo,
+            self.runtime_dir,
+            self.worktree_dir,
+            auto_bootstrap=self.auto_bootstrap,
+        )
         self.repo.worktree = Path(self.state.worktree)
         self.repo.branch = self.state.branch
         self.memory = MemoryStore(self.runtime_dir / "memory.db")
@@ -260,6 +273,7 @@ class Runtime:
             self.state.pending_question = None
             self.state.step_tool_calls = 0
             self._persist()
+        self._publish_repository_notices()
         self._event("run_resumed", self.state.phase, payload={"run_id": run_id})
         return self.state
 
@@ -844,6 +858,19 @@ class Runtime:
             )
         )
         self._emit_memory_counts()
+
+    def _publish_repository_notices(self) -> None:
+        """Report every Git precondition GCAE repaired on its own behalf."""
+        if self.repo is None:
+            return
+        for notice in self.repo.notices:
+            self._event(
+                "repository_notice",
+                self.state.phase if self.state is not None else None,
+                payload=dict(notice),
+            )
+            logger.info("repository notice: %s", notice.get("message"))
+        self.repo.notices.clear()
 
     def _emit_plan(
         self,

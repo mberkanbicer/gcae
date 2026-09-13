@@ -251,6 +251,13 @@ def timeline_entry(
         return ("●", f"run started · {elide(str(payload.get('objective', '')), 80)}", "accent")
     if event_type == "run_resumed":
         return ("●", "run resumed", "accent")
+    if event_type == "repository_notice":
+        if payload.get("kind") in {"base", "empty"}:
+            file_count = int(payload.get("files") or 0)
+            detail = f"{file_count} files" if file_count else "empty repository"
+            commit = short_id(str(payload.get("commit")))
+            return ("+", f"base commit created · {detail} · {commit}", "success")
+        return ("!", str(payload.get("message") or "repository notice"), "warning")
     if event_type == "plan_updated":
         reason = str(payload.get("reason") or "plan updated")
         if reason == "initial plan":

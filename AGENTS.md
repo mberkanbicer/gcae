@@ -16,7 +16,10 @@ and runs. It runs headless or with an interactive Textual TUI.
    state; memory (`memory.db`) survives every rollback. Deleting failure lessons on rollback is a
    bug.
 2. **Exactly one worktree per run**, under the runtime directory. Never one worktree per step.
-   Never modify the user's working tree; refuse dirty source repositories.
+   Never modify the user's working tree. A repository that is unborn or dirty is repaired before
+   the run: GCAE creates the base commit it needs (`auto_bootstrap`, bounded to 2000 files / 50 MB,
+   `.gitignore` respected, reported as a notice), while a mid-merge/rebase repository and a
+   non-repository directory are refused.
 3. **Only acceptance creates commits.** An accepted step commits `gcae: <goal>`; a passing final
    verification with a dirty worktree commits `gcae: verified final state`; rejection does
    `reset --hard accepted_commit` plus cleanup inside the worktree only.

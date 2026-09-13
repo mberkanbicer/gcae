@@ -2,7 +2,8 @@
 
 ```
 gcae run <repository> [<request>] [--config PATH] [--runtime-dir PATH]
-         [--constraint TEXT]... [--criterion TEXT]... [--merge|--no-merge] [--tui|--headless]
+         [--constraint TEXT]... [--criterion TEXT]... [--merge|--no-merge]
+         [--no-auto-bootstrap] [--tui|--headless]
 gcae resume <repository> <run-id> [--config PATH] [--runtime-dir PATH] [--tui|--headless]
 gcae list [--config PATH] [--runtime-dir PATH]
 gcae inspect <run-id> [--config PATH] [--runtime-dir PATH] [--json]
@@ -17,9 +18,11 @@ without one.
 ## Preconditions (checked with actionable errors)
 
 - the path is the **repository root** (a subdirectory is refused with the root path);
-- the repository has at least one commit;
-- `git user.name` and `git user.email` resolve (repo, global or system config);
-- the working tree is clean, including untracked files — the error lists the offending paths;
+- the repository has a base commit and a clean working tree — GCAE creates that commit itself when
+  it is missing or the tree is dirty (`--no-auto-bootstrap` refuses instead; `.gitignore` respected,
+  bounded to 2000 files / 50 MB, file contents never modified);
+- `git user.name` and `git user.email` resolve (repo, global or system config); otherwise GCAE
+  commits with `GCAE <gcae@localhost>` and reports it;
 - `git` is installed and on `PATH`;
 - remote HTTP providers have an API key (`api_key` or `api_key_env`); local endpoints do not need one;
 - the runtime state directory is writable.

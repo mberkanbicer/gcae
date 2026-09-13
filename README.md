@@ -37,10 +37,11 @@ gcae list
 gcae inspect <run-id>
 ```
 
-The target repository must be clean and committed. GCAE never modifies your working tree; a dirty
-repository is refused. After a successful run it asks whether to merge the verified branch
-(`--merge` / `--no-merge`), records the pre-merge commit, and `gcae undo` reverses a merge. See
-[`docs/CLI.md`](docs/CLI.md).
+GCAE prepares the repository itself: if it has no commits yet, or the working tree has
+uncommitted changes, GCAE creates the base commit the run needs (`.gitignore` respected, bounded to
+2000 files / 50 MB, reported in the log and timeline) instead of refusing to start. File contents
+are never modified. Pass `--no-auto-bootstrap` to keep refusal and commit manually. Non-repository
+directories are still refused, and a repository mid-merge/rebase is left alone.
 
 ## Configuration
 

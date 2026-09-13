@@ -652,7 +652,11 @@ def test_request_modal_starts_a_run_and_recovers_after_failure(tmp_path: Path) -
     subprocess.run(["git", "-C", str(source), "config", "user.email", "t@e.f"], check=True)
     subprocess.run(["git", "-C", str(source), "config", "user.name", "T"], check=True)
     runtime = Runtime(
-        source, tmp_path / "runtime", provider=FakeProvider(TRAJECTORY), control=RuntimeControl()
+        source,
+        tmp_path / "runtime",
+        provider=FakeProvider(TRAJECTORY),
+        control=RuntimeControl(),
+        auto_bootstrap=False,
     )
     app = GcaeApp(runtime)
 
@@ -688,6 +692,64 @@ def test_request_modal_starts_a_run_and_recovers_after_failure(tmp_path: Path) -
 
 
 # ---------------------------------------------------------------- detail screens
+
+
+def test_unborn_repository_is_bootstrapped_and_reported(tmp_path: Path) -> None:
+    """`git init` plus a run must work without manual Git steps, and must say what it did."""
+    source = tmp_path / "source"
+    source.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(source)], check=True)
+    (source / "README").write_text("hello\n")
+    runtime = Runtime(
+        source, tmp_path / "runtime", provider=FakeProvider(TRAJECTORY), control=RuntimeControl()
+    )
+    app = GcaeApp(runtime, request="create answer", criteria=["file exists: answer.txt"])
+
+    async def scenario() -> None:
+        async with app.run_test(size=(120, 35)) as pilot:
+            await wait_for(pilot, lambda: app.agent_done)
+            assert runtime.state is not None
+            assert runtime.state.status == "complete"
+            assert app.last_error is None
+            texts = [row.text for row in app.ui.timeline]
+            assert any("base commit created" in text for text in texts)
+            assert any("1 files" in text for text in texts)
+            banner = str(app.query_one(BannerPanel).body.plain)
+            assert "RUN COMPLETE" in banner
+
+    asyncio.run(scenario())
+
+
+def test_request_text_is_preserved_verbatim(tmp_path: Path) -> None:
+    """The typed task reaches the runtime and the dashboard unchanged."""
+    source = tmp_path / "source"
+    source.mkdir()
+    init_repo(source)
+    runtime = Runtime(
+        source, tmp_path / "runtime", provider=FakeProvider(TRAJECTORY), control=RuntimeControl()
+    )
+    app = GcaeApp(runtime)
+    task = "create hello.md with lorem ipsum"
+
+    async def scenario() -> None:
+        async with app.run_test(size=(90, 30)) as pilot:
+            await pilot.pause()
+            assert isinstance(app.screen, RequestModal)
+            for character in task:
+                key = {" ": "space", ".": "full_stop"}.get(character, character)
+                await pilot.press(key)
+            await pilot.press("enter")
+            await wait_for(pilot, lambda: app.agent_done)
+            assert runtime.state is not None
+            assert runtime.state.original_request == task
+            assert runtime.state.objective == task
+            objective = str(app.query_one(ObjectivePanel).body.plain)
+            assert "create hello.md" in objective
+            texts = [row.text for row in app.ui.timeline]
+            assert any("task accepted" in text for text in texts)
+            assert any("hello.md" in text for text in texts)
+
+    asyncio.run(scenario())
 
 
 def test_diff_screen_lists_files_and_switches(tmp_path: Path) -> None:

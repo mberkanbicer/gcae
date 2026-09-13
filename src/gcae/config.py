@@ -52,6 +52,9 @@ class ModelsConfig(BaseModel):
 class RuntimeConfig(BaseModel):
     state_dir: str = Field(default_factory=lambda: _default_state_dir())
     worktree_dir: str | None = None
+    # GCAE creates the base commit a run needs (unborn HEAD, dirty tree) instead of
+    # refusing to start. Never touches file contents; bounded and reported.
+    auto_bootstrap: bool = True
     max_steps: int = 20
     command_timeout: int = 30
     max_tool_calls_per_step: int = 8

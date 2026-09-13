@@ -47,6 +47,9 @@ Differences from a plain log viewer:
 - **Curated events.** Routine tool successes are not timeline entries; the full stream is one
   keystroke away (`l`). Tool failures, rollbacks, replans, checkpoints, validation results, user
   instructions and terminal states always appear.
+- **Self-repair is visible.** Git preconditions GCAE fixes appear at the top of the timeline
+  (`+ base commit created · 3 files · a31fc42`) along with the fallback commit identity
+  (`! git user.name/user.email are not configured; commits use GCAE <gcae@localhost>`).
 - **Real data only.** Candidate file counts and `+N -M` come from `git diff --numstat` plus a
   bounded line count for new files; token figures are labelled `(est)`; nothing is synthesized.
 

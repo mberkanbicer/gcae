@@ -75,13 +75,31 @@ def test_worktree_checkpoint_and_rollback(tmp_path: Path) -> None:
     assert not worktree.exists()
 
 
-def test_dirty_source_rejected(tmp_path: Path) -> None:
+def test_dirty_source_is_committed_automatically(tmp_path: Path) -> None:
+    """A run needs a defined base: GCAE commits the working tree instead of refusing."""
+    source = tmp_path / "source"
+    source.mkdir()
+    init_repo(source)
+    (source / "main.txt").write_text("base\ndirty\n")
+    repo = GitRepository(source, tmp_path / "runtime")
+    worktree, _, base = repo.create_isolated_worktree("run")
+    assert (worktree / "main.txt").read_text() == "base\ndirty\n"
+    assert repo.notices and repo.notices[0]["kind"] == "base"
+    assert repo.notices[0]["commit"] == base
+    assert repo.notices[0]["files"] == 1
+    # file contents are untouched and the source tree is clean afterwards
+    assert (source / "main.txt").read_text() == "base\ndirty\n"
+    assert repo._run("status", "--porcelain") == ""
+
+
+def test_dirty_source_rejected_when_bootstrap_disabled(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source.mkdir()
     init_repo(source)
     (source / "main.txt").write_text("dirty\n")
+    repo = GitRepository(source, tmp_path / "runtime", auto_bootstrap=False)
     with pytest.raises(GitError, match="main.txt"):
-        GitRepository(source, tmp_path / "runtime").create_isolated_worktree("run")
+        repo.create_isolated_worktree("run")
 
 
 def test_source_subdirectory_is_refused_with_root(tmp_path: Path) -> None:
@@ -94,17 +112,26 @@ def test_source_subdirectory_is_refused_with_root(tmp_path: Path) -> None:
         GitRepository(nested, tmp_path / "runtime").create_isolated_worktree("run")
 
 
-def test_missing_git_identity_is_refused(tmp_path: Path, monkeypatch) -> None:
+def test_missing_git_identity_falls_back_and_is_reported(tmp_path: Path, monkeypatch) -> None:
+    """Commits must work on a fresh machine; the fallback identity is reported, not silent."""
     source = tmp_path / "source"
     source.mkdir()
     init_repo(source)
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
     monkeypatch.setenv("GIT_CONFIG_SYSTEM", "/dev/null")
-    subprocess.run(
-        ["git", "-C", str(source), "config", "--unset", "user.email"], check=True
-    )
-    with pytest.raises(GitError, match="user.email is not configured"):
-        GitRepository(source, tmp_path / "runtime").create_isolated_worktree("run")
+    subprocess.run(["git", "-C", str(source), "config", "--unset", "user.email"], check=True)
+    subprocess.run(["git", "-C", str(source), "config", "--unset", "user.name"], check=True)
+    (source / "main.txt").write_text("base\nchanged\n")
+    repo = GitRepository(source, tmp_path / "runtime")
+    worktree, _, base = repo.create_isolated_worktree("run")
+    kinds = [notice["kind"] for notice in repo.notices]
+    assert "identity" in kinds and "base" in kinds
+    author = repo._run("log", "-1", "--format=%an <%ae>", cwd=source)
+    assert author == "GCAE <gcae@localhost>"
+    (worktree / "checkpoint.txt").write_text("x\n")
+    repo.checkpoint("gcae: step")
+    assert repo._run("log", "-1", "--format=%ae", cwd=worktree) == "gcae@localhost"
+    assert base
 
 
 def test_modified_file_path_is_parsed_correctly(tmp_path: Path) -> None:
@@ -118,12 +145,67 @@ def test_modified_file_path_is_parsed_correctly(tmp_path: Path) -> None:
     assert repo.status_entries() == [(" M", "main.txt")]
 
 
-def test_repository_without_commits_is_rejected(tmp_path: Path) -> None:
+def test_repository_without_commits_is_bootstrapped(tmp_path: Path) -> None:
+    """`git init` followed by a GCAE run must work with no manual Git step."""
+    source = tmp_path / "source"
+    source.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(source)], check=True)
+    (source / "main.txt").write_text("hello\n")
+    (source / ".gitignore").write_text("ignored.txt\n")
+    (source / "ignored.txt").write_text("must stay untracked\n")
+    repo = GitRepository(source, tmp_path / "runtime")
+    worktree, _, base = repo.create_isolated_worktree("run")
+    assert (worktree / "main.txt").read_text() == "hello\n"
+    assert not (worktree / "ignored.txt").exists()
+    assert repo.notices[0]["kind"] == "base"
+    assert repo.notices[0]["files"] == 2  # main.txt and .gitignore, not the ignored file
+    assert base == repo.notices[0]["commit"]
+    assert repo._run("rev-parse", "--abbrev-ref", "HEAD") == "main"
+
+
+def test_empty_repository_gets_an_empty_base_commit(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source.mkdir()
     subprocess.run(["git", "init", "-q", str(source)], check=True)
+    repo = GitRepository(source, tmp_path / "runtime")
+    worktree, branch, base = repo.create_isolated_worktree("run")
+    assert worktree.exists() and branch == "gcae/run"
+    assert repo.notices[0]["kind"] == "empty"
+    assert repo.notices[0]["files"] == 0
+    assert base == repo.notices[0]["commit"]
+
+
+def test_repository_without_commits_rejected_when_bootstrap_disabled(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    subprocess.run(["git", "init", "-q", str(source)], check=True)
+    repo = GitRepository(source, tmp_path / "runtime", auto_bootstrap=False)
     with pytest.raises(GitError, match="no commits"):
-        GitRepository(source, tmp_path / "runtime").create_isolated_worktree("run")
+        repo.create_isolated_worktree("run")
+
+
+def test_bootstrap_refuses_an_unbounded_working_tree(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    subprocess.run(["git", "init", "-q", str(source)], check=True)
+    for index in range(3):
+        (source / f"file{index}.txt").write_text("x\n")
+    monkeypatch.setattr("gcae.git.MAX_BOOTSTRAP_FILES", 2)
+    repo = GitRepository(source, tmp_path / "runtime")
+    with pytest.raises(GitError, match="will not auto-commit"):
+        repo.create_isolated_worktree("run")
+    assert len(repo.source_status_entries()) == 3  # nothing was staged
+
+
+def test_bootstrap_refuses_an_in_progress_merge(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    init_repo(source)
+    (source / ".git" / "MERGE_HEAD").write_text("0" * 40 + "\n")
+    (source / "main.txt").write_text("conflicted\n")
+    repo = GitRepository(source, tmp_path / "runtime")
+    with pytest.raises(GitError, match="in-progress merge"):
+        repo.create_isolated_worktree("run")
 
 
 def test_rollback_removes_ignored_candidate_and_external_runtime_required(tmp_path: Path) -> None:

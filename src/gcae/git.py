@@ -7,6 +7,13 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+# Auto-bootstrap safety bounds: GCAE creates the base commit a run needs, but never
+# swallows an unbounded amount of the user's working tree in the process.
+MAX_BOOTSTRAP_FILES = 2_000
+MAX_BOOTSTRAP_BYTES = 50 * 1024 * 1024
+FALLBACK_GIT_NAME = "GCAE"
+FALLBACK_GIT_EMAIL = "gcae@localhost"
+
 
 class GitError(RuntimeError):
     """Raised when a Git safety invariant or command fails."""
@@ -18,6 +25,7 @@ class GitRepository:
         source: str | Path,
         runtime_dir: str | Path,
         worktree_dir: str | Path | None = None,
+        auto_bootstrap: bool = True,
     ) -> None:
         self.source = Path(source).resolve()
         self.runtime_dir = Path(runtime_dir).resolve()
@@ -26,8 +34,11 @@ class GitRepository:
             if worktree_dir is not None
             else self.runtime_dir / "worktrees"
         )
+        self.auto_bootstrap = auto_bootstrap
         self.worktree: Path | None = None
         self.branch: str | None = None
+        self.notices: list[dict[str, Any]] = []
+        self._identity_noticed = False
 
     def _run(self, *args: str, cwd: Path | None = None, check: bool = True) -> str:
         try:
@@ -47,6 +58,13 @@ class GitRepository:
         return result.stdout.rstrip("\n")
 
     def validate_source(self) -> str:
+        """Check every precondition, repairing the ones GCAE can repair safely.
+
+        A run needs a committed base inside its isolated worktree. When the source
+        repository has no commits, or its working tree is dirty, GCAE creates that base
+        commit itself (bounded, ``.gitignore`` respected, reported through notices)
+        instead of refusing to start. ``auto_bootstrap=False`` restores refusal.
+        """
         if not self.source.is_dir():
             raise GitError(f"source is not a directory: {self.source}")
         if self._run("rev-parse", "--is-inside-work-tree", check=False) != "true":
@@ -56,24 +74,18 @@ class GitRepository:
             raise GitError(
                 f"source is a subdirectory of a Git repository; pass the repository root: {top}"
             )
-        if not self._run("rev-parse", "--verify", "HEAD", check=False):
-            raise GitError(
-                f"source repository has no commits: {self.source} — create a base commit "
-                'first (git add -A; git commit -m "base")'
-            )
-        if not self._run("config", "user.email", check=False):
-            raise GitError(
-                f"git user.email is not configured for {self.source}; set it before running "
-                'GCAE (git config --global user.email "you@example.com")'
-            )
-        if not self._run("config", "user.name", check=False):
-            raise GitError(
-                f"git user.name is not configured for {self.source}; set it before running "
-                'GCAE (git config --global user.name "Your Name")'
-            )
         for directory in (self.runtime_dir, self.worktree_dir):
             if directory == self.source or self.source in directory.parents:
                 raise GitError("runtime directories must be external to the source repository")
+        if self.auto_bootstrap:
+            self.bootstrap_source_repository()
+        if not self._run("rev-parse", "--verify", "HEAD", check=False):
+            raise GitError(
+                f"source repository has no commits: {self.source} — create a base commit "
+                'first (git add -A; git commit -m "base") or drop --no-auto-bootstrap '
+                "to let GCAE create it"
+            )
+        self._identity_args()
         status = self._run("status", "--porcelain", "--untracked-files=all")
         if status:
             lines = status.splitlines()
@@ -84,6 +96,123 @@ class GitRepository:
                 f"{paths}{more}"
             )
         return self._run("rev-parse", "HEAD")
+
+    # ------------------------------------------------------------------ bootstrap
+
+    def _git_dir(self) -> Path:
+        value = self._run("rev-parse", "--absolute-git-dir", check=False)
+        return Path(value) if value else self.source / ".git"
+
+    def _in_progress_operation(self) -> str | None:
+        git_dir = self._git_dir()
+        markers = (
+            ("MERGE_HEAD", "merge"),
+            ("CHERRY_PICK_HEAD", "cherry-pick"),
+            ("REVERT_HEAD", "revert"),
+            ("rebase-merge", "rebase"),
+            ("rebase-apply", "rebase"),
+        )
+        for marker, label in markers:
+            if (git_dir / marker).exists():
+                return label
+        return None
+
+    def _identity_args(self) -> list[str]:
+        """Commit identity: the user's own when configured, a neutral fallback otherwise."""
+        if self._run("config", "user.email", check=False) and self._run(
+            "config", "user.name", check=False
+        ):
+            return []
+        if not self._identity_noticed:
+            self._identity_noticed = True
+            self.notices.append(
+                {
+                    "kind": "identity",
+                    "message": (
+                        "git user.name/user.email are not configured; commits use "
+                        f"{FALLBACK_GIT_NAME} <{FALLBACK_GIT_EMAIL}>"
+                    ),
+                }
+            )
+        return [
+            "-c",
+            f"user.name={FALLBACK_GIT_NAME}",
+            "-c",
+            f"user.email={FALLBACK_GIT_EMAIL}",
+        ]
+
+    def _commit(self, message: str, allow_empty: bool = False) -> str:
+        args = [*self._identity_args(), "commit", "-m", message]
+        if allow_empty:
+            args.append("--allow-empty")
+        self._run(*args)
+        return self._run("rev-parse", "HEAD")
+
+    def source_status_entries(self) -> list[tuple[str, str]]:
+        output = self._run("status", "--porcelain", "--untracked-files=all")
+        return [(line[:2], line[3:]) for line in output.splitlines() if len(line) >= 4]
+
+    def _entry_size(self, path: str) -> int:
+        try:
+            target = self.source / path
+            if target.is_symlink():
+                return len(str(target.readlink()))
+            return target.stat().st_size if target.is_file() else 0
+        except OSError:
+            return 0
+
+    def bootstrap_source_repository(self) -> dict[str, Any] | None:
+        """Create the base commit a run needs. Returns a report or None when clean.
+
+        Never touches file contents: it only adds and commits what is already there, so the
+        working tree stays byte-identical and the commit can be undone with
+        ``git reset --soft HEAD~1``. Untracked-but-ignored files stay untracked.
+        """
+        operation = self._in_progress_operation()
+        if operation is not None:
+            raise GitError(
+                f"source repository has an in-progress {operation}; finish or abort it "
+                "before running GCAE"
+            )
+        entries = self.source_status_entries()
+        if not entries:
+            if self._run("rev-parse", "--verify", "HEAD", check=False):
+                return None
+            commit = self._commit("gcae: base commit (empty repository)", allow_empty=True)
+            report: dict[str, Any] = {
+                "kind": "empty",
+                "commit": commit,
+                "files": 0,
+                "bytes": 0,
+            }
+        else:
+            paths = [path for _, path in entries]
+            total = sum(self._entry_size(path) for path in paths)
+            if len(paths) > MAX_BOOTSTRAP_FILES or total > MAX_BOOTSTRAP_BYTES:
+                raise GitError(
+                    f"source repository has {len(paths)} uncommitted files "
+                    f"({total / 1_000_000:.1f} MB) — GCAE will not auto-commit that much. "
+                    "Commit or stash them first, or add the intended files to .gitignore"
+                )
+            self._run("add", "-A")
+            commit = self._commit("gcae: base commit of the current working tree")
+            report = {
+                "kind": "base",
+                "commit": commit,
+                "files": len(paths),
+                "bytes": total,
+            }
+        self.notices.append(
+            {
+                **report,
+                "message": (
+                    f"created base commit {commit[:7]} from {report['files']} files"
+                    if report["files"]
+                    else f"created empty base commit {commit[:7]}"
+                ),
+            }
+        )
+        return report
 
     def create_isolated_worktree(self, run_id: str | None = None) -> tuple[Path, str, str]:
         base = self.validate_source()
@@ -306,7 +435,8 @@ class GitRepository:
         self._run("add", "-A", cwd=worktree)
         if not self.status():
             raise GitError("cannot create checkpoint with no changes")
-        self._run("commit", "-m", message, cwd=worktree)
+        args = [*self._identity_args(), "commit", "-m", message]
+        self._run(*args, cwd=worktree)
         return self.current_commit()
 
     def rollback(self, accepted_commit: str) -> None:

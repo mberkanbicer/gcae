@@ -1,9 +1,29 @@
 # Git execution
 
-The source repository must be a committed, clean Git repository. GCAE refuses dirty sources. It
+The source repository must be a Git repository with a committed base. When it is not — unborn
+`HEAD`, or a dirty working tree — GCAE creates that base commit itself before the run (see *Base
+commit bootstrap* below); pass `--no-auto-bootstrap` to refuse instead. It
 creates exactly one external worktree and branch per run. Runtime-owned rollback performs
 `reset --hard <accepted_commit>` and `clean -fdx` only inside that worktree. The source branch is
 never merged or modified.
+
+## Base commit bootstrap
+
+A run's worktree is created from a base commit. Rather than refusing, GCAE prepares the repository:
+
+| Situation | Action |
+| --- | --- |
+| `git init`, no commits, no files | creates an empty base commit (`--allow-empty`) |
+| `git init`, no commits, files present | commits the working tree as `gcae: base commit of the current working tree` |
+| commits present, working tree dirty | commits the pending changes as the base commit |
+| no `user.name`/`user.email` anywhere | commits with `GCAE <gcae@localhost>` and reports a notice |
+| mid-merge / cherry-pick / revert / rebase | **refused**, naming the operation |
+| more than 2000 files or 50 MB pending | **refused**, with the file count and size |
+| `--no-auto-bootstrap` or `[runtime] auto_bootstrap = false` | **refused**, with the manual command |
+
+Guarantees: file contents are never modified, ignored files stay untracked, nothing else is staged,
+and the base commit is reported in the CLI log and in the dashboard timeline. It is an ordinary
+commit on the current branch, so `git reset --soft HEAD~1` undoes it.
 
 Only evaluator acceptance creates `gcae: <goal>` checkpoint commits. A passing final verification
 with a non-empty worktree creates the final `gcae: verified final state` checkpoint, so

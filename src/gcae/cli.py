@@ -31,6 +31,11 @@ def build_parser() -> argparse.ArgumentParser:
         sub.add_argument("--config", type=Path)
         sub.add_argument("--runtime-dir", type=Path)
         mode = sub.add_mutually_exclusive_group()
+        sub.add_argument(
+            "--no-auto-bootstrap",
+            action="store_true",
+            help="refuse to start when the repository needs a base commit instead of creating one",
+        )
         mode.add_argument("--tui", action="store_true", help="force the interactive TUI")
         mode.add_argument("--headless", action="store_true", help="force non-interactive output")
 
@@ -365,6 +370,8 @@ def _build_runtime(args: argparse.Namespace, config: Config, runtime_dir: Path) 
         control=control,
         role_providers=role_providers,
         provider_label=config.provider.kind.upper(),
+        auto_bootstrap=config.runtime.auto_bootstrap
+        and not getattr(args, "no_auto_bootstrap", False),
     )
 
 

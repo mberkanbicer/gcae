@@ -50,15 +50,27 @@ def merge_verified_run(
     repo: GitRepository,
     state: AgentState,
     persist: Callable[[], None],
+    allow_unverified: bool = False,
 ) -> MergeRecord:
-    """Guarded merge of a verified run branch into the current source branch.
+    """Guarded merge of a run branch into the current source branch.
 
     Shared by the runtime (after completion) and ``gcae merge`` so both paths apply the
     same checks: the run must be complete, unmerged, and its branch must still point at
     the verified commit; the source repository must be clean.
+
+    ``allow_unverified`` additionally permits a failed or stopped run that accepted at
+    least one checkpoint: the user asked for the accepted work back explicitly, and the
+    caller reports that final verification did not pass.
     """
-    if state.status != "complete":
+    unverified = state.status != "complete"
+    if unverified and not (allow_unverified and state.accepted_steps > 0):
         raise RuntimeError(f"run {state.run_id} is not complete: {state.status}")
+    if unverified and state.merge is None:
+        logger.warning(
+            "merging accepted work from run %s without final verification (%s)",
+            state.run_id,
+            state.status,
+        )
     if state.merge is not None:
         raise RuntimeError(
             f"run {state.run_id} is already merged into {state.merge.target_branch}; "
@@ -926,7 +938,7 @@ class Runtime:
         )
         self._emit_memory_counts()
 
-    def merge_completed_run(self) -> MergeRecord:
+    def merge_completed_run(self, allow_unverified: bool = False) -> MergeRecord:
         """Merge the verified run branch into the source branch (recorded, reversible).
 
         Only a completed run whose branch still points at the verified commit is merged;
@@ -935,7 +947,9 @@ class Runtime:
         """
         if self.state is None or self.repo is None:
             raise RuntimeError("call start or resume before merging a run")
-        record = merge_verified_run(self.repo, self.state, persist=self._persist)
+        record = merge_verified_run(
+            self.repo, self.state, persist=self._persist, allow_unverified=allow_unverified
+        )
         self._event(
             "merge_completed",
             RunPhase.COMPLETE,

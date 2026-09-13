@@ -265,40 +265,48 @@ class GcaeApp(App[None]):
         )
 
     def _refresh_panels(self, panels: set[str]) -> None:
+        for name in sorted(panels):
+            try:
+                self._refresh_panel(name)
+            except Exception as exc:  # noqa: BLE001 - one bad panel must not blank the dashboard
+                self.ui.logs.append(f"[ui] panel {name} failed: {exc}")
+                self.log.error(f"panel {name} failed: {exc}")
+
+    def _refresh_panel(self, name: str) -> None:
+        """Render one panel. Isolated so a rendering bug cannot blank the dashboard."""
         state = self.runtime.state
         ui = self.ui
-        for name in panels:
-            if name == "status":
-                self.query_one(StatusBar).render_state(
-                    state,
-                    ui,
-                    provider=self._provider_label(),
-                    model=self._model_label(),
-                    paused=self.control.paused,
-                )
-            elif name == "objective":
-                self.query_one(ObjectivePanel).render_state(state, ui)
-            elif name == "plan":
-                self.query_one(PlanPanel).render_state(state, ui)
-            elif name == "activity":
-                self.query_one(ActivityPanel).render_state(state, ui)
-            elif name == "checkpoint":
-                self.query_one(CheckpointPanel).render_state(
-                    state, ui, subject=self._checkpoint_subject()
-                )
-            elif name == "validation":
-                self.query_one(ValidationPanel).render_state(state, ui)
-            elif name == "metrics":
-                self.query_one(MetricsPanel).render_state(
-                    state, ui, limit=self.runtime.context_limit
-                )
-            elif name == "timeline":
-                self.query_one(TimelinePanel).render_state(ui)
-            elif name == "banner":
-                banner = self.query_one(BannerPanel)
-                banner.display = banner.render_state(state, ui)
-            elif name == "footer":
-                self.query_one(FooterBar).render_text(self._footer_text())
+        if name == "status":
+            self.query_one(StatusBar).render_state(
+                state,
+                ui,
+                provider=self._provider_label(),
+                model=self._model_label(),
+                paused=self.control.paused,
+            )
+        elif name == "objective":
+            self.query_one(ObjectivePanel).render_state(state, ui)
+        elif name == "plan":
+            self.query_one(PlanPanel).render_state(state, ui)
+        elif name == "activity":
+            self.query_one(ActivityPanel).render_state(state, ui)
+        elif name == "checkpoint":
+            self.query_one(CheckpointPanel).render_state(
+                state, ui, subject=self._checkpoint_subject()
+            )
+        elif name == "validation":
+            self.query_one(ValidationPanel).render_state(state, ui)
+        elif name == "metrics":
+            self.query_one(MetricsPanel).render_state(
+                state, ui, limit=self.runtime.context_limit
+            )
+        elif name == "timeline":
+            self.query_one(TimelinePanel).render_state(ui)
+        elif name == "banner":
+            banner = self.query_one(BannerPanel)
+            banner.display = banner.render_state(state, ui)
+        elif name == "footer":
+            self.query_one(FooterBar).render_text(self._footer_text())
 
     def _model_label(self) -> str:
         role = self.ui.role.lower()
@@ -325,11 +333,7 @@ class GcaeApp(App[None]):
     def _footer_text(self) -> str:
         if self.agent_done:
             state = self.runtime.state
-            merge_keys = (
-                "[M] Merge  "
-                if state is not None and state.status == "complete" and state.merge is None
-                else ""
-            )
+            merge_keys = "[M] Merge accepted work  " if self._mergeable(state) else ""
             keys = (
                 f"[i] New task  {merge_keys}[d] Diff  [l] Logs  [m] Memory  [c] Context  "
                 "[e] Evaluation  [t] Plan  [?] Help  [q] Quit"
@@ -418,15 +422,27 @@ class GcaeApp(App[None]):
 
     # ------------------------------------------------------------------ actions
 
+    @staticmethod
+    def _mergeable(state: object) -> bool:
+        """A completed run, or a failed/stopped run with accepted checkpoints to rescue."""
+        if state is None:
+            return False
+        if getattr(state, "merge", None) is not None:
+            return False
+        if str(getattr(state, "status", "")) == "complete":
+            return True
+        return int(getattr(state, "accepted_steps", 0) or 0) > 0
+
     def action_merge_run(self) -> None:
-        state = self.runtime.state
-        if state is None or state.status != "complete" or state.merge is not None:
+        if not self._mergeable(self.runtime.state):
             return
         self.run_worker(self._merge_task, thread=True, name="merge", exit_on_error=False)
 
     def _merge_task(self) -> None:
+        state = self.runtime.state
+        allow_unverified = state is not None and state.status != "complete"
         try:
-            record = self.runtime.merge_completed_run()
+            record = self.runtime.merge_completed_run(allow_unverified=allow_unverified)
         except NothingToMerge as exc:
             self._call_ui(self._on_nothing_to_merge, str(exc))
             return
@@ -442,7 +458,12 @@ class GcaeApp(App[None]):
     def _on_merged(self, record: object) -> None:
         target = getattr(record, "target_branch", "?")
         commit = str(getattr(record, "merge_commit", ""))[:7]
-        self.ui.add_note("✓", f"merged into {target} · {commit} · gcae undo reverses it", "success")
+        state = self.runtime.state
+        unverified = state is not None and state.status != "complete"
+        note = f"merged into {target} · {commit}"
+        if unverified:
+            note += " · accepted work only, final verification did not pass"
+        self.ui.add_note("✓", f"{note} · gcae undo reverses it", "success")
         self._refresh_panels({"banner", "footer", "timeline", "checkpoint"})
 
     def _on_merge_failed(self, reason: str) -> None:

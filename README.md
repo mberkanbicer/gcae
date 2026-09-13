@@ -41,7 +41,9 @@ When a run completes, GCAE merges the verified branch into your current branch s
 visible in your checkout (`[runtime] auto_merge`, default on). The merge is recorded, so
 `gcae undo <repo> <run-id>` puts your branch back; `--no-merge` keeps the branch separate for a
 manual `gcae merge`. A run that cannot be merged (dirty checkout, moved branch, no changes) says so
-and leaves the branch intact.
+and leaves the branch intact. A run that failed *after* accepting checkpoints can still be rescued:
+`gcae merge <repo> <run-id>` (or `M` in the dashboard) merges that accepted work and tells you final
+verification did not pass.
 
 GCAE prepares the repository itself: if it has no commits yet, or the working tree has
 uncommitted changes, GCAE creates the base commit the run needs (`.gitignore` respected, bounded to

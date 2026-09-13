@@ -171,6 +171,23 @@ class BannerPanel(Panel):
                 lines.append(_row("goal", elide(ui.current_goal, width - LABEL_WIDTH)))
             hint = Text("press i to describe a new task, q to quit", style=STYLES["muted"])
             lines.append(_row("next", hint))
+            if state is not None and state.merge is not None:
+                failure_merge = state.merge
+                merged_text = Text(
+                    f"merged into {failure_merge.target_branch} · "
+                    f"{short_id(failure_merge.merge_commit)}"
+                    " (accepted work, final verification did not pass) · undo: "
+                    f"gcae undo <repo> {state.run_id}",
+                    style=STYLES["success"],
+                )
+                lines.append(_row("merged", merged_text))
+            elif state is not None and state.accepted_steps:
+                rescue = Text(
+                    f"{state.accepted_steps} accepted step(s) are on branch {state.branch} · "
+                    "press M (or gcae merge) to bring them into your working tree",
+                    style=STYLES["accent"],
+                )
+                lines.append(_row("recover", rescue))
         elif state is not None and state.status == "complete":
             title = Text("RUN COMPLETE", style=f"bold {STYLES['success']}")
             verification = ui.verification or {}
@@ -199,9 +216,10 @@ class BannerPanel(Panel):
                 lines.append(_row("criteria", f"{passed}/{len(criteria)} passed"))
             merge = state.merge
             if merge is not None:
+                verified = "" if state.status == "complete" else " (accepted work, unverified)"
                 merge_text = Text(
-                    f"merged into {merge.target_branch} · {short_id(merge.merge_commit)} · "
-                    f"undo: gcae undo <repo> {state.run_id}",
+                    f"merged into {merge.target_branch} · {short_id(merge.merge_commit)}"
+                    f"{verified} · undo: gcae undo <repo> {state.run_id}",
                     style=STYLES["success"],
                 )
             else:
@@ -213,7 +231,25 @@ class BannerPanel(Panel):
             lines.append(_row("merge", merge_text))
         elif state is not None and state.status == "stopped":
             title = Text("RUN STOPPED", style=f"bold {STYLES['muted']}")
-            lines.append(_row("trusted", f"{short_id(state.accepted_commit)} on {state.branch}"))
+            stopped_merge = state.merge
+            if stopped_merge is not None:
+                lines.append(
+                    _row(
+                        "trusted",
+                        f"{short_id(state.accepted_commit)} on {state.branch} · merged into "
+                        f"{stopped_merge.target_branch} ({short_id(stopped_merge.merge_commit)})",
+                    )
+                )
+            else:
+                lines.append(
+                    _row("trusted", f"{short_id(state.accepted_commit)} on {state.branch}")
+                )
+            if state.accepted_steps:
+                rescue = Text(
+                    f"{state.accepted_steps} accepted step(s) · press M to merge them",
+                    style=STYLES["accent"],
+                )
+                lines.append(_row("recover", rescue))
         if not title.plain:
             self.set_body(Text(""))
             return False

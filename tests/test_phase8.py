@@ -364,3 +364,98 @@ def test_merge_command_reports_nothing_to_merge(tmp_path: Path, capsys) -> None:
     run_id = runs[-1].parent.name
     main(["merge", str(repo), run_id, "--config", str(_fake_config(tmp_path))])
     assert "nothing to merge" in capsys.readouterr().err
+
+
+def _failed_run_with_accepted_work(tmp_path: Path):
+    """A run that accepted a checkpoint and then died (the slow-model case)."""
+    from gcae.models import Evaluation
+    from gcae.providers import FakeProvider
+    from gcae.runtime import Runtime, RuntimeControl
+
+    class RejectThenStarve:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def evaluate(self, payload):  # type: ignore[no-untyped-def]
+            self.calls += 1
+            if self.calls == 1:
+                return Evaluation(decision="accept", reason="first step is good")
+            return Evaluation(decision="rollback", reason="not converged")
+
+    source = _git_repo(tmp_path)
+    runtime = Runtime(
+        source,
+        tmp_path / "state",
+        provider=FakeProvider(
+            [
+                {
+                    "action": "execute_tool",
+                    "semantic_goal": "create",
+                    "reason_summary": "create it",
+                    "tool": {
+                        "name": "create_file",
+                        "arguments": {"path": "accepted.txt", "content": "kept\n"},
+                    },
+                },
+                {
+                    "action": "complete_semantic_step",
+                    "semantic_goal": "create",
+                    "reason_summary": "done",
+                },
+            ]
+        ),
+        evaluator=RejectThenStarve(),
+        control=RuntimeControl(),
+        max_steps=2,
+    )
+    runtime.start("create the accepted file", success_criteria=["file exists: accepted.txt"])
+    result = runtime.run()
+    assert result.status.startswith("failed")
+    assert result.accepted_steps == 1
+    assert result.accepted_commit is not None
+    return runtime
+
+
+def test_manual_merge_rescues_accepted_work_from_a_failed_run(tmp_path: Path, capsys) -> None:
+    from gcae.cli import _merge_run
+
+    runtime = _failed_run_with_accepted_work(tmp_path)
+    assert runtime.state is not None
+    assert not (tmp_path / "repo" / "accepted.txt").exists()
+    _merge_run(tmp_path / "repo", runtime.state.run_id, tmp_path / "state")
+    errors = capsys.readouterr().err
+    assert "without final verification" in errors
+    assert (tmp_path / "repo" / "accepted.txt").read_text() == "kept\n"
+    from gcae.persistence import StateStore
+
+    persisted = StateStore(
+        tmp_path / "state" / "runs" / runtime.state.run_id / "state.json"
+    ).load()
+    assert persisted.merge is not None
+
+
+def test_failed_run_without_accepted_work_is_not_mergeable(tmp_path: Path, capsys) -> None:
+    from gcae.cli import _merge_run
+
+    repo = _git_repo(tmp_path)
+    main = __import__("gcae.cli", fromlist=["main"]).main
+    with pytest.raises(SystemExit):
+        main(
+            [
+                "run",
+                str(repo),
+                "do something impossible",
+                "--criterion",
+                "file exists: missing.txt",
+                "--headless",
+                "--no-merge",
+                "--config",
+                str(_fake_config(tmp_path)),
+            ]
+        )
+    runs = sorted((tmp_path / "state" / "runs").glob("*/state.json"))
+    run_id = runs[-1].parent.name
+    with pytest.raises(RuntimeError, match="not complete"):
+        _merge_run(repo, run_id, tmp_path / "state")
+    # no misleading "merging 0 accepted step(s)" warning
+    assert "0 accepted step" not in capsys.readouterr().err

@@ -47,6 +47,9 @@ Differences from a plain log viewer:
 - **Curated events.** Routine tool successes are not timeline entries; the full stream is one
   keystroke away (`l`). Tool failures, rollbacks, replans, checkpoints, validation results, user
   instructions and terminal states always appear.
+- **Failed runs are recoverable.** A run that accepted checkpoints and then failed says so in the
+  banner (`RUN FAILED` plus `N accepted step(s) are on branch …`) and offers `M` to merge the
+  accepted work; the banner then marks it `accepted work, final verification did not pass`.
 - **Done means visible.** Completing a run merges the verified branch into your current branch in a
   worker thread; the banner reports the target branch, the merge commit and the `gcae undo`
   command. If the merge cannot proceed (dirty checkout, moved branch, no changes) the timeline says

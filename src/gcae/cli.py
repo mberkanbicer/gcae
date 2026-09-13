@@ -202,9 +202,17 @@ def _load_run(repository: Path, run_id: str, runtime_dir: Path) -> tuple[AgentSt
     return state, state_path
 
 
-def _apply_merge(state: AgentState, state_path: Path, repo: GitRepository) -> MergeRecord:
+def _apply_merge(
+    state: AgentState,
+    state_path: Path,
+    repo: GitRepository,
+    allow_unverified: bool = False,
+) -> MergeRecord:
     record = merge_verified_run(
-        repo, state, persist=lambda: StateStore(state_path).save(state)
+        repo,
+        state,
+        persist=lambda: StateStore(state_path).save(state),
+        allow_unverified=allow_unverified,
     )
     print(
         f"gcae: merged {record.branch} into {record.target_branch} "
@@ -233,8 +241,14 @@ def _undo(repository: Path, run_id: str, runtime_dir: Path) -> None:
 def _merge_run(repository: Path, run_id: str, runtime_dir: Path) -> None:
     state, state_path = _load_run(repository, run_id, runtime_dir)
     repo = GitRepository(state.source_repo, Path(runtime_dir).expanduser())
+    if state.status != "complete" and state.accepted_steps > 0:
+        print(
+            f"gcae: warning: run {run_id} ended {state.status!r}; merging "
+            f"{state.accepted_steps} accepted step(s) without final verification",
+            file=sys.stderr,
+        )
     try:
-        _apply_merge(state, state_path, repo)
+        _apply_merge(state, state_path, repo, allow_unverified=True)
     except NothingToMerge as exc:
         print(f"gcae: {exc}", file=sys.stderr)
         return

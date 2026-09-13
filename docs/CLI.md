@@ -63,6 +63,10 @@ your working tree. `[runtime] auto_merge` (default `on`) controls this; `--no-me
 keeps the branch separate, and `--merge` forces it. With `auto_merge = false` an interactive CLI
 asks instead of merging.
 
+A **failed or stopped** run can still be rescued: `gcae merge` merges the checkpoints it already
+accepted (with a warning that final verification did not pass), and the dashboard offers `M` labelled
+*Merge accepted work*. Automatic merging only ever applies to completed runs.
+
 Every merge path applies the same guards — the run must be complete, not already merged, and its
 branch must still point at the verified commit; the source repository must be clean. A run with no
 file changes reports `nothing to merge` rather than failing. The pre-merge and merge commits are

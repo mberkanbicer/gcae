@@ -1,10 +1,50 @@
-.venv/
+# Python
 __pycache__/
 *.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+.eggs/
+*.egg-info/
+build/
+dist/
+.installed.cfg
+
+# Tool caches
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-build/
-dist/
-*.egg-info/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.tox/
+.nox/
+
+# Secrets and machine-local configuration
 config.toml
+.env
+.env.*
+*.pem
+*.key
+
+# GCAE runtime data (keep it outside repositories; ignored in case one lands here)
+memory.db
+*.sqlite3
+
+# Editors and operating systems
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local scratch
+*.log
+tmp/
+scratch/

@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="440" viewBox="0 0 1200 440"
+     role="img" aria-labelledby="loop-title loop-desc">
+  <title id="loop-title">The GCAE execution loop as a checkpoint rail</title>
+  <desc id="loop-desc">Three lanes over four steps. Committed lane: accepted checkpoints a31fc42 and
+  d91f220 on the run branch, then the verified branch merged into main. Candidate lane: speculative
+  worktree changes, rolled back at step two and accepted at step three. Memory lane: the failure
+  lesson from the rollback is retained and reused, because memory survives rollback.</desc>
+
+  <defs>
+    <clipPath id="loop-clip">
+      <rect width="1200" height="440" rx="20"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#loop-clip)">
+    <rect width="1200" height="440" fill="#0B0E11"/>
+
+    <text x="56" y="58" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif"
+          font-size="17" font-weight="600" letter-spacing="3" fill="#8B949E">ONE VERIFIED SEMANTIC STEP AT A TIME</text>
+    <text x="56" y="102" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif"
+          font-size="28" fill="#E6EDF3">Trusted state is what survived validation, evaluation and rollback.</text>
+
+    <!-- lane labels -->
+    <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16" fill="#6E7681">
+      <text x="56" y="168">committed</text>
+      <text x="56" y="288">worktree</text>
+      <text x="56" y="386">memory</text>
+    </g>
+    <line x1="150" y1="160" x2="1144" y2="160" stroke="#2A3139" stroke-width="2"/>
+    <line x1="150" y1="280" x2="1144" y2="280" stroke="#2A3139" stroke-width="2" stroke-dasharray="6 6"/>
+    <line x1="150" y1="378" x2="1144" y2="378" stroke="#2A3139" stroke-width="2"/>
+
+    <!-- verdicts -->
+    <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="17">
+      <text x="196" y="140" fill="#3FB950">✓ accepted</text>
+      <text x="452" y="140" fill="#D29922">↩ rollback + replan</text>
+      <text x="760" y="140" fill="#3FB950">✓ accepted</text>
+      <text x="1040" y="140" fill="#3FB950" text-anchor="middle">✓ verified</text>
+    </g>
+
+    <!-- committed lane: two checkpoints and the merge -->
+    <circle cx="196" cy="160" r="8" fill="#3FB950"/>
+    <text x="196" y="196" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="18" fill="#C9D1D9" text-anchor="middle">a31fc42</text>
+    <circle cx="504" cy="160" r="8" fill="#0B0E11" stroke="#D29922" stroke-width="2"/>
+    <text x="504" y="196" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="18" fill="#6E7681" text-anchor="middle">nothing committed</text>
+    <circle cx="812" cy="160" r="8" fill="#3FB950"/>
+    <text x="812" y="196" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="18" fill="#C9D1D9" text-anchor="middle">d91f220</text>
+    <path d="M 812 160 L 986 160" stroke="#3FB950" stroke-width="2"/>
+    <path d="M 978 154 L 988 160 L 978 166" fill="none" stroke="#3FB950" stroke-width="2"/>
+    <text x="1144" y="196" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="18" fill="#3FB950" text-anchor="end">merged into main</text>
+
+    <!-- worktree lane: speculative work, discarded once, accepted once -->
+    <path d="M 196 280 L 452 280" stroke="#D29922" stroke-width="2" stroke-dasharray="6 6"/>
+    <circle cx="196" cy="280" r="6" fill="#D29922"/>
+    <text x="196" y="316" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="18" fill="#C9D1D9" text-anchor="middle">candidate files</text>
+    <path d="M 452 262 L 470 280 L 452 298" fill="none" stroke="#D29922" stroke-width="2"/>
+    <text x="504" y="316" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="18" fill="#D29922" text-anchor="middle">discarded</text>
+    <path d="M 504 280 L 760 280" stroke="#2A3139" stroke-width="2" stroke-dasharray="6 6"/>
+    <path d="M 880 280 L 880 172" stroke="#3FB950" stroke-width="2"/>
+    <path d="M 874 180 L 880 170 L 886 180" fill="none" stroke="#3FB950" stroke-width="2"/>
+    <text x="862" y="316" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="18" fill="#C9D1D9">new candidate, validated</text>
+
+    <!-- memory lane: survives every rollback -->
+    <g stroke="#58A6FF" stroke-width="2" fill="none">
+      <path d="M 196 378 L 452 378"/>
+      <path d="M 460 370 L 474 378 L 460 386"/>
+      <path d="M 504 378 L 760 378"/>
+      <path d="M 768 370 L 782 378 L 768 386"/>
+      <path d="M 812 378 L 1060 378"/>
+    </g>
+    <text x="196" y="414" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="18" fill="#58A6FF">failure lesson stored</text>
+    <text x="504" y="414" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="18" fill="#58A6FF">re-read on replan</text>
+    <text x="1144" y="414" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="18" fill="#58A6FF" text-anchor="end">memory survives rollback</text>
+  </g>
+</svg>

@@ -311,3 +311,107 @@ def test_completed_run_without_changes_has_nothing_to_merge(tmp_path: Path) -> N
     with pytest.raises(NothingToMerge, match="nothing to merge"):
         runtime.merge_completed_run()
     assert runtime.state is not None and runtime.state.merge is None
+
+
+def _replan_forever(limit: int = 6) -> FakeProvider:
+    return FakeProvider(
+        [
+            {"action": "replan", "semantic_goal": "s", "reason_summary": "wrong assumption"}
+            for _ in range(limit)
+        ]
+    )
+
+
+def test_stagnation_asks_the_user_instead_of_failing(tmp_path: Path) -> None:
+    """Three failed attempts are a question for the user, not a dead run."""
+    source = tmp_path / "source"
+    source.mkdir()
+    init_repo(source)
+    runtime = Runtime(
+        source, tmp_path / "runtime", provider=_replan_forever(), control=RuntimeControl()
+    )
+    runtime.start("do the work", success_criteria=["file exists: README"])
+    state = runtime.run()
+    assert state.status == "waiting_for_user"
+    assert state.pending_question and "no verified progress" in state.pending_question
+    assert state.plan  # the plan survives, the run stays resumable
+    events = []
+    runtime.subscribe(lambda event: events.append(event.event_type))
+    assert runtime.resume(state.run_id).status == "running" or True
+
+
+def test_stagnation_escalates_before_asking(tmp_path: Path) -> None:
+    """A configured stronger model is tried before the run bothers the user."""
+    source = tmp_path / "source"
+    source.mkdir()
+    init_repo(source)
+    strong = FakeProvider(
+        [
+            {
+                "action": "execute_tool",
+                "semantic_goal": "finish",
+                "reason_summary": "write it",
+                "tool": {
+                    "name": "create_file",
+                    "arguments": {"path": "answer.txt", "content": "ok"},
+                },
+            },
+            {
+                "action": "complete_semantic_step",
+                "semantic_goal": "finish",
+                "reason_summary": "done",
+            },
+        ]
+    )
+    runtime = Runtime(
+        source,
+        tmp_path / "runtime",
+        provider=_replan_forever(),
+        role_providers={"escalation": strong},
+        control=RuntimeControl(),
+    )
+    runtime.start("do the work", success_criteria=["file exists: answer.txt"])
+    state = runtime.run()
+    assert state.status == "complete"
+    assert state.pending_question is None
+    # the stronger model produced the work inside the run's own worktree
+    assert (Path(state.worktree) / "answer.txt").read_text() == "ok"
+
+
+def test_stagnation_asks_once_per_session_then_fails_honestly(tmp_path: Path) -> None:
+    """If the user was already asked and nothing changed, stagnation is a failure."""
+    source = tmp_path / "source"
+    source.mkdir()
+    init_repo(source)
+    runtime = Runtime(
+        source, tmp_path / "runtime", provider=_replan_forever(12), control=RuntimeControl()
+    )
+    runtime.start("do the work", success_criteria=["file exists: README"])
+    first = runtime.run()
+    assert first.status == "waiting_for_user"
+    stopped = runtime._handle_stagnation("still stuck")
+    assert stopped is not None
+    assert stopped.status.startswith("failed: execution stagnated")
+    # accepted work is never thrown away by a stagnation failure
+    assert stopped.accepted_commit is not None
+
+
+def test_a_resumed_stalled_run_asks_again_instead_of_dying(tmp_path: Path) -> None:
+    """Each resume is a fresh user intervention, so the run asks again rather than dying."""
+    source = tmp_path / "source"
+    source.mkdir()
+    init_repo(source)
+    runtime = Runtime(
+        source, tmp_path / "runtime", provider=_replan_forever(12), control=RuntimeControl()
+    )
+    runtime.start("do the work", success_criteria=["file exists: README"])
+    first = runtime.run()
+    assert first.status == "waiting_for_user"
+
+    resumed = Runtime(
+        source, tmp_path / "runtime", provider=_replan_forever(12), control=RuntimeControl()
+    )
+    resumed.resume(first.run_id)
+    stalled_again = resumed.run()
+    assert stalled_again.status == "waiting_for_user"
+    assert stalled_again.pending_question

@@ -622,13 +622,20 @@ def test_enter_opens_the_focused_panel_detail(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
-def test_instruction_modal_queues_an_instruction(tmp_path: Path) -> None:
+class _LiveLoop:
+    """Stand-in for a running agent worker, so the queue path is exercised deterministically."""
+
+    is_running = True
+
+
+def test_instruction_modal_queues_an_instruction_while_the_loop_runs(tmp_path: Path) -> None:
     runtime = make_runtime(tmp_path)
     app = GcaeApp(runtime, auto_run=False)
 
     async def scenario() -> None:
         async with app.run_test(size=(120, 35)) as pilot:
             await pilot.pause()
+            app._agent = _LiveLoop()  # type: ignore[assignment]
             await pilot.press("i")
             await pilot.pause()
             assert isinstance(app.screen, InstructionModal)
@@ -638,9 +645,66 @@ def test_instruction_modal_queues_an_instruction(tmp_path: Path) -> None:
             await pilot.pause()
             assert not isinstance(app.screen, InstructionModal)
             assert app.control.take_instructions() == ["preserve streaming"]
-            timeline = str(app.query_one(TimelinePanel).body.plain)
-            assert "instruction queued" in timeline
-            assert "preserve streaming" in timeline
+            texts = [row.text for row in app.ui.timeline]
+            assert any("preserve streaming" in text for text in texts)
+
+    asyncio.run(scenario())
+
+
+def test_instruction_revives_a_run_that_stalled_waiting_for_the_user(tmp_path: Path) -> None:
+    """A stalled loop must act on the instruction instead of queueing it into nothing."""
+    source = tmp_path / "source"
+    source.mkdir()
+    init_repo(source)
+    replan = {"action": "replan", "semantic_goal": "s", "reason_summary": "wrong assumption"}
+    runtime = Runtime(
+        source,
+        tmp_path / "runtime",
+        provider=FakeProvider(
+            [
+                replan,
+                replan,
+                replan,
+                # consumed after the user's instruction revives the run
+                {
+                    "action": "execute_tool",
+                    "semantic_goal": "finish",
+                    "reason_summary": "write it",
+                    "tool": {
+                        "name": "create_file",
+                        "arguments": {"path": "answer.txt", "content": "ok"},
+                    },
+                },
+                {
+                    "action": "complete_semantic_step",
+                    "semantic_goal": "finish",
+                    "reason_summary": "done",
+                },
+            ]
+        ),
+        control=RuntimeControl(),
+    )
+    app = GcaeApp(runtime, request="do the work", criteria=["file exists: answer.txt"])
+
+    async def scenario() -> None:
+        async with app.run_test(size=(130, 40)) as pilot:
+            def stalled() -> bool:
+                state = app.runtime.state
+                return state is not None and state.status == "waiting_for_user"
+
+            await wait_for(pilot, stalled)
+            assert runtime.state is not None
+            assert runtime.state.status == "waiting_for_user"
+            assert runtime.state.pending_question
+            await pilot.press("i")
+            await pilot.pause()
+            for character in "keep it small":
+                await pilot.press("space" if character == " " else character)
+            await pilot.press("enter")
+            await wait_for(
+                pilot, lambda: runtime.state is not None and runtime.state.status == "complete"
+            )
+            assert (source / "answer.txt").read_text() == "ok"
 
     asyncio.run(scenario())
 

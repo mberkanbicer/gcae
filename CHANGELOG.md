@@ -6,6 +6,24 @@ All notable changes to GCAE are documented here. The format follows
 
 ## [Unreleased]
 
+## [Unreleased]
+
+### Added
+
+- **Stagnation ladder** — an exhausted approach now stores a "change hypothesis" memory, escalates to
+  the configured stronger model, and then asks the user (`waiting_for_user`) instead of stopping the
+  run. Only a run that was already asked and still makes no progress fails, and its accepted
+  checkpoints are still delivered.
+
+### Fixed
+
+- An accepted step that changed no file no longer counts as stagnation: three read-only accepted
+  steps used to kill a healthy run with `execution stagnated`.
+- An instruction submitted while the loop was not running was queued into nothing; it now revives
+  the stalled run, applies the instruction and continues from the accepted state.
+- A stalled run now reports the question, its accepted steps and the resume command in the CLI
+  summary and the dashboard.
+
 ## [0.1.0] — 2026-09-13
 
 First public release. GCAE executes one coding task at a time inside an isolated Git worktree and

@@ -215,12 +215,19 @@ def _summary(state: AgentState, files: list[str] | None = None) -> str:
             f"{branch}\ndocuments: {state.worktree} (worktree on branch {state.branch}; "
             "nothing is in your checkout until GCAE merges it)"
         )
+    question = ""
+    if state.pending_question:
+        question = (
+            f"\nquestion: {state.pending_question}"
+            f"\nanswer with: gcae resume {state.source_repo} {state.run_id} "
+            "(or press i in the dashboard)"
+        )
     return (
         f"run {state.run_id}: {state.status}\n"
         f"accepted steps: {state.accepted_steps}, commit: {state.accepted_commit or 'none'}\n"
         f"verification: {criteria}\n"
         f"worktree: {state.worktree}\n"
-        f"{branch}"
+        f"{branch}{question}"
     )
 
 

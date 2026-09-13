@@ -214,6 +214,8 @@ class Runtime:
         self.auto_resolve_conflicts = resolve_merge_conflicts
         self._conflict_resolution = False
         self._conflict_failed = False
+        self._stagnation_escalated = False
+        self._stagnation_asked = False
         self.validator_commands = list(validator_commands or [])
         self.max_steps = max_steps
         self.command_timeout = command_timeout
@@ -391,6 +393,9 @@ class Runtime:
             raise RuntimeError("call start or resume before injecting an instruction")
         self.state.latest_user_instruction = text
         self.state.pending_question = None
+        if not self.state.status.startswith("complete"):
+            # an override re-arms a run that stalled waiting for the user
+            self.state.status = "running"
         self._remember("user_instruction", f"user override: {text}", immutable=True)
         if self.repo is not None and self.repo.worktree is not None and self.repo.status():
             self._rollback(f"user override: {text}")
@@ -475,7 +480,9 @@ class Runtime:
 
             if decision.action is Action.REPLAN:
                 if self._replan(plan, decision.reason_summary, failed=False):
-                    return self._fail("execution stagnated")
+                    stopped = self._handle_stagnation(decision.reason_summary)
+                    if stopped is not None:
+                        return stopped
                 continue
 
             if decision.action is Action.FINISH_CANDIDATE:
@@ -633,8 +640,8 @@ class Runtime:
             return self._verify_and_route("finish candidate failed verification")
         if evaluation.decision == "replan":
             if self._replan(plan, evaluation.reason, failed=False):
-                self._fail("execution stagnated")
-                return True
+                if self._handle_stagnation(evaluation.reason) is not None:
+                    return True
             return False
         if evaluation.decision == "continue":
             self._transition(RunPhase.EXECUTE)
@@ -677,9 +684,10 @@ class Runtime:
                 },
             )
             self._emit_candidate_state()
-            if self.stagnation.record(bool(validation.changed_files)):
-                self._fail("execution stagnated")
-                return True
+            # an accepted step is progress by definition: the evaluator judged it
+            # worthwhile and the plan advanced. Only rejected attempts and replans
+            # signal stagnation (see _handle_stagnation).
+            self.stagnation.record(True)
             self._persist()
             return False
 
@@ -690,9 +698,51 @@ class Runtime:
             return True
         self._rollback(evaluation.reason)
         if self._replan(plan, evaluation.reason, failed=True):
-            self._fail("execution stagnated")
-            return True
+            if self._handle_stagnation(evaluation.reason) is not None:
+                return True
         return False
+
+    def _escalate(self, reason: str) -> None:
+        self._escalated = True
+        self._event("model_escalated", RunPhase.PLAN, payload={"reason": reason})
+        logger.warning("escalating to the configured stronger model: %s", reason)
+
+    def _handle_stagnation(self, reason: str) -> AgentState | None:
+        """Stagnation means "change strategy", not "give up".
+
+        Order of responses: tell the next attempt not to repeat the failed approach,
+        escalate to the configured stronger model, then ask the user. Only a run that was
+        already asked and still makes no progress fails, and its accepted checkpoints stay
+        intact (the caller delivers them).
+        """
+        assert self.state is not None
+        self._remember(
+            "decision",
+            f"stagnation: {reason} — the previous approach is exhausted; change hypothesis",
+        )
+        if not self._stagnation_escalated and "escalation" in self.role_providers:
+            self._stagnation_escalated = True
+            self._escalate(reason)
+            return None
+        if not self._stagnation_asked:
+            self._stagnation_asked = True
+            committed = (
+                f" latest checkpoint {self.state.accepted_commit[:7]}"
+                if self.state.accepted_commit
+                else " no checkpoint yet"
+            )
+            question = (
+                f"no verified progress after {self.stagnation.window} attempts ({reason}). "
+                f"accepted steps: {self.state.accepted_steps},{committed}. "
+                "Tell me how to proceed: send an instruction, or stop the run."
+            )
+            self.state.pending_question = question
+            self.state.status = "waiting_for_user"
+            self._event("user_question", payload={"question": question, "reason": reason})
+            self._persist()
+            logger.warning("run %s is waiting for the user: %s", self.state.run_id, reason)
+            return self.state
+        return self._fail(f"execution stagnated after asking: {reason}")
 
     def _replan(self, plan: PlanStep, reason: str, failed: bool) -> bool:
         """Discard speculative work and the current step, queue a new one.
@@ -709,9 +759,7 @@ class Runtime:
                 and not self._escalated
                 and "escalation" in self.role_providers
             ):
-                self._escalated = True
-                self._event("model_escalated", RunPhase.PLAN, payload={"reason": reason})
-                logger.warning("escalating to the configured stronger model: %s", reason)
+                self._escalate(reason)
         self._remember("decision", f"replan: {reason}")
         if plan.status in {"pending", "active"}:
             plan.status = "failed" if failed else "skipped"

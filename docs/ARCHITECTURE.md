@@ -22,7 +22,7 @@ model.
 | `memory.py` | SQLite FTS5 knowledge store, JSONL event log |
 | `tools.py` | sandboxed tool registry |
 | `git.py` | worktree, checkpoint, rollback, merge, undo |
-| `safeguards.py` | repetition, stagnation, hygiene |
+| `safeguards.py` | repetition guard, stagnation window, hygiene check |
 | `providers.py`, `http_provider.py` | structured-output providers |
 | `cli.py` | run/resume/list/inspect/merge/undo, headless and TUI modes |
 | `tui/` | Textual dashboard: presentation reducer, widgets, viewers, dialogs (see `docs/TUI.md`) |

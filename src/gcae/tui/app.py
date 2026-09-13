@@ -103,6 +103,7 @@ class GcaeApp(App[None]):
         self._needs_start = request is not None and runtime.state is None
         self._merge_attempted = False
         self.merge_error: str | None = None
+        self._pending_instruction: str | None = None
         self._agent: Worker[None] | None = None
 
     # ------------------------------------------------------------------ layout
@@ -628,13 +629,40 @@ class GcaeApp(App[None]):
         if self.auto_run:
             self._launch_agent()
 
+    def _agent_running(self) -> bool:
+        return bool(self._agent is not None and self._agent.is_running)
+
     def _submit_instruction(self, text: object) -> None:
         if not isinstance(text, str) or not text.strip():
             return
         instruction = text.strip()
-        self.control.submit_instruction(instruction)
-        self.ui.add_note("i", f"instruction queued · {formatters.elide(instruction, 70)}", "accent")
-        self._refresh_panels({"objective", "timeline", "activity"})
+        self.ui.add_note("i", f"instruction · {formatters.elide(instruction, 70)}", "accent")
+        if self._agent_running():
+            # a live loop drains the queue at its next iteration boundary
+            self.control.submit_instruction(instruction)
+            self._refresh_panels({"objective", "timeline", "activity"})
+            return
+        # the loop stopped (waiting for the user, stopped, or failed): apply the
+        # instruction and continue the run instead of queueing it into nothing
+        self._pending_instruction = instruction
+        self.agent_done = False
+        self.last_error = None
+        self._merge_attempted = False
+        self._refresh_panels({"objective", "timeline", "activity", "banner", "footer"})
+        self.run_worker(
+            self._continue_with_instruction, thread=True, name="agent", exit_on_error=False
+        )
+
+    def _continue_with_instruction(self) -> None:
+        instruction = self._pending_instruction or ""
+        self._pending_instruction = None
+        try:
+            self.runtime.inject_user_instruction(instruction)
+            self.runtime.run()
+        except Exception as exc:  # noqa: BLE001 - surfaced in the dashboard
+            self._call_ui(self._on_agent_error, str(exc))
+        finally:
+            self._call_ui(self._on_agent_finished)
 
     def on_unmount(self) -> None:
         if not self.agent_done:

@@ -47,6 +47,9 @@ Differences from a plain log viewer:
 - **Curated events.** Routine tool successes are not timeline entries; the full stream is one
   keystroke away (`l`). Tool failures, rollbacks, replans, checkpoints, validation results, user
   instructions and terminal states always appear.
+- **A stalled run asks, it does not die.** When an approach is exhausted the status bar shows
+  `WAITING`, the request/question appears in the metrics strip, and `i` (or `r`) applies your
+  instruction and continues the same run with its accepted checkpoints intact.
 - **Conflicts are handled too.** A conflicting merge appears in the timeline, the agent resolves
   the markers in its own worktree, the run re-verifies and the merge is retried — or the branch is
   left untouched and the banner says why.

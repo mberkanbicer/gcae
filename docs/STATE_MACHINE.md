@@ -16,6 +16,26 @@ transitions raise `ValueError`.
 | verify | complete, checkpoint, plan, failed |
 | complete / failed | terminal |
 
+## Stagnation
+
+Stagnation means "this approach is exhausted", not "stop". The detector watches a window of
+attempts (default 3) and counts only *non-productive* outcomes: rejected steps and replans. An
+accepted step is progress even when it changed no file — the evaluator judged it worthwhile and the
+plan advanced.
+
+The response is a ladder:
+
+1. store an immutable decision memory that the previous approach is exhausted, so the next decision
+   must change hypothesis;
+2. escalate to the configured stronger model (`[models.escalation]`) once per session;
+3. ask the user: the run enters `waiting_for_user` with a question that names the attempts, the
+   accepted steps and the latest checkpoint. The plan and every accepted commit are preserved;
+4. fail with `execution stagnated` only when the user was already asked in that session and nothing
+   changed. Accepted checkpoints are still delivered by the merge step.
+
+A resumed run is a new user intervention, so it asks again instead of dying. Answering an
+instruction (`i` in the dashboard, `gcae resume` in the CLI) re-plans from the accepted state.
+
 ## Controller actions
 
 - `execute_tool` — run one registered tool; no evaluation yet.

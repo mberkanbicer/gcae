@@ -1,25 +1,37 @@
 # Providers
 
-`FakeProvider` supplies deterministic trajectories and performs one bounded structured-output
-repair. `OpenAICompatibleProvider` sends JSON requests to `/chat/completions`, accepts an API key
-or environment variable, supports generation parameters and timeout, and retries malformed JSON
-only within the configured repair bound. No native tool-calling is required.
+One generic OpenAI-compatible provider serves OpenRouter, Ollama, vLLM, LM Studio and similar
+endpoints. `provider.kind = "http"` or `"openrouter"` selects it; `"fake"` selects the deterministic
+offline provider. Unknown kinds are rejected — never silently replaced.
 
-`provider.kind = "http"` selects the generic provider; `"openrouter"` is accepted as an alias for
-the same endpoint. `"fake"` selects the deterministic offline provider. Any other value is
-rejected with an error instead of silently falling back to the fake provider.
+Configurable per provider: `base_url`, `model`, `api_key` or `api_key_env`, `timeout`,
+`context_limit` and `generation` parameters. The HTTP provider posts to `/chat/completions` with
+`response_format: json_object`, forwards the generation mapping and sends `Authorization: Bearer`
+when a key is configured. Native tool calling is not used: the model returns structured JSON that
+the runtime validates and executes.
 
-`evaluator.kind = "deterministic"` (default) evaluates validation rules locally;
-`evaluator.kind = "llm"` sends the reconstruction and validation evidence to the same configured
-provider and validates the returned `Evaluation` with bounded repair. The LLM evaluator can report
-failure lessons through `memories_to_promote`, which the runtime persists before any rollback.
+## Role models
 
-The controller composes the model prompt: it contains the allowed tool list with argument
-contracts, the `Decision` JSON schema, the action semantics, and the reconstructed context. Models
-must return exactly one JSON object. Unknown tools never execute because the runtime validates the
-decision with Pydantic and only executes names registered in its registry.
+`models.controller`, `models.planner`, `models.evaluator`, `models.verifier` and
+`models.escalation` are optional overrides that inherit every unset field from `[provider]`.
+Overrides only create a separate provider when at least one field is set, so a single model remains
+the default for everything.
 
-When an API key is configured, the HTTP provider sends it as a standard `Authorization: Bearer`
-header. The configured generation mapping is forwarded to the endpoint, with safe defaults for
-temperature and maximum output tokens. `context_limit` is also the token budget used when
-reconstructing controller context.
+`models.escalation` is used for controller decisions after two consecutive rejected steps when
+configured; observable signals (repeated failure, stagnation) trigger it, never self-reported model
+confidence.
+
+## Planning and evaluation
+
+- `planner.kind = "auto"` uses the model for `InitialPlan` generation when the provider is HTTP;
+  user criteria and constraints are merged afterwards and never overwritten.
+- `evaluator.kind = "llm"` asks the model for an `Evaluation` with the validation evidence and
+  reconstructed context, and can promote failure memories before a rollback.
+- The final verifier is deterministic and fail-closed; criteria that cannot be checked
+  deterministically fail verification rather than being guessed.
+
+## Repair
+
+Malformed structured output gets one bounded repair attempt (a repair prompt with the previous
+response and an explicit schema instruction). If it still fails, the run fails cleanly with a
+`ProviderOutputError` recorded as an immutable failure memory; there is no unbounded retry loop.

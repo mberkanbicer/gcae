@@ -38,7 +38,11 @@ def test_runtime_finishes_with_checkpoint(tmp_path: Path) -> None:
                     "arguments": {"path": "answer.txt", "content": "ok"},
                 },
             },
-            {"action": "finish", "semantic_goal": "finish", "reason_summary": "done"},
+            {
+                "action": "complete_semantic_step",
+                "semantic_goal": "create",
+                "reason_summary": "done",
+            },
         ]
     )
     runtime = Runtime(source, tmp_path / "runtime", provider=provider, evaluator=AlwaysAccept())
@@ -70,7 +74,12 @@ def test_runtime_checkpoints_verified_speculative_changes(tmp_path: Path) -> Non
                     "arguments": {"path": "answer.txt", "content": "ok"},
                 },
             },
-            {"action": "finish", "semantic_goal": "finish", "reason_summary": "done"},
+            {
+                "action": "complete_semantic_step",
+                "semantic_goal": "create",
+                "reason_summary": "done",
+            },
+            {"action": "finish_candidate", "semantic_goal": "finish", "reason_summary": "done"},
         ]
     )
     runtime = Runtime(source, tmp_path / "runtime", provider=provider, evaluator=KeepSpeculative())
@@ -89,7 +98,7 @@ def test_final_verification_blocks_premature_completion(tmp_path: Path) -> None:
     source.mkdir()
     init_repo(source)
     provider = FakeProvider(
-        [{"action": "finish", "semantic_goal": "finish", "reason_summary": "premature"}]
+        [{"action": "finish_candidate", "semantic_goal": "finish", "reason_summary": "premature"}]
     )
     runtime = Runtime(source, tmp_path / "runtime", provider=provider, max_steps=3)
     runtime.start("create missing", success_criteria=["file exists: missing.txt"])
@@ -115,6 +124,11 @@ def test_llm_evaluator_promotes_memories(tmp_path: Path) -> None:
                 },
             },
             {
+                "action": "complete_semantic_step",
+                "semantic_goal": "try implementation",
+                "reason_summary": "step done",
+            },
+            {
                 "decision": "rollback",
                 "reason": "bad implementation",
                 "progress_score": 0.0,
@@ -137,6 +151,11 @@ def test_llm_evaluator_promotes_memories(tmp_path: Path) -> None:
                     "name": "create_file",
                     "arguments": {"path": "result.txt", "content": "good"},
                 },
+            },
+            {
+                "action": "complete_semantic_step",
+                "semantic_goal": "correct implementation",
+                "reason_summary": "step done",
             },
             {"decision": "accept", "reason": "correct", "progress_score": 1.0},
         ]
@@ -199,7 +218,12 @@ def test_runtime_logs_lifecycle(tmp_path: Path, caplog) -> None:
                     "name": "create_file",
                     "arguments": {"path": "answer.txt", "content": "ok"},
                 },
-            }
+            },
+            {
+                "action": "complete_semantic_step",
+                "semantic_goal": "create",
+                "reason_summary": "done",
+            },
         ]
     )
     runtime = Runtime(source, tmp_path / "runtime", provider=provider)

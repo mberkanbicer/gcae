@@ -1,15 +1,39 @@
 # State machine
 
-The explicit phases are `analyze -> plan -> execute -> validate -> evaluate -> checkpoint`, with
-rollback to the accepted checkpoint on rejection. `continue` keeps the current semantic step alive
-without creating a checkpoint. `verify` is a separate final gate before `complete`; `ask_user`
-leaves the run resumable, and exhaustion enters `failed`. Invalid transitions raise `ValueError`.
+Phases: `analyze -> plan -> execute -> validate -> evaluate -> checkpoint`, with `rollback`,
+`verify`, `complete` and `failed`. Transitions are declared in `state_machine.py`; invalid
+transitions raise `ValueError`.
 
-A finish candidate (a `finish` decision or an evaluator `finish_candidate`) enters `verify`. When
-verification passes and the worktree still contains uncommitted changes, the runtime transitions
-`verify -> checkpoint`, commits `gcae: verified final state`, updates `accepted_commit`, and only
-then transitions `checkpoint -> complete`. This keeps the invariant that a completed run's accepted
-commit equals its verified tree. When the worktree is already clean, `verify -> complete` is taken
-directly. Failed verification returns to `plan` for replanning.
+| From | Allowed targets |
+| --- | --- |
+| analyze | plan, failed |
+| plan | execute, rollback, failed |
+| execute | execute, plan, validate, verify, rollback, failed |
+| validate | evaluate, rollback, failed |
+| evaluate | execute, checkpoint, rollback, plan, verify, failed |
+| checkpoint | execute, verify, complete, failed |
+| rollback | execute, plan, failed |
+| verify | complete, checkpoint, plan, failed |
+| complete / failed | terminal |
 
-Terminal phases `complete` and `failed` have no outgoing transitions.
+## Controller actions
+
+- `execute_tool` — run one registered tool; no evaluation yet.
+- `complete_semantic_step` — declare the current step finished; run validation and evaluation.
+- `replan` — discard speculative work and queue a new step.
+- `finish_candidate` — request final verification (only the verifier can complete the run).
+- `ask_user` — persist a question and stop; the run is resumable.
+
+## Step lifecycle
+
+`pending -> active -> completed | failed | skipped` (`PlanStep.status`). A step becomes `active`
+when its first iteration starts, `completed` when accepted, `failed` on a rejected evaluation, and
+`skipped` when superseded by replan or a user override. Evaluation is forced when
+`step_tool_calls` reaches `max_tool_calls_per_step`.
+
+## Run status
+
+`running`, `waiting_for_user`, `stopped`, `complete`, `failed: <reason>`. `waiting_for_user` and
+`stopped` are resumable: `resume` restores the accepted checkpoint, clears speculative state inside
+the worktree, rebuilds context from persistent state, and continues. `complete` and `failed` are
+terminal for the automatic loop, but `inspect`, `merge` and `undo` still apply.

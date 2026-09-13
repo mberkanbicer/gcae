@@ -1,36 +1,106 @@
 # Architecture
 
-GCAE is a single-agent runtime with explicit Python orchestration. `Runtime` owns the lifecycle,
-`GitRepository` owns execution isolation, `MemoryStore` owns cumulative knowledge, and `StateStore`
-owns resumable JSON state. Pydantic models define all cross-subsystem contracts. Providers return
-validated decisions; the runtime, not the model, executes tools.
+GCAE is a single-agent, reversible execution runtime with explicit Python orchestration. There is
+no workflow framework and no multi-agent layer: planner, controller, evaluator and verifier are
+roles inside one runtime, each a deterministic component or a structured call to the configured
+model.
 
-`Planner` produces an `InitialPlan` (objective, criteria, constraints, assumptions, steps). In V1
-the planner is deterministic: the objective, criteria and constraints come from the caller, the
-plan is one semantic step, and assumptions are empty. The controller, evaluator and final verifier
-are separate components.
+## Components
 
-The evaluator receives an `EvaluationInput` (objective, semantic goal, constraints, observations,
-accepted commit, reconstructed context, and deterministic validation) and returns a validated
-`Evaluation`. `DeterministicEvaluator` is the default; `LLMEvaluator` asks the configured model for
-the same contract and can promote failure memories through `memories_to_promote`. Select it with
-`[evaluator] kind = "llm"` in the configuration.
+| Module | Responsibility |
+| --- | --- |
+| `runtime.py` | lifecycle, semantic-step loop, checkpoint/rollback, events, control, overrides |
+| `state_machine.py` | explicit phase transitions |
+| `models.py` | all cross-subsystem Pydantic contracts |
+| `persistence.py` | atomic JSON state |
+| `planner.py` | deterministic planner and model-backed `InitialPlan` planning |
+| `controller.py` | builds the decision prompt; returns validated `Decision` |
+| `evaluator.py` | deterministic evaluator and optional LLM evaluator |
+| `verifier.py` | final success-criteria verification |
+| `validation.py` | deterministic evidence before evaluation |
+| `context.py` | context reconstruction, pinned sections, token budgeting |
+| `memory.py` | SQLite FTS5 knowledge store, JSONL event log |
+| `tools.py` | sandboxed tool registry |
+| `git.py` | worktree, checkpoint, rollback, merge, undo |
+| `safeguards.py` | repetition, stagnation, hygiene |
+| `providers.py`, `http_provider.py` | structured-output providers |
+| `cli.py` | run/resume/list/inspect/merge/undo, headless and TUI modes |
+| `tui/` | Textual dashboard; consumes runtime events |
 
-Each run creates one `gcae/<run-id>` branch and one worktree under the configured runtime
-directory. Checkpoint commits are trusted execution state; SQLite memory and JSONL events are
-cumulative knowledge and survive rollback. Only evaluator acceptance, or a passing final
-verification with a non-empty worktree, creates a checkpoint; completion therefore always points
-`accepted_commit` at the verified tree.
+## Execution state vs knowledge state
 
-The context given to the model is rebuilt from persistent state on every call. It is not
-conversation history and no history is accumulated. `ContextBuilder` budgets the reconstructed
-sections by estimated tokens.
+Execution state is reversible: Git commits inside one isolated worktree per run. An accepted
+evaluation creates a checkpoint; rejection performs `reset --hard accepted_commit` plus cleanup of
+speculative files, strictly inside that worktree. Knowledge state is cumulative: facts, decisions,
+failures, observations and user instructions live in SQLite and survive rollbacks and runs. The
+user's working tree is never modified; a dirty source repository is refused.
 
-Run artifacts are kept outside target repositories: `memory.db` at the state root is cumulative
-and shared across runs, while `runs/<run-id>/` retains `state.json`, `events.jsonl`, per-step tool
-results, and diff snapshots. The runtime removes generated caches and ignored files only inside the
-isolated worktree before validation and final verification.
+## Semantic-step loop
 
-`python -m gcae` prints the final `AgentState` as JSON on stdout and a short human-readable summary
-on stderr. After a verified run the CLI asks whether to merge the run branch; a confirmed merge is
-recorded with its pre-merge commit and can be reversed with `gcae undo`.
+```
+load state ──► current plan step
+      │
+      ▼
+  build context (fresh, budgeted, pinned)  ◄────────────────┐
+      │                                                     │
+      ▼                                                     │
+  controller decision                                       │
+   ├─ execute_tool ......... run tool, observe, persist ────┤
+   ├─ complete_semantic_step ──┐                            │
+   ├─ replan ................ rollback + new step ──────────┤
+   ├─ finish_candidate ...... final verification            │
+   └─ ask_user .............. persist and wait              │
+                               │                            │
+                               ▼                            │
+                 deterministic validation                   │
+                               │                            │
+                               ▼                            │
+                 evaluator: accept / rollback /             │
+                            replan / continue /             │
+                            finish_candidate ───────────────┘
+                               │
+                 accept ──► checkpoint commit (+ memory promotion)
+                 rollback ─► reset to accepted commit, failure memory kept
+```
+
+A semantic step may contain several tool calls. Deterministic validation and evaluation run only
+when the controller declares the step complete or `max_tool_calls_per_step` is exhausted, so read
+operations never create checkpoints. Each step has a finite tool budget; the outer loop is bounded
+by `max_steps`.
+
+## Replanning and safeguards
+
+Replanning discards speculative changes, keeps accepted commits and knowledge, and preserves
+completed steps. Identical tool calls are blocked after `repetition_limit`; repeated
+non-progressing iterations trip `stagnation_window`; two consecutive rejected steps escalate
+controller decisions to `models.escalation` when configured.
+
+## Final verification and completion
+
+`finish_candidate` enters a separate deterministic verifier that checks every success criterion and
+runs a hygiene pass. If verification passes while the worktree still holds uncommitted changes, the
+runtime commits `gcae: verified final state` first, so `accepted_commit` always equals the verified
+tree. Unsupported criteria fail closed.
+
+## Events and UI
+
+Every phase, decision, tool result, validation, evaluation, checkpoint, rollback, replan, override
+and verification is a typed `Event` appended to `runs/<run-id>/events.jsonl` and pushed to
+in-process subscribers. The Textual TUI subscribes from its UI thread and drives pause/resume/stop
+and overrides through a thread-safe `RuntimeControl`. The engine works without the TUI.
+
+## Runtime storage
+
+```
+${XDG_STATE_HOME:-~/.local/state}/gcae/
+  memory.db                      # cumulative knowledge, all runs
+  runs/<run-id>/
+    state.json                   # resumable execution state
+    events.jsonl                 # append-only event history
+    tool-results/                # per-call tool results
+    diffs/                       # per-step candidate diffs
+    artifacts/                   # externalized large command outputs
+  worktrees/<run-id>/            # one isolated worktree per run
+```
+
+Target repositories never receive runtime files.

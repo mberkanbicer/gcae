@@ -42,12 +42,12 @@ def test_provider_kind_resolution() -> None:
     from gcae.http_provider import OpenAICompatibleProvider
     from gcae.providers import FakeProvider
 
-    assert isinstance(_provider(Config(provider=ProviderConfig(kind="fake"))), FakeProvider)
-    live = _provider(Config(provider=ProviderConfig(kind="openrouter")))
+    assert isinstance(_provider(ProviderConfig(kind="fake")), FakeProvider)
+    live = _provider(ProviderConfig(kind="openrouter"))
     assert isinstance(live, OpenAICompatibleProvider)
     live.close()
     with pytest.raises(ValueError):
-        _provider(Config(provider=ProviderConfig(kind="bogus")))
+        _provider(ProviderConfig(kind="bogus"))
 
 
 def test_evaluator_kind_resolution() -> None:

@@ -6,47 +6,63 @@ import logging
 import sys
 from pathlib import Path
 
-from .config import Config, load_config
+from .config import Config, ProviderConfig, load_config
 from .evaluator import DeterministicEvaluator, Evaluator, LLMEvaluator
 from .git import GitError, GitRepository
 from .http_provider import OpenAICompatibleProvider
 from .models import AgentState, MergeRecord
 from .persistence import StateStore
+from .planner import LLMPlanner, Planner
 from .providers import FakeProvider, Provider
-from .runtime import Runtime
+from .runtime import Runtime, RuntimeControl
+
+ROLES = ("controller", "planner", "evaluator", "verifier", "escalation")
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="gcae", description="Git-Checkpointed Adaptive Execution")
     parser.add_argument("--version", action="version", version="0.1.0")
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    def add_runtime_flags(sub: argparse.ArgumentParser) -> None:
+        sub.add_argument("--config", type=Path)
+        sub.add_argument("--runtime-dir", type=Path)
+        mode = sub.add_mutually_exclusive_group()
+        mode.add_argument("--tui", action="store_true", help="force the interactive TUI")
+        mode.add_argument("--headless", action="store_true", help="force non-interactive output")
+
     run = subparsers.add_parser("run")
     run.add_argument("repository", type=Path)
     run.add_argument("request")
-    run.add_argument("--config", type=Path)
-    run.add_argument("--runtime-dir", type=Path)
+    add_runtime_flags(run)
     run.add_argument("--constraint", action="append", default=[])
     run.add_argument("--criterion", action="append", default=[])
     run.add_argument(
-        "--merge",
-        action="store_true",
-        help="merge the verified run branch without asking",
+        "--merge", action="store_true", help="merge the verified branch without asking"
     )
-    run.add_argument(
-        "--no-merge",
-        action="store_true",
-        help="never merge the run branch",
-    )
+    run.add_argument("--no-merge", action="store_true", help="never merge the run branch")
+
     resume = subparsers.add_parser("resume")
     resume.add_argument("repository", type=Path)
     resume.add_argument("run_id")
-    resume.add_argument("--config", type=Path)
-    resume.add_argument("--runtime-dir", type=Path)
+    add_runtime_flags(resume)
+
+    listing = subparsers.add_parser("list", help="list known runs")
+    listing.add_argument("--config", type=Path)
+    listing.add_argument("--runtime-dir", type=Path)
+
+    inspect = subparsers.add_parser("inspect", help="show a run summary")
+    inspect.add_argument("run_id")
+    inspect.add_argument("--config", type=Path)
+    inspect.add_argument("--runtime-dir", type=Path)
+    inspect.add_argument("--json", action="store_true", help="dump the full persisted state")
+
     undo = subparsers.add_parser("undo")
     undo.add_argument("repository", type=Path)
     undo.add_argument("run_id")
     undo.add_argument("--config", type=Path)
     undo.add_argument("--runtime-dir", type=Path)
+
     merge = subparsers.add_parser(
         "merge", help="merge a completed run branch into the current branch"
     )
@@ -57,23 +73,39 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _provider(config: Config) -> Provider:
-    kind = config.provider.kind.lower()
+def _provider(provider_config: ProviderConfig) -> Provider:
+    kind = provider_config.kind.lower()
     if kind in {"http", "openrouter"}:
         return OpenAICompatibleProvider(
-            base_url=config.provider.base_url,
-            model=config.provider.model,
-            api_key=config.provider.api_key,
-            api_key_env=config.provider.api_key_env,
-            timeout=config.provider.timeout,
-            context_limit=config.provider.context_limit,
-            generation=config.provider.generation.model_dump(),
+            base_url=provider_config.base_url,
+            model=provider_config.model,
+            api_key=provider_config.api_key,
+            api_key_env=provider_config.api_key_env,
+            timeout=provider_config.timeout,
+            context_limit=provider_config.context_limit,
+            generation=provider_config.generation.model_dump(),
         )
     if kind == "fake":
         return FakeProvider(
-            [{"action": "finish", "semantic_goal": "finish", "reason_summary": "fake provider"}]
+            [
+                {
+                    "action": "finish_candidate",
+                    "semantic_goal": "finish",
+                    "reason_summary": "fake provider",
+                }
+            ]
         )
-    raise ValueError(f"unsupported provider kind: {config.provider.kind!r}")
+    raise ValueError(f"unsupported provider kind: {provider_config.kind!r}")
+
+
+def _providers(config: Config) -> tuple[Provider, dict[str, Provider]]:
+    base = _provider(config.provider)
+    roles: dict[str, Provider] = {}
+    for role in ROLES:
+        resolved = getattr(config.models, role).resolved(config.provider)
+        if resolved is not None:
+            roles[role] = _provider(resolved)
+    return base, roles
 
 
 def _evaluator(config: Config, provider: Provider) -> Evaluator:
@@ -85,6 +117,21 @@ def _evaluator(config: Config, provider: Provider) -> Evaluator:
     raise ValueError(f"unsupported evaluator kind: {config.evaluator.kind!r}")
 
 
+def _planner(config: Config, provider: Provider) -> Planner | LLMPlanner:
+    kind = config.planner.kind.lower()
+    if kind == "auto":
+        kind = (
+            "llm"
+            if config.provider.kind.lower() in {"http", "openrouter"}
+            else "deterministic"
+        )
+    if kind == "deterministic":
+        return Planner()
+    if kind == "llm":
+        return LLMPlanner(provider)
+    raise ValueError(f"unsupported planner kind: {config.planner.kind!r}")
+
+
 def _summary(state: AgentState) -> str:
     verification = state.last_verification
     if verification is None:
@@ -93,9 +140,7 @@ def _summary(state: AgentState) -> str:
         passed = sum(1 for item in verification.criteria if item.passed)
         criteria = f"{passed}/{len(verification.criteria)} criteria passed"
     if state.merge is None:
-        branch = (
-            f"branch: {state.branch} (not merged; apply with: git merge {state.branch})"
-        )
+        branch = f"branch: {state.branch} (not merged; apply with: git merge {state.branch})"
     else:
         branch = (
             f"branch: {state.branch} merged into {state.merge.target_branch} "
@@ -212,6 +257,100 @@ def _maybe_merge(
         print(f"gcae: merge skipped: {exc}", file=sys.stderr)
 
 
+def _list_runs(runtime_dir: Path) -> None:
+    runs_dir = Path(runtime_dir).expanduser() / "runs"
+    rows: list[AgentState] = []
+    if runs_dir.is_dir():
+        for state_file in sorted(runs_dir.glob("*/state.json")):
+            try:
+                rows.append(StateStore(state_file).load())
+            except (OSError, ValueError) as exc:
+                print(f"gcae: skipping {state_file}: {exc}", file=sys.stderr)
+    if not rows:
+        print("no runs found")
+        return
+    rows.sort(key=lambda state: state.updated_at, reverse=True)
+    print(f"{'run id':<14} {'status':<18} {'steps':>5}  {'updated':<20} objective")
+    for state in rows:
+        objective = state.objective.replace("\n", " ")[:60]
+        print(
+            f"{state.run_id:<14} {state.status:<18} {state.accepted_steps:>5}  "
+            f"{state.updated_at.isoformat(timespec='seconds'):<20} {objective}"
+        )
+
+
+def _inspect_run(run_id: str, runtime_dir: Path, as_json: bool) -> None:
+    state = StateStore(_state_path(runtime_dir, run_id)).load()
+    if as_json:
+        print(json.dumps(state.model_dump(mode="json"), indent=2, sort_keys=True))
+        return
+    print(f"run: {state.run_id} ({state.status}, {state.phase.value})")
+    print(f"repository: {state.source_repo}")
+    print(f"worktree: {state.worktree}")
+    print(f"objective: {state.objective}")
+    print(f"accepted: {state.accepted_steps} steps, commit {state.accepted_commit or 'none'}")
+    print(f"iteration: {state.iteration}, current step: {state.current_step_id or 'none'}")
+    if state.hard_constraints:
+        print("constraints: " + "; ".join(state.hard_constraints))
+    if state.success_criteria:
+        print("criteria: " + "; ".join(state.success_criteria))
+    for plan in state.plan:
+        print(f"plan {plan.id} [{plan.status}]: {plan.goal}")
+    if state.last_verification is not None:
+        report = state.last_verification
+        print(
+            f"verification: passed={report.passed} hygiene={report.hygiene_passed} "
+            f"criteria={sum(1 for item in report.criteria if item.passed)}/"
+            f"{len(report.criteria)}"
+        )
+        for item in report.criteria:
+            print(f"  [{'pass' if item.passed else 'fail'}] {item.criterion} :: {item.evidence}")
+    if state.merge is not None:
+        print(
+            f"merged into {state.merge.target_branch} "
+            f"({state.merge.pre_merge_commit[:12]} -> {state.merge.merge_commit[:12]})"
+        )
+    if state.pending_question:
+        print(f"pending question: {state.pending_question}")
+
+
+def _build_runtime(args: argparse.Namespace, config: Config, runtime_dir: Path) -> Runtime:
+    base_provider, role_providers = _providers(config)
+    control = RuntimeControl()
+    return Runtime(
+        args.repository,
+        runtime_dir,
+        worktree_dir=config.runtime.worktree_dir,
+        provider=base_provider,
+        validator_commands=config.validation.commands,
+        max_steps=config.runtime.max_steps,
+        command_timeout=config.runtime.command_timeout,
+        context_limit=config.provider.context_limit,
+        evaluator=_evaluator(config, role_providers.get("evaluator", base_provider)),
+        planner=_planner(config, role_providers.get("planner", base_provider)),
+        max_tool_calls_per_step=config.runtime.max_tool_calls_per_step,
+        stagnation_window=config.runtime.stagnation_window,
+        repetition_limit=config.runtime.repetition_limit,
+        scope_warning_files=config.runtime.scope_warning_files,
+        control=control,
+        role_providers=role_providers,
+    )
+
+
+def _wants_tui(args: argparse.Namespace) -> bool:
+    if getattr(args, "headless", False):
+        return False
+    if getattr(args, "tui", False):
+        return True
+    return sys.stdout.isatty() and sys.stdin.isatty()
+
+
+def _run_tui(runtime: Runtime) -> None:
+    from .tui.app import GcaeApp
+
+    GcaeApp(runtime).run()
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -226,18 +365,13 @@ def main(argv: list[str] | None = None) -> None:
         if args.command == "merge":
             _merge_run(args.repository, args.run_id, runtime_dir)
             return
-        provider = _provider(config)
-        runtime = Runtime(
-            args.repository,
-            runtime_dir,
-            worktree_dir=config.runtime.worktree_dir,
-            provider=provider,
-            validator_commands=config.validation.commands,
-            max_steps=config.runtime.max_steps,
-            command_timeout=config.runtime.command_timeout,
-            context_limit=config.provider.context_limit,
-            evaluator=_evaluator(config, provider),
-        )
+        if args.command == "list":
+            _list_runs(runtime_dir)
+            return
+        if args.command == "inspect":
+            _inspect_run(args.run_id, runtime_dir, args.json)
+            return
+        runtime = _build_runtime(args, config, runtime_dir)
         if args.command == "run":
             runtime.start(
                 args.request,
@@ -246,6 +380,11 @@ def main(argv: list[str] | None = None) -> None:
             )
         else:
             runtime.resume(args.run_id)
+        if _wants_tui(args):
+            _run_tui(runtime)
+            if runtime.state is not None:
+                print(_summary(runtime.state), file=sys.stderr)
+            return
         result = runtime.run()
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"gcae: error: {exc}", file=sys.stderr)

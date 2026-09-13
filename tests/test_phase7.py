@@ -25,7 +25,7 @@ def test_openai_compatible_provider() -> None:
                     {
                         "message": {
                             "content": (
-                                '{"action":"finish","semantic_goal":"done","reason_summary":"ok"}'
+                                '{"action":"finish_candidate","semantic_goal":"done","reason_summary":"ok"}'
                             )
                         }
                     }
@@ -42,7 +42,7 @@ def test_openai_compatible_provider() -> None:
         client=client,
     )
     decision = provider.complete("prompt", Decision)
-    assert decision.action.value == "finish"
+    assert decision.action.value == "finish_candidate"
     assert calls == 1
     assert received["temperature"] == 0.2
     assert received["top_p"] == 0.8

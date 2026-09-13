@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import threading
 from pathlib import Path
 
 from .models import MemoryCandidate, MemoryRecord
@@ -14,8 +15,9 @@ class MemoryStore:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.connection = sqlite3.connect(self.path)
+        self.connection = sqlite3.connect(self.path, check_same_thread=False)
         self.connection.row_factory = sqlite3.Row
+        self._lock = threading.Lock()
         self.connection.executescript(
             """
             CREATE TABLE IF NOT EXISTS memory (
@@ -46,26 +48,31 @@ class MemoryStore:
         self.connection.commit()
 
     def add(self, record: MemoryRecord) -> MemoryRecord:
-        cursor = self.connection.execute(
-            """INSERT INTO memory(kind, content, run_id, step_id, source, commit_sha,
-               created_at, importance, immutable) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                record.kind,
-                record.content,
-                record.run_id,
-                record.step_id,
-                record.source,
-                record.commit_sha,
-                record.created_at.isoformat(),
-                record.importance,
-                int(record.immutable),
-            ),
-        )
-        self.connection.commit()
-        return record.model_copy(update={"id": cursor.lastrowid})
+        with self._lock:
+            cursor = self.connection.execute(
+                """INSERT INTO memory(kind, content, run_id, step_id, source, commit_sha,
+                   created_at, importance, immutable) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    record.kind,
+                    record.content,
+                    record.run_id,
+                    record.step_id,
+                    record.source,
+                    record.commit_sha,
+                    record.created_at.isoformat(),
+                    record.importance,
+                    int(record.immutable),
+                ),
+            )
+            self.connection.commit()
+            row_id = cursor.lastrowid
+        return record.model_copy(update={"id": row_id})
 
     def get(self, record_id: int) -> MemoryRecord:
-        row = self.connection.execute("SELECT * FROM memory WHERE id = ?", (record_id,)).fetchone()
+        with self._lock:
+            row = self.connection.execute(
+                "SELECT * FROM memory WHERE id = ?", (record_id,)
+            ).fetchone()
         if row is None:
             raise KeyError(record_id)
         return self._to_record(row)
@@ -74,39 +81,54 @@ class MemoryStore:
         current = self.get(record_id)
         if current.immutable:
             raise ValueError("immutable memory records cannot be modified")
-        self.connection.execute("UPDATE memory SET content = ? WHERE id = ?", (content, record_id))
-        self.connection.commit()
+        with self._lock:
+            self.connection.execute(
+                "UPDATE memory SET content = ? WHERE id = ?", (content, record_id)
+            )
+            self.connection.commit()
 
     def search(self, query: str, limit: int = 10) -> list[MemoryCandidate]:
         tokens = re.findall(r"\w+", query, flags=re.UNICODE)
         if not tokens or limit <= 0:
             return []
         match_query = " OR ".join(f'"{token}"' for token in tokens)
-        rows = self.connection.execute(
-            """SELECT m.*, bm25(memory_fts) AS score FROM memory_fts
-               JOIN memory m ON m.id = memory_fts.rowid WHERE memory_fts MATCH ?
-               ORDER BY score LIMIT ?""",
-            (match_query, limit),
-        ).fetchall()
+        with self._lock:
+            rows = self.connection.execute(
+                """SELECT m.*, bm25(memory_fts) AS score FROM memory_fts
+                   JOIN memory m ON m.id = memory_fts.rowid WHERE memory_fts MATCH ?
+                   ORDER BY score LIMIT ?""",
+                (match_query, limit),
+            ).fetchall()
         return [
             MemoryCandidate(record=self._to_record(row), score=float(row["score"]))
             for row in rows
         ]
 
     def recent(self, run_id: str, limit: int = 20) -> list[MemoryRecord]:
-        rows = self.connection.execute(
-            "SELECT * FROM memory WHERE run_id = ? ORDER BY id DESC LIMIT ?", (run_id, limit)
-        ).fetchall()
+        with self._lock:
+            rows = self.connection.execute(
+                "SELECT * FROM memory WHERE run_id = ? ORDER BY id DESC LIMIT ?",
+                (run_id, limit),
+            ).fetchall()
         return [self._to_record(row) for row in rows]
 
     def all(self, run_id: str | None = None) -> list[MemoryRecord]:
-        if run_id is None:
-            rows = self.connection.execute("SELECT * FROM memory ORDER BY id").fetchall()
-        else:
-            rows = self.connection.execute(
-                "SELECT * FROM memory WHERE run_id = ? ORDER BY id", (run_id,)
-            ).fetchall()
+        with self._lock:
+            if run_id is None:
+                rows = self.connection.execute("SELECT * FROM memory ORDER BY id").fetchall()
+            else:
+                rows = self.connection.execute(
+                    "SELECT * FROM memory WHERE run_id = ? ORDER BY id", (run_id,)
+                ).fetchall()
         return [self._to_record(row) for row in rows]
+
+    def counts(self, run_id: str) -> dict[str, int]:
+        with self._lock:
+            rows = self.connection.execute(
+                "SELECT kind, COUNT(*) AS total FROM memory WHERE run_id = ? GROUP BY kind",
+                (run_id,),
+            ).fetchall()
+        return {str(row["kind"]): int(row["total"]) for row in rows}
 
     @staticmethod
     def _to_record(row: sqlite3.Row) -> MemoryRecord:
@@ -119,7 +141,8 @@ class MemoryStore:
         )
 
     def close(self) -> None:
-        self.connection.close()
+        with self._lock:
+            self.connection.close()
 
 
 class EventLog:

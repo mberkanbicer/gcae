@@ -13,9 +13,9 @@ def now_utc() -> datetime:
 
 class Action(StrEnum):
     EXECUTE_TOOL = "execute_tool"
-    CONTINUE = "continue"
+    COMPLETE_SEMANTIC_STEP = "complete_semantic_step"
     REPLAN = "replan"
-    FINISH = "finish"
+    FINISH_CANDIDATE = "finish_candidate"
     ASK_USER = "ask_user"
 
 
@@ -40,7 +40,7 @@ class PlanStep(BaseModel):
     expected_result: str = ""
     intended_scope: list[str] = Field(default_factory=list)
     validation_requirements: list[str] = Field(default_factory=list)
-    status: Literal["pending", "accepted"] = "pending"
+    status: Literal["pending", "active", "completed", "failed", "skipped"] = "pending"
 
 
 class InitialPlan(BaseModel):
@@ -75,7 +75,26 @@ class ToolResult(BaseModel):
     output: str = ""
     error: str | None = None
     exit_code: int | None = None
+    duration_ms: float | None = None
+    artifact: str | None = None
     changed_files: list[str] = Field(default_factory=list)
+
+
+class Observation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    tool: str
+    summary: str
+    artifact: str | None = None
+    created_at: datetime = Field(default_factory=now_utc)
+
+
+class WorkingMemory(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    hypotheses: list[str] = Field(default_factory=list)
+    active_files: list[str] = Field(default_factory=list)
+    blocker: str | None = None
+    findings: list[str] = Field(default_factory=list)
+    pending_validations: list[str] = Field(default_factory=list)
 
 
 class Decision(BaseModel):
@@ -92,11 +111,13 @@ class ValidationResult(BaseModel):
     passed: bool
     command_results: list[ToolResult] = Field(default_factory=list)
     diff_check_passed: bool = True
+    diff_stat: str = ""
     changed_files: list[str] = Field(default_factory=list)
     new_files: list[str] = Field(default_factory=list)
     deleted_files: list[str] = Field(default_factory=list)
     dependency_changes: list[str] = Field(default_factory=list)
     scope_violations: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
     details: list[str] = Field(default_factory=list)
 
 
@@ -192,9 +213,13 @@ class AgentState(BaseModel):
     phase: RunPhase = RunPhase.ANALYZE
     iteration: int = 0
     accepted_steps: int = 0
+    next_step_number: int = 1
     status: str = "running"
     latest_user_instruction: str | None = None
     latest_observations: list[str] = Field(default_factory=list)
+    working_memory: WorkingMemory = Field(default_factory=WorkingMemory)
+    pending_question: str | None = None
+    step_tool_calls: int = 0
     latest_validation: ValidationResult | None = None
     last_verification: VerificationReport | None = None
     merge: MergeRecord | None = None

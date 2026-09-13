@@ -4,7 +4,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from .memory import MemoryStore
-from .models import AgentState, MemoryRecord, SemanticStep, ValidationResult
+from .models import AgentState, MemoryRecord, SemanticStep, ValidationResult, WorkingMemory
 
 
 def estimate_tokens(text: str) -> int:
@@ -32,6 +32,9 @@ class ContextBuilder:
         current_diff: str = "",
         active_files: Sequence[str] = (),
         observations: Sequence[str] = (),
+        working: WorkingMemory | None = None,
+        step_tool_calls: int = 0,
+        max_tool_calls: int = 0,
     ) -> Context:
         pinned = [
             record
@@ -55,6 +58,8 @@ class ContextBuilder:
             f"Current goal: {step.goal if step else 'none'}",
             f"Latest user instruction: {state.latest_user_instruction or 'none'}",
         ]
+        if max_tool_calls:
+            header.append(f"Step tool calls: {step_tool_calls}/{max_tool_calls}")
         pinned_ids = {
             record.id for record in pinned if record.id is not None
         }
@@ -69,6 +74,21 @@ class ContextBuilder:
         ]
         if active_files:
             optional_lines.append(f"Active files: {', '.join(active_files)}")
+        if working is not None:
+            working_lines = []
+            if working.active_files:
+                working_lines.append(f"Working active files: {', '.join(working.active_files)}")
+            if working.blocker:
+                working_lines.append(f"Working blocker: {working.blocker}")
+            if working.hypotheses:
+                working_lines.append(f"Working hypotheses: {', '.join(working.hypotheses)}")
+            if working.findings:
+                working_lines.append(f"Working findings: {' | '.join(working.findings)}")
+            if working.pending_validations:
+                working_lines.append(
+                    f"Working pending validations: {', '.join(working.pending_validations)}"
+                )
+            optional_lines.extend(working_lines)
         if current_diff:
             optional_lines.append(f"Current diff:\n{current_diff}")
         if validation is not None:
@@ -80,6 +100,8 @@ class ContextBuilder:
                     f"Validation deleted files: {', '.join(validation.deleted_files)}",
                     f"Validation dependency changes: {', '.join(validation.dependency_changes)}",
                     f"Validation scope violations: {', '.join(validation.scope_violations)}",
+                    f"Validation warnings: {', '.join(validation.warnings)}",
+                    f"Validation diff stat: {validation.diff_stat}",
                     f"Validation details: {', '.join(validation.details)}",
                 ]
             )

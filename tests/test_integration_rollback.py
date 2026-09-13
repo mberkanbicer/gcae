@@ -32,6 +32,11 @@ def test_end_to_end_rollback_trajectory(tmp_path: Path) -> None:
                 },
             },
             {
+                "action": "complete_semantic_step",
+                "semantic_goal": "try implementation",
+                "reason_summary": "bad attempt done",
+            },
+            {
                 "action": "execute_tool",
                 "semantic_goal": "correct implementation",
                 "reason_summary": "correct second attempt",
@@ -40,7 +45,12 @@ def test_end_to_end_rollback_trajectory(tmp_path: Path) -> None:
                     "arguments": {"path": "result.txt", "content": "good"},
                 },
             },
-            {"action": "finish", "semantic_goal": "finish", "reason_summary": "verified"},
+            {
+                "action": "complete_semantic_step",
+                "semantic_goal": "correct implementation",
+                "reason_summary": "correct attempt done",
+            },
+            {"action": "finish_candidate", "semantic_goal": "finish", "reason_summary": "verified"},
         ]
     )
     observed_commits: list[str | None] = []

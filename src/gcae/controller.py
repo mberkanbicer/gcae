@@ -16,8 +16,10 @@ def build_decision_prompt(context: str, tool_names: Sequence[str]) -> str:
     return (
         "You are the controller of GCAE, a reversible coding runtime. "
         "Reply with exactly one JSON object and no other text.\n"
-        "Actions: execute_tool (set tool.name/tool.arguments), continue, replan, "
-        "finish, ask_user.\n"
+        "Actions: execute_tool (set tool.name/tool.arguments), complete_semantic_step (declare "
+        "the current semantic step finished), replan, finish_candidate, ask_user.\n"
+        "Call complete_semantic_step once the current semantic step has produced its change or "
+        "evidence; the runtime then validates and evaluates it.\n"
         f"Allowed tools:\n{tools}\n"
         f"Decision JSON schema: {schema}\n"
         f"Context:\n{context}"

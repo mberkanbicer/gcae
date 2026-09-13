@@ -4,12 +4,13 @@ from .models import AgentState, RunPhase, now_utc
 
 _ALLOWED: dict[RunPhase, set[RunPhase]] = {
     RunPhase.ANALYZE: {RunPhase.PLAN, RunPhase.FAILED},
-    RunPhase.PLAN: {RunPhase.EXECUTE, RunPhase.FAILED},
+    RunPhase.PLAN: {RunPhase.EXECUTE, RunPhase.ROLLBACK, RunPhase.FAILED},
     RunPhase.EXECUTE: {
         RunPhase.EXECUTE,
         RunPhase.PLAN,
         RunPhase.VALIDATE,
         RunPhase.VERIFY,
+        RunPhase.ROLLBACK,
         RunPhase.FAILED,
     },
     RunPhase.VALIDATE: {RunPhase.EVALUATE, RunPhase.ROLLBACK, RunPhase.FAILED},

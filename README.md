@@ -1,90 +1,72 @@
 # GCAE — Git-Checkpointed Adaptive Execution
 
-GCAE is a small, explicit Python runtime for reversible coding tasks. It uses one external Git worktree per run, immutable SQLite memory with FTS5 retrieval, deterministic validation, structured Pydantic decisions, and bounded replanning.
+GCAE is a lightweight, single-agent execution runtime for coding tasks. It plans a request, works
+in semantic steps inside one isolated Git worktree, validates each step deterministically,
+evaluates whether it advanced the objective, checkpoints accepted work, rolls back rejected work,
+keeps failure knowledge in SQLite, and verifies every success criterion before declaring
+completion. It runs headless or with an interactive TUI.
 
-## Install and run
+## Install
 
 ```bash
 python -m venv .venv
-.venv/bin/python -m pip install -e . pytest ruff mypy
-.venv/bin/python -m gcae --help
+.venv/bin/python -m pip install -e .
+.venv/bin/gcae --version
 ```
 
-Run against a committed repository (the source tree is never modified):
+## Run
 
 ```bash
-.venv/bin/python -m gcae run /path/to/repository "Add a feature" --runtime-dir ~/.local/state/gcae
+# interactive TUI on a terminal; verified work ends on branch gcae/<run-id>
+gcae run ~/src/project "Add a --dry-run flag to the importer" \
+  --criterion "command succeeds: pytest -q" \
+  --config ~/.config/gcae/config.toml
+
+# non-interactive: state JSON on stdout, logs on stderr
+gcae run ~/src/project "Add a --dry-run flag" --headless
+
+gcae resume ~/src/project <run-id>
+gcae list
+gcae inspect <run-id>
 ```
 
-Use deterministic completion criteria when possible:
+The target repository must be clean and committed. GCAE never modifies your working tree; a dirty
+repository is refused. After a successful run it asks whether to merge the verified branch
+(`--merge` / `--no-merge`), records the pre-merge commit, and `gcae undo` reverses a merge. See
+[`docs/CLI.md`](docs/CLI.md).
+
+## Configuration
+
+One small TOML file: provider (OpenRouter, Ollama, vLLM, LM Studio — any OpenAI-compatible
+endpoint), optional per-role models, planner/evaluator selection, context budget, step budgets and
+validation commands. See [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) and
+[`config.example.toml`](config.example.toml).
 
 ```bash
-.venv/bin/python -m gcae run /path/to/repository "Add a feature" \
-  --criterion "file exists: src/example.py" \
-  --criterion "command succeeds: pytest -q"
+cp config.example.toml ~/.config/gcae/config.toml   # then edit; never commit API keys
 ```
 
-See `config.example.toml` and `docs/` for the implemented contracts. `context_limit` is the
-token budget used when the runtime reconstructs controller context (and the request's maximum
-output tokens for the HTTP provider). The evaluator defaults to deterministic validation rules;
-`[evaluator] kind = "llm"` asks the configured model to evaluate each step instead.
+## Docs
 
-Resume an interrupted run (waiting for user input or interrupted mid-step):
+| Topic | File |
+| --- | --- |
+| Architecture, semantic-step loop | `docs/ARCHITECTURE.md` |
+| Phases, actions, run status | `docs/STATE_MACHINE.md` |
+| Worktrees, checkpoints, merge/undo | `docs/GIT_EXECUTION.md` |
+| Memory, working memory, context budgeting | `docs/MEMORY_CONTEXT.md` |
+| Tools, sandboxing, command guardrails | `docs/TOOLS.md` |
+| Validation, evaluation, replanning | `docs/ARCHITECTURE.md`, `docs/WORKSPACE_HYGIENE.md` |
+| Providers and role models | `docs/PROVIDERS.md` |
+| CLI reference | `docs/CLI.md` |
+| TUI | `docs/TUI.md` |
+| Configuration reference | `docs/CONFIGURATION.md` |
+| Audit of the pre-takeover code | `docs/IMPLEMENTATION_AUDIT.md` |
+| Test architecture | `docs/TEST_PLAN.md` |
+
+## Checks
 
 ```bash
-.venv/bin/python -m gcae resume /path/to/repository <run-id> --runtime-dir ~/.local/state/gcae
+.venv/bin/pytest -q        # includes the mandatory rollback, context-budget and TUI tests
+.venv/bin/ruff check .
+.venv/bin/mypy src/gcae
 ```
-
-Each run prints the final `AgentState` as JSON on stdout and a short summary on stderr. The
-verified branch `gcae/<run-id>` and its worktree are left in place for inspection; the runtime
-never merges them on its own.
-
-After a successful run, the CLI asks `merge gcae/<run-id> into the current branch? [y/N]` when
-stdin is interactive. Use `--merge` to merge without asking or `--no-merge` to never merge. You can
-also merge later, without rerunning, using the recorded run state:
-
-```bash
-.venv/bin/python -m gcae merge /path/to/repository <run-id> --runtime-dir ~/.local/state/gcae
-```
-
-The merge is recorded in `state.json` and is reversible:
-
-```bash
-.venv/bin/python -m gcae undo /path/to/repository <run-id> --runtime-dir ~/.local/state/gcae
-```
-
-A merge only happens when the source repository is clean; `ff-only` is preferred, otherwise a
-no-ff merge is attempted and aborted cleanly on conflicts. `gcae merge` additionally requires the
-run to be complete and the run branch to still point at the verified commit. `undo` resets the
-source branch to the recorded pre-merge commit and refuses if the repository is dirty or HEAD has
-moved since the merge.
-
-## Provider examples
-
-Local Ollama (OpenAI-compatible endpoint):
-
-```toml
-[provider]
-kind = "http"
-base_url = "http://localhost:11434/v1"
-model = "llama3.2"
-timeout = 60
-context_limit = 8192
-```
-
-OpenRouter:
-
-```toml
-[provider]
-kind = "http"  # "openrouter" is accepted as an alias for the same generic endpoint
-base_url = "https://openrouter.ai/api/v1"
-model = "openai/gpt-4o-mini"
-api_key_env = "OPENROUTER_API_KEY"
-timeout = 60
-context_limit = 8192
-```
-
-A minimal offline run uses the deterministic fake provider and requires a clean, committed Git repository.
-
-Unknown natural-language criteria are rejected by the final verifier rather than treated as
-successful. Use a deterministic criterion or extend the verifier explicitly.

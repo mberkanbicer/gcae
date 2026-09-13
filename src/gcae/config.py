@@ -24,11 +24,40 @@ class ProviderConfig(BaseModel):
     generation: GenerationConfig = Field(default_factory=GenerationConfig)
 
 
+class ModelOverride(BaseModel):
+    """Optional per-role overrides on top of the default provider."""
+
+    base_url: str | None = None
+    model: str | None = None
+    api_key: str | None = None
+    api_key_env: str | None = None
+    timeout: float | None = None
+    context_limit: int | None = None
+
+    def resolved(self, base: ProviderConfig) -> ProviderConfig | None:
+        overrides = self.model_dump(exclude_none=True)
+        if not overrides:
+            return None
+        return base.model_copy(update=overrides)
+
+
+class ModelsConfig(BaseModel):
+    controller: ModelOverride = Field(default_factory=ModelOverride)
+    planner: ModelOverride = Field(default_factory=ModelOverride)
+    evaluator: ModelOverride = Field(default_factory=ModelOverride)
+    verifier: ModelOverride = Field(default_factory=ModelOverride)
+    escalation: ModelOverride = Field(default_factory=ModelOverride)
+
+
 class RuntimeConfig(BaseModel):
     state_dir: str = Field(default_factory=lambda: _default_state_dir())
     worktree_dir: str | None = None
     max_steps: int = 20
     command_timeout: int = 30
+    max_tool_calls_per_step: int = 8
+    stagnation_window: int = 3
+    repetition_limit: int = 2
+    scope_warning_files: int = 10
 
 
 class ValidationConfig(BaseModel):
@@ -39,9 +68,15 @@ class EvaluatorConfig(BaseModel):
     kind: str = "deterministic"
 
 
+class PlannerConfig(BaseModel):
+    kind: str = "auto"
+
+
 class Config(BaseModel):
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     provider: ProviderConfig = Field(default_factory=ProviderConfig)
+    models: ModelsConfig = Field(default_factory=ModelsConfig)
+    planner: PlannerConfig = Field(default_factory=PlannerConfig)
     evaluator: EvaluatorConfig = Field(default_factory=EvaluatorConfig)
     validation: ValidationConfig = Field(default_factory=ValidationConfig)
 

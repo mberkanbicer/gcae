@@ -128,6 +128,9 @@ class GitRepository:
     def diff(self) -> str:
         return self._run("diff", "--no-ext-diff", cwd=self._require_worktree())
 
+    def diff_stat(self) -> str:
+        return self._run("diff", "--stat", cwd=self._require_worktree())
+
     def diff_check(self) -> bool:
         return self._run("diff", "--check", cwd=self._require_worktree(), check=False) == ""
 

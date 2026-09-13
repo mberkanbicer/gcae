@@ -12,10 +12,10 @@
 | `test_phase6.py` | repetition, stagnation, hygiene detection |
 | `test_phase7.py` | OpenAI-compatible provider contract, controller prompt contract |
 | `test_phase8.py` | config loading, XDG state dir, provider/evaluator kind resolution, resume, CLI merge/undo guards |
-| `test_verifier.py` | deterministic criteria, fail-closed unsupported criteria |
-| `test_semantic_steps.py` | tool calls batched inside a step, step tool budget, read-only steps, replan discards speculative work, `write_file`/`run_tests`, artifact externalization |
+| `test_verifier.py` | deterministic criteria, fail-closed unsupported criteria, hybrid judge (evidence required, provider failures fail closed, worktree samples reach the judge) |
+| `test_semantic_steps.py` | tool calls batched inside a step, step tool budget, read-only steps, repeated actions force evaluation, replan discards speculative work, `write_file`/`run_tests`, artifact externalization |
 | `test_control.py` | live event subscribers, pause until resume, stop, immutable user override, queued instructions drained while paused |
-| `test_routing.py` | role-model resolution, planner kinds, LLM planner merge rules, escalation after repeated failures, evaluator failure handling |
+| `test_routing.py` | role-model resolution, planner kinds, verifier kinds, LLM planner merge rules, escalation after repeated failures, hybrid verification end to end, evaluator failure handling |
 | `test_context_budget.py` | pinned data survives trimming, low-priority records dropped but retrievable, long-run records intact |
 | `test_cli_commands.py` | `list` and `inspect` output and ordering |
 | `test_tui.py` | dashboard rendering and completion, pause/resume/stop keys, override modal, diff modal, event-driven panels |

@@ -21,6 +21,7 @@ from .models import (
     Event,
     MemoryCandidate,
     MemoryRecord,
+    Observation,
     PlanStep,
     RunPhase,
     SemanticStep,
@@ -92,6 +93,7 @@ class Runtime:
         context_limit: int = 8192,
         evaluator: Evaluator | None = None,
         planner: PlannerLike | None = None,
+        verifier: FinalVerifier | None = None,
         max_tool_calls_per_step: int = 8,
         stagnation_window: int = 3,
         repetition_limit: int = 2,
@@ -121,10 +123,11 @@ class Runtime:
         self.evaluator = evaluator or DeterministicEvaluator()
         self.planner = planner or Planner()
         self.max_tool_calls_per_step = max_tool_calls_per_step
+        self.repetition_limit = repetition_limit
         self.scope_warning_files = scope_warning_files
         self.control = control
         self.machine = StateMachine()
-        self.verifier = FinalVerifier()
+        self.verifier = verifier or FinalVerifier()
         self.state: AgentState | None = None
         self.repo: GitRepository | None = None
         self.memory: MemoryStore | None = None
@@ -277,6 +280,7 @@ class Runtime:
             if plan.status == "pending":
                 plan.status = "active"
                 self.state.step_tool_calls = 0
+                self.repetition = RepetitionGuard(self.repetition_limit)
                 self.state.working_memory.pending_validations = list(
                     plan.validation_requirements
                 )
@@ -320,8 +324,14 @@ class Runtime:
                 raise RuntimeError("execute_tool decision omitted tool")
 
             if self.repetition.seen(decision.tool.name, decision.tool.arguments):
-                if self._replan(plan, "repeated identical tool action", failed=True):
-                    return self._fail("execution stagnated")
+                self._event(
+                    "repetition_detected",
+                    RunPhase.EXECUTE,
+                    step_id=plan.id,
+                    payload={"tool": decision.tool.name},
+                )
+                if self._evaluate_step(plan, tools):
+                    return self.state
                 continue
 
             result = tools.execute(decision.tool)
@@ -499,6 +509,7 @@ class Runtime:
         self.state.plan = [item for item in self.state.plan if item.id != plan.id]
         self.state.plan.extend(next_step(self.state, reason))
         self._reset_working_memory()
+        self.repetition = RepetitionGuard(self.repetition_limit)
         self.state.working_memory.hypotheses.append(f"retry after: {reason}")
         self._transition(RunPhase.PLAN)
         self._event("replan", RunPhase.PLAN, step_id=plan.id, payload={"reason": reason})
@@ -516,7 +527,7 @@ class Runtime:
         self.repo.clean_ignored_artifacts()
         self._transition(RunPhase.VERIFY)
         self._event("verification_started", RunPhase.VERIFY)
-        report = self.verifier.verify(self.state)
+        report = self.verifier.verify(self.state, diff=self.repo.diff())
         self.state.last_verification = report
         self._event(
             "verification_completed",
@@ -592,16 +603,21 @@ class Runtime:
 
     def _observe(self, result: ToolResult, reason: str) -> None:
         assert self.state is not None
-        observation = result.output.strip() or result.error or reason
-        self._remember("observation", observation)
-        self.state.latest_observations.append(observation)
+        observation = Observation(
+            tool=result.tool,
+            summary=(result.output.strip() or result.error or reason)[:500],
+            artifact=result.artifact,
+        )
+        text = observation.summary
+        self._remember("observation", text)
+        self.state.latest_observations.append(text)
         self.state.latest_observations = self.state.latest_observations[-20:]
         working = self.state.working_memory
         if not result.success and result.error:
             working.blocker = result.error
         else:
             working.blocker = None
-        working.findings.append(observation[:500])
+        working.findings.append(f"{observation.tool}: {text}"[:500])
         working.findings = working.findings[-8:]
         for path in result.changed_files:
             if path not in working.active_files:

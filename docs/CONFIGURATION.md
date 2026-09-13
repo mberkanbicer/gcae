@@ -41,6 +41,9 @@ kind = "auto"                       # auto | llm | deterministic
 [evaluator]
 kind = "deterministic"              # deterministic | llm
 
+[verifier]
+kind = "deterministic"              # deterministic | hybrid
+
 [validation]
 commands = ["pytest -q"]            # run before every semantic evaluation
 ```
@@ -52,9 +55,15 @@ commands = ["pytest -q"]            # run before every semantic evaluation
   user's; user-provided entries are never overwritten and always stored as immutable memory.
 - `evaluator.kind = "llm"` sends the reconstructed context and deterministic validation evidence
   to the configured model; it can promote failure memories before a rollback.
+- `verifier.kind = "hybrid"` keeps all deterministic checks and additionally asks the configured
+  verifier model to judge criteria that have no deterministic form. The judge receives the
+  objective, accepted commit, changed files, validation command results, a truncated diff and
+  bounded worktree file samples; it must return `{passed, evidence}` and any provider error, empty
+  evidence or `passed = false` fails verification. `deterministic` (the default) fails such
+  criteria closed instead of guessing.
 - `models.<role>` overrides create a dedicated provider for that role without changing the base
   provider. `models.escalation` is used for controller decisions after two consecutive rejected
-  steps, and is only created when configured.
+  steps, and is only created when configured. `models.verifier` is used by hybrid verification.
 - `context_limit` is a token budget; the runtime estimates tokens conservatively
   (`(characters + 3) // 4`). Pinned information may exceed the budget rather than be dropped.
 - `validation.commands` are executed with the isolated worktree as cwd and count as validation

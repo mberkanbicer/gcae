@@ -27,8 +27,12 @@ confidence.
   user criteria and constraints are merged afterwards and never overwritten.
 - `evaluator.kind = "llm"` asks the model for an `Evaluation` with the validation evidence and
   reconstructed context, and can promote failure memories before a rollback.
-- The final verifier is deterministic and fail-closed; criteria that cannot be checked
-  deterministically fail verification rather than being guessed.
+- `verifier.kind = "hybrid"` keeps deterministic verification for checkable criteria and asks the
+  verifier model for criteria that have no deterministic check. The judge sees the objective,
+  accepted commit, changed files, validation evidence, a truncated diff and bounded worktree file
+  samples; it must return structured `{passed, evidence}`. Provider errors, invalid output, empty
+  evidence or `passed = false` all fail verification — semantic judgement can never fabricate
+  completion.
 
 ## Repair
 

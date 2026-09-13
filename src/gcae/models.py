@@ -168,6 +168,14 @@ class CriterionResult(BaseModel):
     evidence: str = ""
 
 
+class CriterionJudgement(BaseModel):
+    """Structured verdict from the model judge for a non-deterministic criterion."""
+
+    model_config = ConfigDict(extra="forbid")
+    passed: bool
+    evidence: str = ""
+
+
 class VerificationReport(BaseModel):
     model_config = ConfigDict(extra="forbid")
     passed: bool

@@ -3,14 +3,22 @@ from pathlib import Path
 
 import pytest
 
-from gcae.cli import _planner, _providers
-from gcae.config import Config, ModelOverride, ModelsConfig, PlannerConfig, ProviderConfig
+from gcae.cli import _planner, _providers, _verifier
+from gcae.config import (
+    Config,
+    ModelOverride,
+    ModelsConfig,
+    PlannerConfig,
+    ProviderConfig,
+    VerifierConfig,
+)
 from gcae.evaluator import LLMEvaluator
 from gcae.http_provider import OpenAICompatibleProvider
 from gcae.models import Evaluation, EvaluationInput
 from gcae.planner import LLMPlanner, Planner
 from gcae.providers import FakeProvider
 from gcae.runtime import Runtime
+from gcae.verifier import FinalVerifier
 
 
 def init_repo(path: Path) -> None:
@@ -83,6 +91,14 @@ def test_planner_kind_resolution() -> None:
         _planner(Config(planner=PlannerConfig(kind="bogus")), provider)
 
 
+def test_verifier_kind_resolution() -> None:
+    provider = FakeProvider([])
+    assert _verifier(Config(), provider).judge is None
+    assert _verifier(Config(verifier=VerifierConfig(kind="hybrid")), provider).judge is provider
+    with pytest.raises(ValueError):
+        _verifier(Config(verifier=VerifierConfig(kind="bogus")), provider)
+
+
 def test_llm_planner_merges_user_criteria(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source.mkdir()
@@ -153,6 +169,32 @@ def test_escalation_after_repeated_failures(tmp_path: Path) -> None:
     assert (worktree / "c.txt").exists()
     assert not (worktree / "a.txt").exists()
     assert not (worktree / "b.txt").exists()
+
+
+def test_hybrid_verification_completes_with_natural_language_criterion(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    init_repo(source)
+    provider = FakeProvider(
+        [
+            create("done.txt", "ok"),
+            step("complete_semantic_step"),
+        ]
+    )
+    judge = FakeProvider(
+        [{"passed": True, "evidence": "done.txt was created in the worktree"}]
+    )
+    runtime = Runtime(
+        source,
+        tmp_path / "runtime",
+        provider=provider,
+        verifier=FinalVerifier(judge),
+    )
+    runtime.start("create done.txt", success_criteria=["the requested file was created"])
+    result = runtime.run()
+    assert result.status == "complete"
+    assert result.last_verification is not None
+    assert result.last_verification.passed
 
 
 def test_evaluator_output_failure_is_reported(tmp_path: Path) -> None:

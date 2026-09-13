@@ -155,6 +155,23 @@ def test_write_file_overwrites_and_run_tests_executes(tmp_path: Path) -> None:
     assert "$ test -f a.txt" in result.output
 
 
+def test_repeated_tool_action_forces_evaluation(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    init_repo(source)
+    write = tool("execute_tool", "write_file", path="note.txt", content="ok")
+    provider = FakeProvider([write, write, write])
+    runtime = Runtime(source, tmp_path / "runtime", provider=provider, repetition_limit=2)
+    events: list[str] = []
+    runtime.subscribe(lambda event: events.append(event.event_type))
+    runtime.start("create note.txt", success_criteria=["file contains: note.txt :: ok"])
+    result = runtime.run()
+    assert result.status == "complete"
+    assert result.accepted_steps == 1
+    assert (Path(result.worktree) / "note.txt").read_text() == "ok"
+    assert "repetition_detected" in events
+
+
 def test_large_output_is_stored_as_artifact(tmp_path: Path) -> None:
     worktree = tmp_path / "worktree"
     worktree.mkdir()

@@ -15,6 +15,7 @@ from .persistence import StateStore
 from .planner import LLMPlanner, Planner
 from .providers import FakeProvider, Provider
 from .runtime import Runtime, RuntimeControl
+from .verifier import FinalVerifier
 
 ROLES = ("controller", "planner", "evaluator", "verifier", "escalation")
 
@@ -115,6 +116,15 @@ def _evaluator(config: Config, provider: Provider) -> Evaluator:
     if kind == "llm":
         return LLMEvaluator(provider)
     raise ValueError(f"unsupported evaluator kind: {config.evaluator.kind!r}")
+
+
+def _verifier(config: Config, provider: Provider) -> FinalVerifier:
+    kind = config.verifier.kind.lower()
+    if kind == "deterministic":
+        return FinalVerifier()
+    if kind == "hybrid":
+        return FinalVerifier(provider)
+    raise ValueError(f"unsupported verifier kind: {config.verifier.kind!r}")
 
 
 def _planner(config: Config, provider: Provider) -> Planner | LLMPlanner:
@@ -328,6 +338,7 @@ def _build_runtime(args: argparse.Namespace, config: Config, runtime_dir: Path) 
         context_limit=config.provider.context_limit,
         evaluator=_evaluator(config, role_providers.get("evaluator", base_provider)),
         planner=_planner(config, role_providers.get("planner", base_provider)),
+        verifier=_verifier(config, role_providers.get("verifier", base_provider)),
         max_tool_calls_per_step=config.runtime.max_tool_calls_per_step,
         stagnation_window=config.runtime.stagnation_window,
         repetition_limit=config.runtime.repetition_limit,

@@ -68,6 +68,10 @@ class EvaluatorConfig(BaseModel):
     kind: str = "deterministic"
 
 
+class VerifierConfig(BaseModel):
+    kind: str = "deterministic"  # deterministic | hybrid
+
+
 class PlannerConfig(BaseModel):
     kind: str = "auto"
 
@@ -78,6 +82,7 @@ class Config(BaseModel):
     models: ModelsConfig = Field(default_factory=ModelsConfig)
     planner: PlannerConfig = Field(default_factory=PlannerConfig)
     evaluator: EvaluatorConfig = Field(default_factory=EvaluatorConfig)
+    verifier: VerifierConfig = Field(default_factory=VerifierConfig)
     validation: ValidationConfig = Field(default_factory=ValidationConfig)
 
     @property

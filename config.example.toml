@@ -37,5 +37,10 @@ kind = "auto"
 # "deterministic" uses validation rules; "llm" asks the configured model.
 kind = "deterministic"
 
+[verifier]
+# "deterministic" fails non-checkable criteria; "hybrid" lets the configured
+# verifier model judge them from evidence (still fail-closed).
+kind = "deterministic"
+
 [validation]
 commands = []

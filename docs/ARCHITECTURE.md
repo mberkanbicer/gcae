@@ -66,7 +66,9 @@ load state ──► current plan step
 A semantic step may contain several tool calls. Deterministic validation and evaluation run only
 when the controller declares the step complete or `max_tool_calls_per_step` is exhausted, so read
 operations never create checkpoints. Each step has a finite tool budget; the outer loop is bounded
-by `max_steps`.
+by `max_steps`. Repeated identical tool calls within a step force evaluation of the current
+candidate (accepted when valid, rolled back by the evaluator otherwise) instead of destroying work
+that may already be correct.
 
 ## Replanning and safeguards
 
@@ -77,10 +79,15 @@ controller decisions to `models.escalation` when configured.
 
 ## Final verification and completion
 
-`finish_candidate` enters a separate deterministic verifier that checks every success criterion and
-runs a hygiene pass. If verification passes while the worktree still holds uncommitted changes, the
-runtime commits `gcae: verified final state` first, so `accepted_commit` always equals the verified
-tree. Unsupported criteria fail closed.
+`finish_candidate` enters a separate verifier that checks every success criterion and runs a
+hygiene pass. Checkable criteria (`file exists`, `file contains`, `command succeeds`) are verified
+deterministically. With `verifier.kind = "hybrid"` the configured verifier model may judge criteria
+that have no deterministic form, using the objective, changed files, validation evidence, a
+truncated diff and bounded worktree samples; it must return structured evidence, and any error,
+empty evidence or negative verdict fails verification. The default (`deterministic`) fails
+unsupported criteria closed. If verification passes while the worktree still holds uncommitted
+changes, the runtime commits `gcae: verified final state` first, so `accepted_commit` always equals
+the verified tree.
 
 ## Events and UI
 

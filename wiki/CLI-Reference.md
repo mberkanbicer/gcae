@@ -52,6 +52,25 @@ Objective, plan and step status, verification per criterion, merge record, pendi
 recovery diagnosis (root cause and correction) and any `degraded:` subsystems. `--json` prints the
 persisted state verbatim.
 
+## `gcae prune`
+
+Deletes the oldest run records from the state directory, keeping the newest `--keep` (default 10).
+The whole run directory goes (state and events); repositories and worktrees are never touched.
+
+```
+gcae prune --dry-run    # list what would be deleted
+gcae prune --keep 20    # keep the 20 newest, delete the rest
+gcae prune --keep 0     # delete every run record
+```
+
+Three guards keep pruning from breaking anything:
+
+- a run whose repository lock is held is never deleted — that is a live run in another process,
+  however old its record is;
+- a record whose merge is still recorded is kept — it holds the pre-merge/merge commit pair that
+  `gcae undo` reverses from, and git has it nowhere else; `--force` deletes it anyway;
+- unreadable records are reported and skipped, never silently kept or deleted.
+
 ## `gcae merge` / `gcae undo`
 
 ```

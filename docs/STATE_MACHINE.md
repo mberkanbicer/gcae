@@ -47,11 +47,14 @@ instruction (`i` in the dashboard, `gcae resume` in the CLI) re-plans from the a
 
 ## Degraded mode
 
-The runtime's own bookkeeping is not allowed to kill a run. A failure to write `state.json`, append
-to `events.jsonl`, or record memory is reported (`runtime_degraded` event, an entry in
+Knowledge and history may be lost; the *record of committed state* may not. A failure to append to
+`events.jsonl` or to record memory is reported (`runtime_degraded` event, an entry in
 `state.degradations`, a WARNING, and a `degraded:` line in the CLI summary) and the run continues.
-Correctness is never degraded by this: validation, evaluation and verification all still have to
-pass, and the repository always holds the accepted commits.
+A failure to write `state.json` stops the run instead: a stale state file still looks resumable, and
+`gcae resume` would then continue from a checkpoint the branch has already moved past. The run fails
+with `run state could not be written: …`, the accepted commits stay on the branch, and the event log
+still explains what happened. Correctness is never degraded in either case: validation, evaluation
+and verification all still have to pass.
 
 ## Recovery triggers
 

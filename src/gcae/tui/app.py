@@ -295,6 +295,7 @@ class GcaeApp(App[None]):
                 provider=self._provider_label(),
                 model=self._model_label(),
                 paused=self.control.paused,
+                degraded=bool(ui.degradations),
             )
         elif name == "objective":
             self.query_one(ObjectivePanel).render_state(state, ui)

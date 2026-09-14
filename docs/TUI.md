@@ -90,6 +90,16 @@ Differences from a plain log viewer:
 Short terminals (< 40 rows) reduce the plan and validation row budgets; below 20 rows the timeline
 is hidden. The status bar, rules and shortcut footer stay pinned at every size.
 
+## Failure visibility
+
+The dashboard and the CLI must tell the same story. The timeline carries the failures that used to
+appear only in the raw log panel: `model_failover`, `model_escalated`, `runtime_degraded`,
+`success_criteria_adopted`, `rollback_failed`, `repeated_failure`, and the merge events
+(`conflict_detected`, `conflict_resolved`, `conflict_unresolved`, `merge_completed`). A degraded run
+keeps a `DEGRADED` flag in the status bar naming the last lost subsystem, because a degradation is a
+condition rather than a moment, and only a state-file failure (which stops the run) is not shown
+there — it ends the run with its reason in the banner.
+
 ## Screens
 
 | Key | Screen | Contents |

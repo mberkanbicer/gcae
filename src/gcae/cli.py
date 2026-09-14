@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
-from .config import Config, ProviderConfig, load_config
+from .config import Config, ProviderConfig, discover_config, load_config
 from .evaluator import DeterministicEvaluator, Evaluator, LLMEvaluator
 from .git import GitError, GitRepository, MergeConflict, NothingToMerge
 from .http_provider import OpenAICompatibleProvider
@@ -17,6 +17,7 @@ from .persistence import StateStore
 from .planner import LLMPlanner, Planner
 from .providers import FakeProvider, Provider
 from .runtime import (
+    RunLock,
     Runtime,
     RuntimeControl,
     cleanup_idle_worktree,
@@ -266,12 +267,13 @@ def _apply_merge(
     allow_unverified: bool = False,
     cleanup: bool = True,
 ) -> MergeRecord:
-    record = merge_verified_run(
-        repo,
-        state,
-        persist=lambda: StateStore(state_path).save(state),
-        allow_unverified=allow_unverified,
-    )
+    with RunLock(repo.runtime_dir, Path(state.source_repo), "merge"):
+        record = merge_verified_run(
+            repo,
+            state,
+            persist=lambda: StateStore(state_path).save(state),
+            allow_unverified=allow_unverified,
+        )
     print(
         f"gcae: merged {record.branch} into {record.target_branch} "
         f"({record.pre_merge_commit[:12]} -> {record.merge_commit[:12]})",
@@ -294,10 +296,11 @@ def _undo(repository: Path, run_id: str, runtime_dir: Path) -> None:
     merge = state.merge
     if merge is None:
         raise RuntimeError(f"run {run_id} has no recorded merge to undo")
-    repo = GitRepository(state.source_repo, Path(runtime_dir).expanduser())
-    repo.undo_merge(merge.pre_merge_commit, merge.merge_commit)
-    state.merge = None
-    StateStore(state_path).save(state)
+    with RunLock(runtime_dir, Path(state.source_repo), f"undo {run_id}"):
+        repo = GitRepository(state.source_repo, Path(runtime_dir).expanduser())
+        repo.undo_merge(merge.pre_merge_commit, merge.merge_commit)
+        state.merge = None
+        StateStore(state_path).save(state)
     print(
         f"gcae: reversed merge of {merge.branch} into {merge.target_branch}; "
         f"HEAD is back at {merge.pre_merge_commit[:12]}",
@@ -522,7 +525,18 @@ def main(argv: list[str] | None = None) -> None:
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
     logging.getLogger("gcae").setLevel(logging.INFO)
     try:
-        config = load_config(args.config)
+        chosen = Path(args.config).expanduser() if args.config else discover_config()
+        config = load_config(chosen)
+        if chosen is not None:
+            print(f"gcae: config {chosen}", file=sys.stderr)
+        elif config.provider.kind == "fake" and args.command in {"run", "resume"}:
+            print(
+                "gcae: no config file found (looked for ./config.toml and "
+                "~/.config/gcae/config.toml) and the built-in default provider is the fake one, "
+                "so the run will fail on its first model call — pass --config <file> or set "
+                "GCAE_CONFIG",
+                file=sys.stderr,
+            )
         runtime_dir = (args.runtime_dir or config.state_dir).expanduser()
         if args.command == "undo":
             _undo(args.repository, args.run_id, runtime_dir)

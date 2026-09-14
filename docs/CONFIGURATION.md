@@ -3,6 +3,11 @@
 One TOML file, read with `tomllib`. Every field below is implemented; there are no speculative
 options. `config.example.toml` is the copy-ready template.
 
+**Which file?** Without `--config`, GCAE looks at `$GCAE_CONFIG`, then `./config.toml`, then
+`~/.config/gcae/config.toml`, and prints the one it used (`gcae: config config.toml`). If none of
+them exists the built-in defaults apply — including the *fake* provider, and `run`/`resume` say so
+rather than failing later with a confusing model error.
+
 ```toml
 [runtime]
 state_dir = "~/.local/state/gcae"   # memory.db, runs/, worktrees/

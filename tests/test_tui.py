@@ -1384,3 +1384,63 @@ def test_dashboard_hands_a_merge_conflict_to_the_agent(tmp_path: Path) -> None:
         await _asyncio.sleep(0.05)
 
     asyncio.run(scenario())
+
+
+def test_timeline_shows_failover_degradation_and_conflicts() -> None:
+    """Failures the CLI explains must also be visible in the dashboard, not only in logs."""
+    failover = formatters.timeline_entry(
+        "model_failover", {"role": "controller", "model": "qwen/qwen3-coder"}
+    )
+    degraded = formatters.timeline_entry(
+        "runtime_degraded", {"component": "memory store", "error": "database is locked"}
+    )
+    adopted = formatters.timeline_entry(
+        "success_criteria_adopted", {"criteria": ["file exists: out.txt"]}
+    )
+    rollback_failed = formatters.timeline_entry("rollback_failed", {"reason": "worktree is busy"})
+    repeated = formatters.timeline_entry(
+        "repeated_failure", {"signature": "scope violation", "count": 3}
+    )
+    conflict = formatters.timeline_entry("conflict_detected", {"files": ["a.py", "b.py"]})
+    resolved = formatters.timeline_entry("conflict_resolved", {})
+    merged = formatters.timeline_entry(
+        "merge_completed", {"target_branch": "main", "merge_commit": "a1b2c3d4e5f6"}
+    )
+
+    assert failover is not None and "controller" in failover[1] and "qwen" in failover[1]
+    assert degraded is not None and "memory store" in degraded[1] and "locked" in degraded[1]
+    assert adopted is not None and "criteria" in adopted[1]
+    assert rollback_failed is not None and "rollback failed" in rollback_failed[1]
+    assert repeated is not None and "3x" in repeated[1]
+    assert conflict is not None and "2 file(s)" in conflict[1]
+    assert resolved is not None and "re-verified" in resolved[1]
+    assert merged is not None and "main" in merged[1] and "a1b2c3d" in merged[1]
+
+
+def test_a_degraded_run_is_flagged_in_the_status_bar() -> None:
+    ui = UiState()
+    assert ui.degradations == []
+
+    changed = ui.apply(
+        Event(
+            run_id="abc123",
+            event_type="runtime_degraded",
+            phase=None,
+            timestamp=datetime.now(UTC),
+            payload={"component": "state file", "error": "state file failed: OSError"},
+        )
+    )
+    assert "status" in changed and "timeline" in changed
+    assert ui.degradations and ui.degradations[0].startswith("state file")
+
+    # a second failure of the same component does not duplicate the flag
+    ui.apply(
+        Event(
+            run_id="abc123",
+            event_type="runtime_degraded",
+            phase=None,
+            timestamp=datetime.now(UTC),
+            payload={"component": "state file", "error": "state file failed: OSError"},
+        )
+    )
+    assert len(ui.degradations) == 1

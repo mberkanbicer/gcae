@@ -77,6 +77,8 @@ class UiState:
     # which role the current provider call belongs to (controller, planner, evaluator…)
     provider_role: str = ""
     rollback: dict[str, Any] | None = None
+    # bookkeeping losses (state/memory/events): visible for the rest of the run, not just an event
+    degradations: list[str] = field(default_factory=list)
     rollback_at: datetime | None = None
     rollbacks: int = 0
     replans: int = 0
@@ -384,6 +386,21 @@ class UiState:
         if self.action is not None:
             self.action.state = "waiting"
         return {"activity", "metrics"}
+
+    def _on_runtime_degraded(self, event: Event, payload: dict[str, Any]) -> set[str]:
+        component = str(payload.get("component") or "runtime")
+        if not any(item.startswith(component) for item in self.degradations):
+            self.degradations.append(f"{component}: {payload.get('error') or 'failed'}")
+        return {"status", "timeline"}
+
+    def _on_model_failover(self, event: Event, payload: dict[str, Any]) -> set[str]:
+        self.action = ActionView(
+            label="failover",
+            lines=[f"{payload.get('role')} → {payload.get('model')}"],
+            state="waiting",
+            detail=str(payload.get("reason") or ""),
+        )
+        return {"activity", "status"}
 
     def _on_recovery_started(self, event: Event, payload: dict[str, Any]) -> set[str]:
         self.action = ActionView(

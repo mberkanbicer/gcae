@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 import sqlite3
@@ -10,7 +11,7 @@ from collections import deque
 from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 from .context import ContextBuilder, estimate_tokens
 from .controller import Controller
@@ -21,6 +22,7 @@ from .models import (
     Action,
     AgentState,
     Decision,
+    Evaluation,
     EvaluationInput,
     Event,
     MemoryCandidate,
@@ -156,6 +158,87 @@ def merge_verified_run(
     return record
 
 
+class UnresumableStateError(RuntimeError):
+    """The run's own state could not be written, so the run must stop.
+
+    Everything else the runtime owns degrades; state does not.  A run whose ``state.json`` is
+    stale still *looks* resumable, and ``gcae resume`` would continue from an older checkpoint
+    than the branch actually holds.  Stopping with the reason recorded is the honest answer:
+    accepted commits stay on the branch, and the event log explains what happened.
+    """
+
+
+class RunLock:
+    """One GCAE run per source repository, across processes.
+
+    Two runs sharing a repository would interleave their merges into the source branch.  The
+    lock file lives in the runtime directory (never in the repository), is held for the run,
+    and is released by the operating system if the process dies.  Re-entrant inside the
+    process so a resumed or re-started run does not fight its own predecessor.
+    """
+
+    _held: dict[str, int] = {}
+
+    def __init__(self, runtime_dir: Path, source_repo: Path, label: str = "gcae") -> None:
+        self.source_repo = source_repo
+        self.label = label
+        digest = hashlib.sha256(str(Path(source_repo).resolve()).encode()).hexdigest()[:16]
+        self.path = Path(runtime_dir) / "locks" / f"{digest}.lock"
+        self._handle: IO[str] | None = None
+        self._reentrant = False
+        self._key = str(self.path)
+
+    def acquire(self) -> None:
+        if RunLock._held.get(self._key):
+            RunLock._held[self._key] += 1
+            self._reentrant = True
+            return
+        try:
+            import fcntl
+        except ImportError:  # pragma: no cover - the runtime targets POSIX
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        handle = self.path.open("a+")
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            handle.seek(0)
+            held_by = handle.read().strip()
+            handle.close()
+            detail = f" ({held_by})" if held_by else ""
+            raise RuntimeError(
+                f"another GCAE run is already working on {self.source_repo}{detail} — wait for "
+                "it to finish before starting a second run on the same repository"
+            ) from exc
+        handle.seek(0)
+        handle.truncate()
+        handle.write(f"{self.label}\n")
+        handle.flush()
+        self._handle = handle
+        RunLock._held[self._key] = 1
+
+    def __enter__(self) -> RunLock:
+        self.acquire()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.release()
+
+    def release(self) -> None:
+        if self._reentrant:
+            RunLock._held[self._key] = max(0, RunLock._held.get(self._key, 1) - 1)
+            self._reentrant = False
+            return
+        if self._handle is None:
+            return
+        RunLock._held.pop(self._key, None)
+        try:
+            self._handle.close()  # closing the descriptor releases the flock
+        except OSError:
+            logger.debug("could not close the run lock", exc_info=True)
+        self._handle = None
+
+
 class RuntimeControl:
     """Thread-safe pause / stop / user-instruction channel shared with a UI."""
 
@@ -260,6 +343,7 @@ class Runtime:
         self.repeated_failure_limit = 3
         self._degrade_notified: dict[str, bool] = {}
         self._failed_over: set[str] = set()
+        self._run_lock: RunLock | None = None
         self.validator_commands = list(validator_commands or [])
         self.max_steps = max_steps
         self.command_timeout = command_timeout
@@ -324,6 +408,9 @@ class Runtime:
         run_id: str | None = None,
     ) -> AgentState:
         run_id = run_id or uuid.uuid4().hex[:12]
+        self.release_lock()
+        self._run_lock = RunLock(self.runtime_dir, self.source_repo, f"run {run_id}")
+        self._run_lock.acquire()
         self.repo = GitRepository(
             self.source_repo,
             self.runtime_dir,
@@ -429,6 +516,9 @@ class Runtime:
 
     def resume(self, run_id: str) -> AgentState:
         path = self.runtime_dir / "runs" / run_id
+        self.release_lock()
+        self._run_lock = RunLock(self.runtime_dir, self.source_repo, f"run {run_id}")
+        self._run_lock.acquire()
         self.state = StateStore(path / "state.json").load()
         if Path(self.state.source_repo).resolve() != self.source_repo:
             raise RuntimeError("resume source repository does not match persisted state")
@@ -500,6 +590,11 @@ class Runtime:
         while True:
             try:
                 return self._run_loop()
+            except UnresumableStateError as exc:
+                # the one failure recovery must not swallow: diagnosing it would need the same
+                # write that just failed, and continuing would leave resume pointing backwards
+                self._remember("failure", f"unresumable state: {exc}", immutable=True)
+                return self._fail(str(exc), persist=False)
             except Exception as exc:  # noqa: BLE001 - crashes are handled, not swallowed
                 logger.exception("unexpected error in run %s", self.state.run_id)
                 reason = f"{type(exc).__name__}: {exc}"
@@ -739,22 +834,26 @@ class Runtime:
             validation=validation,
         )
         self._transition(RunPhase.EVALUATE)
-        try:
-            with self._progress("evaluator", getattr(self.evaluator, "provider", None)):
-                evaluation = self.evaluator.evaluate(payload)
-        except ProviderOutputError as exc:
-            logger.error("evaluator failure: %s", exc)
-            self._remember("failure", f"evaluator failure: {exc}", immutable=True)
-            if self._failover("evaluator", str(exc)):
-                return False
-            outcome = self._recover(f"evaluator output: {exc}", plan)
-            if outcome is RecoveryAction.CONTINUE:
-                return False
-            if outcome is RecoveryAction.UNAVAILABLE:
-                self.state.status = "failed: evaluator output"
-                self.state.phase = RunPhase.FAILED
-                self._persist()
-            return True
+        evaluation: Evaluation | None = None
+        for attempt in (1, 2):
+            try:
+                with self._progress("evaluator", getattr(self.evaluator, "provider", None)):
+                    evaluation = self.evaluator.evaluate(payload)
+                break
+            except ProviderOutputError as exc:
+                logger.error("evaluator failure: %s", exc)
+                self._remember("failure", f"evaluator failure: {exc}", immutable=True)
+                if attempt == 1 and self._failover("evaluator", str(exc)):
+                    continue  # judge the same work again, on the fallback model
+                outcome = self._recover(f"evaluator output: {exc}", plan)
+                if outcome is RecoveryAction.CONTINUE:
+                    return False
+                if outcome is RecoveryAction.UNAVAILABLE:
+                    self.state.status = "failed: evaluator output"
+                    self.state.phase = RunPhase.FAILED
+                    self._persist()
+                return True
+        assert evaluation is not None
         self._promote(evaluation.memories_to_promote)
         self._event(
             "evaluation",
@@ -831,7 +930,14 @@ class Runtime:
                     "count": self._same_failure_count,
                 },
             )
-            if self._handle_stagnation(
+            # The same rejection three times means the *approach* is exhausted, not just the
+            # attempt: give the step back to a stronger model before asking the user.
+            if self._failover(
+                "controller",
+                f"the same failure repeated {self._same_failure_count} times: {evaluation.reason}",
+            ):
+                self._clear_failure_streak()
+            elif self._handle_stagnation(
                 f"the same failure repeated {self._same_failure_count} times: {evaluation.reason}"
             ) is not None:
                 return True
@@ -942,7 +1048,7 @@ class Runtime:
             return False
         target: object | None = None
         if role == "controller":
-            self._escalated = True  # provider_for("controller") now returns the fallback
+            self._escalate(reason)  # sets the flag provider_for("controller") reads
             target = fallback
         elif role == "planner":
             # PlannerLike is a protocol; only a model-backed planner has a provider to swap
@@ -1370,13 +1476,13 @@ class Runtime:
         )
         self._emit_candidate_state()
 
-    def _fail(self, reason: str) -> AgentState:
+    def _fail(self, reason: str, *, persist: bool = True) -> AgentState:
         assert self.state is not None
         logger.error("run %s failed: %s", self.state.run_id, reason)
         self.state.status = f"failed: {reason}"
         self.state.phase = RunPhase.FAILED
         self._event("run_failed", RunPhase.FAILED, payload={"reason": reason})
-        self._persist()
+        self._persist(required=persist)
         return self.state
 
     def _evaluation_context(self, plan: PlanStep, validation: ValidationResult) -> str:
@@ -1416,6 +1522,12 @@ class Runtime:
             self.memory.add(record)
         if candidates:
             self._emit_memory_counts()
+
+    def release_lock(self) -> None:
+        """Give up the per-repository run lock (idempotent)."""
+        if self._run_lock is not None:
+            self._run_lock.release()
+            self._run_lock = None
 
     def _run_dir(self) -> Path:
         assert self.state is not None
@@ -1466,14 +1578,26 @@ class Runtime:
         except Exception:  # noqa: BLE001 - the reporting path is already degraded
             logger.debug("could not record the degradation event", exc_info=True)
 
-    def _persist(self) -> None:
+    def _persist(self, *, required: bool = True) -> None:
+        """Write ``state.json``; failure to do so stops the run.
+
+        Memory and events degrade, state does not: a stale ``state.json`` makes a run *look*
+        resumable from a checkpoint the branch has already moved past.  ``required=False`` is
+        for the last-resort paths that are already reporting a terminal state.
+        """
         if self.state is None:
             return
         self.state.updated_at = now_utc()
         try:
             StateStore(self._run_dir() / "state.json").save(self.state)
-        except Exception as exc:  # noqa: BLE001 - an unwritable state file is not fatal
+        except Exception as exc:  # noqa: BLE001 - the reason is what matters, not the type
             self._degrade("state file", exc)
+            if not required:
+                return
+            raise UnresumableStateError(
+                f"run state could not be written: {type(exc).__name__}: {exc} — stopping so "
+                "resume cannot continue from a stale checkpoint (accepted commits are intact)"
+            ) from exc
 
     def _remember(self, kind: str, content: str, immutable: bool = False) -> None:
         if self.state is None or self.memory is None:

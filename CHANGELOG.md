@@ -4,6 +4,42 @@ All notable changes to GCAE are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.7] — 2026-09-14
+
+### Fixed
+
+- **`gcae run` no longer silently uses the fake provider.** Without `--config` the CLI built its
+  config from defaults, whose provider kind is `fake` — so a real run failed with
+  `provider output: fake provider trajectory is exhausted`, and it looked like a model problem. The
+  CLI now discovers a configuration file (`$GCAE_CONFIG`, `./config.toml`,
+  `~/.config/gcae/config.toml`), prints which one it used, and says explicitly when nothing was found
+  and the fake default is about to be used.
+
+### Added
+
+- **Configuration discovery** for `gcae run` and `resume` (see *Fixed* below).
+- **One run per repository.** `run`, `resume`, `merge` and `undo` take a per-repository lock before
+  touching the source branch; a second run on the same repository is refused with the id of the run
+  holding it. The lock file lives in the runtime directory and is released by the OS if the process
+  dies. Two runs can no longer interleave two merges into one branch.
+- **The dashboard explains every failure the CLI does.** The timeline now carries `model_failover`,
+  `runtime_degraded`, `success_criteria_adopted`, `rollback_failed`, `repeated_failure` and the merge
+  events (conflict detected/resolved/unresolved, merge completed); a degraded run keeps a `DEGRADED`
+  flag in the status bar with the last lost subsystem.
+- **Repeated identical rejections escalate the model.** After the same rejection three times the
+  controller moves to `models.escalation` (once) and the failure streak resets, before the run would
+  ask the user. The approach is exhausted; a stronger model is a better answer than a question.
+- **An evaluator failover re-judges the same work.** When the evaluator's model is broken the step is
+  no longer rejected on the way out: the swap happens and the work is judged again on the fallback.
+
+### Changed
+
+- **A state file that cannot be written now stops the run.** Degraded bookkeeping still covers memory
+  and the event log, but a stale `state.json` makes `gcae resume` continue from a checkpoint the
+  branch has already moved past — that is a correctness problem, not a resilience feature. The run
+  fails with `run state could not be written: …`, accepted commits stay on the branch, and the event
+  log still explains what happened.
+
 ## [0.1.6] — 2026-09-14
 
 ### Added

@@ -379,6 +379,34 @@ def timeline_entry(
         return ("×", f"run failed · {elide(str(payload.get('reason', '')), 80)}", "error")
     if event_type == "run_stopped":
         return ("■", "run stopped by user", "muted")
+    if event_type == "merge_completed":
+        target = payload.get("target_branch") or "the source branch"
+        commit = short_id(str(payload.get("merge_commit", "")))
+        return ("⇥", f"merged into {target} · {commit}", "success")
+    if event_type == "conflict_detected":
+        files = payload.get("files") or []
+        return ("⚠", f"merge conflict in {len(files)} file(s) · the agent resolves it", "warning")
+    if event_type == "conflict_resolved":
+        return ("✓", "merge conflict resolved and re-verified", "success")
+    if event_type == "conflict_unresolved":
+        return ("×", "merge conflict could not be resolved · branch kept for gcae merge", "error")
+    if event_type == "repeated_failure":
+        return (
+            "×",
+            f"same failure {payload.get('count')}x · "
+            f"{elide(str(payload.get('signature', '')), 60)}",
+            "error",
+        )
+    if event_type == "model_failover":
+        role = payload.get("role") or "model"
+        return ("⇄", f"{role} failed over to {payload.get('model')}", "warning")
+    if event_type == "runtime_degraded":
+        error = elide(str(payload.get("error", "")), 60)
+        return ("△", f"degraded · {payload.get('component')} · {error}", "warning")
+    if event_type == "success_criteria_adopted":
+        return ("✓", "success criteria adopted from the diagnosis", "accent")
+    if event_type == "rollback_failed":
+        return ("×", f"rollback failed · {elide(str(payload.get('reason', '')), 60)}", "error")
     if event_type == "tool_result" and succeeded is False:
         error = payload.get("error") or payload.get("output") or "tool failed"
         return ("×", f"{payload.get('tool')} failed · {elide(str(error), 70)}", "error")

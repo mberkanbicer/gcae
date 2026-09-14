@@ -7,6 +7,15 @@ creates exactly one external worktree and branch per run. Runtime-owned rollback
 `reset --hard <accepted_commit>` and `clean -fdx` only inside that worktree. The source branch is
 changed only by the recorded merge (fast-forward or merge commit), which `gcae undo` reverses.
 
+## One run per repository
+
+Every entry point that can change the source branch — `gcae run`, `gcae resume`, `gcae merge` and
+`gcae undo` — takes a per-repository lock before it acts. The lock file lives in the runtime
+directory (`<state>/locks/<digest>.lock`), never inside the repository, and the operating system
+releases it if the process dies, so a killed run cannot leave a stale lock behind. A second run on
+the same repository is refused with the id of the run that holds it, instead of interleaving two
+merges into one branch. Runs on *different* repositories never block each other.
+
 ## Base commit bootstrap
 
 A run's worktree is created from a base commit. Rather than refusing, GCAE prepares the repository:

@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -832,3 +833,95 @@ def test_completed_run_whose_merge_conflicts_exits_non_zero(tmp_path: Path, caps
     assert "conflicts remain" in errors
     persisted = (tmp_path / "state" / "runs" / run_id / "state.json").read_text()
     assert '"merge": {' not in persisted
+
+
+def test_a_config_file_is_discovered_instead_of_silently_using_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without discovery, `gcae run` falls back to the fake provider and fails confusingly."""
+    from gcae.config import discover_config
+
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    home.mkdir()
+    project.mkdir()
+    monkeypatch.delenv("GCAE_CONFIG", raising=False)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(project)
+    assert discover_config() is None, "no file anywhere means the built-in defaults"
+
+    (project / "config.toml").write_text(
+        '[provider]\nkind = "openrouter"\nmodel = "qwen/qwen3-coder"\n'
+    )
+    assert discover_config() == Path("config.toml")
+    assert load_config().provider.model == "qwen/qwen3-coder"
+
+    # ~/.config/gcae/config.toml is the second place looked at
+    (project / "config.toml").unlink()
+    nested = home / ".config" / "gcae"
+    nested.mkdir(parents=True)
+    (nested / "config.toml").write_text('[provider]\nmodel = "second-choice"\n')
+    assert discover_config() == nested / "config.toml"
+    assert load_config().provider.model == "second-choice"
+
+    # an explicit path always wins over discovery
+    explicit = tmp_path / "explicit.toml"
+    explicit.write_text('[provider]\nmodel = "explicit"\n')
+    assert load_config(explicit).provider.model == "explicit"
+
+
+def test_the_environment_can_point_at_the_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from gcae.config import discover_config
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    chosen = tmp_path / "elsewhere.toml"
+    chosen.write_text('[provider]\nmodel = "from-env"\n')
+    monkeypatch.setenv("GCAE_CONFIG", str(chosen))
+    assert discover_config() == chosen
+    assert load_config().provider.model == "from-env"
+
+
+def init_repo(path: Path) -> None:
+    subprocess.run(["git", "init", "-q", str(path)], check=True)
+    subprocess.run(["git", "-C", str(path), "config", "user.email", "t@e.f"], check=True)
+    subprocess.run(["git", "-C", str(path), "config", "user.name", "T"], check=True)
+    (path / "README").write_text("base\n")
+    subprocess.run(["git", "-C", str(path), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(path), "commit", "-qm", "base"], check=True)
+
+
+def test_a_missing_config_is_announced_for_runs_but_not_for_listing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A fake-provider failure must be explained, and a listing must not print noise."""
+    from gcae.cli import main
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("GCAE_CONFIG", raising=False)
+
+    main(["list", "--runtime-dir", str(tmp_path / "state")])
+    assert "no config file found" not in capsys.readouterr().err
+
+    with pytest.raises(SystemExit):
+        main(
+            [
+                "run",
+                str(repo),
+                "create notes.md",
+                "--criterion",
+                "file exists: notes.md",
+                "--headless",
+                "--runtime-dir",
+                str(tmp_path / "state"),
+            ]
+        )
+    err = capsys.readouterr().err
+    assert "no config file found" in err
+    assert "fake" in err, "the message must name the fake default as the reason"

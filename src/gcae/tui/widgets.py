@@ -108,6 +108,7 @@ class StatusBar(Panel):
         provider: str,
         model: str,
         paused: bool,
+        degraded: bool = False,
     ) -> None:
         width = self.content_width
         status = state.status if state is not None else "starting"
@@ -120,6 +121,11 @@ class StatusBar(Panel):
             row.append(" │ ROLLBACK", style=f"bold {STYLES['warning']}")
         if paused:
             row.append(" │ paused · no new model or tool action", style=STYLES["warning"])
+        if degraded and ui.degradations:
+            row.append(
+                f" │ DEGRADED · {elide(ui.degradations[-1], 40)}",
+                style=f"bold {STYLES['warning']}",
+            )
         segments: list[tuple[str, str]] = []
         if state is not None and width >= 70:
             project = state.source_repo.rstrip("/").split("/")[-1]

@@ -50,6 +50,12 @@ Criteria are verified deterministically; unsupported criteria fail closed unless
 When no `--criterion` is given, the planner derives criteria from the request (the model-backed
 planner is required to produce at least one). `--criterion` values are merged with inferred ones.
 
+## Configuration discovery
+
+Without `--config`, GCAE uses `$GCAE_CONFIG`, then `./config.toml`, then
+`~/.config/gcae/config.toml`, and prints which one it took. With none present, `run` and `resume`
+warn that the built-in fake provider is about to be used instead of failing cryptically later.
+
 ## Runs
 
 - `list` prints known runs (id, status, accepted steps, update time, objective), newest first.

@@ -125,9 +125,16 @@ without the user:
 | planner outage (with user criteria) | deterministic planner takes over, `planner_fallback` event |
 | planner outage (no criteria) | the advisor may supply the criteria and a first step (`success_criteria_adopted`) |
 | merge conflict | handed to the agent inside the run worktree; re-verified; branch kept if it cannot be resolved |
-| memory, event log or state file failure | **degraded mode**: the run continues, the loss is recorded (`runtime_degraded`, `state.degradations`, CLI summary) |
+| memory or event log failure | **degraded mode**: the run continues, the loss is recorded (`runtime_degraded`, `state.degradations`, CLI summary) |
+| state file failure | the run **stops** (`failed: run state could not be written…`): a stale `state.json` would make `gcae resume` continue from a checkpoint the branch has moved past |
+| the same rejection three times | escalate the controller to `models.escalation` before asking the user (`model_failover`) |
+| two runs on one repository | refused up front by the per-repository lock (`RunLock`), which covers run, resume, merge and undo |
 | recovery itself failing | contained: recorded as a failure memory, the caller's ladder continues |
 | user asked and nothing changed, or the advisor says stop | run fails, accepted checkpoints are still delivered |
+
+Recovery itself is not the only automatic response: a *broken model* is a different class of
+failure, because diagnosing it would require calling the same endpoint. That is what
+`models.escalation` is for (see `docs/PROVIDERS.md`).
 
 Two rules make the ladder trustworthy: it is **bounded** (`runtime.recovery_attempts`, and each
 successful correction buys `runtime.recovery_budget` iterations, never unlimited), and it never

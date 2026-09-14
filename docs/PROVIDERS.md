@@ -28,6 +28,14 @@ with `provider request stalled: no data for Ns …` and the run hands that to th
 instead of waiting forever. Measured against a socket that accepts and never answers: 3s to detection
 with `stall_timeout = 3`.
 
+### Retries
+
+Transient failures — 429, 5xx, timeouts and dropped connections — are retried inside the provider
+with exponential backoff, jitter and `Retry-After` support (`[provider] retries`, `retry_backoff`).
+Client errors (400, 404, 422) are not retried: they are configuration or request problems, and the
+run's recovery ladder is a better answer than repeating them. Streaming calls retry as streams, so a
+slow answer is never silently downgraded to a buffered one.
+
 ### Failover
 
 A provider outage is the one failure the recovery advisor cannot reason its way out of — the advisor
@@ -38,6 +46,11 @@ recorded as a `model_failover` event with the failing role and the new model.
 
 Verified live with a deliberately invalid controller model: `model_failover` → run completed in 11s
 instead of failing.
+
+The evaluator is a special case worth knowing: after switching, the *same* work is evaluated again on
+the fallback, so an accepted step is not thrown away because a judge was offline. And when the same
+rejection repeats three times, the controller escalates to the fallback model before the run asks the
+user — the approach is exhausted, not just the attempt.
 
 Streaming is fail-soft. An endpoint that answers a streaming request with a buffered body, or refuses
 it outright (HTTP 4xx), is retried automatically without streaming; a *timeout* is not retried that

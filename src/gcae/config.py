@@ -133,9 +133,33 @@ def _default_state_dir() -> str:
     return "~/.local/state/gcae"
 
 
+#: Where a config file is looked for when the caller does not name one.  Without this the
+#: runtime would silently fall back to the built-in defaults (a fake provider) and fail on the
+#: first model call, which looks like a bug in the model rather than a missing file.
+CONFIG_DISCOVERY = (
+    Path("config.toml"),
+    Path("~/.config/gcae/config.toml"),
+)
+
+
+def discover_config() -> Path | None:
+    """The config file to use when none was named: ``$GCAE_CONFIG``, ``./config.toml``,
+    ``~/.config/gcae/config.toml``."""
+    env = os.environ.get("GCAE_CONFIG")
+    candidates = [Path(env).expanduser()] if env else []
+    candidates.extend(item.expanduser() for item in CONFIG_DISCOVERY)
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def load_config(path: str | Path | None = None) -> Config:
     if path is None:
-        return Config()
+        discovered = discover_config()
+        if discovered is None:
+            return Config()
+        path = discovered
     config_path = Path(path).expanduser()
     if not config_path.is_file():
         raise FileNotFoundError(f"config file not found: {config_path}")

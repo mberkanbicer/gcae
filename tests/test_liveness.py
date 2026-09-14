@@ -11,6 +11,7 @@ Covers the three guarantees of this layer:
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,7 @@ import pytest
 from gcae.models import (
     AgentState,
     Decision,
+    Evaluation,
     Event,
     InitialPlan,
     PlanStep,
@@ -875,8 +877,8 @@ def test_a_broken_memory_store_does_not_kill_the_run(tmp_path: Path) -> None:
     assert degraded and degraded[0].payload["component"] == "memory store"
 
 
-def test_an_unwritable_state_file_does_not_kill_the_run(tmp_path: Path) -> None:
-    """A state file that cannot be written is reported, not fatal."""
+def test_an_unwritable_state_file_stops_the_run_instead_of_lying(tmp_path: Path) -> None:
+    """State is the one thing that does not degrade: a stale state.json would make resume lie."""
     provider = FakeProvider(
         [
             {
@@ -909,8 +911,56 @@ def test_an_unwritable_state_file_does_not_kill_the_run(tmp_path: Path) -> None:
     finally:
         persistence.StateStore.save = original  # type: ignore[method-assign]
 
-    assert result.status == "complete", result.status
+    assert result.status.startswith("failed: run state could not be written"), result.status
+    assert "stale checkpoint" in result.status
     assert any("state file failed" in item for item in result.degradations)
+    assert result.accepted_commit is not None, "the trusted commit is still recorded in memory"
+
+
+def test_a_state_failure_during_recovery_still_ends_the_run(tmp_path: Path) -> None:
+    """Recovery needs the same write that just failed: the run stops instead of looping."""
+    provider = FakeProvider(
+        [
+            {
+                "action": "execute_tool",
+                "semantic_goal": "create",
+                "reason_summary": "create it",
+                "tool": {
+                    "name": "create_file",
+                    "arguments": {"path": "out.txt", "content": "ok\n"},
+                },
+            },
+            {
+                "action": "complete_semantic_step",
+                "semantic_goal": "create",
+                "reason_summary": "done",
+            },
+        ]
+    )
+    runtime = _one_step_runtime(tmp_path, provider)
+    events = collect(runtime)
+    runtime.start("create out.txt", success_criteria=["file exists: out.txt"])
+    import gcae.persistence as persistence
+
+    calls = {"n": 0}
+    original = persistence.StateStore.save
+
+    def explode(self: Any, state: Any) -> None:
+        calls["n"] += 1
+        raise OSError("disk went away")
+
+    persistence.StateStore.save = explode  # type: ignore[method-assign]
+    try:
+        result = runtime.run()
+    finally:
+        persistence.StateStore.save = original  # type: ignore[method-assign]
+
+    assert result.status.startswith("failed: run state could not be written")
+    # one write fails and stops the loop; the second is the best-effort report of the failure
+    assert calls["n"] <= 2, f"the run must stop on the first failed write, saw {calls['n']} writes"
+    assert not [e for e in events if e.event_type == "recovery_started"], (
+        "recovery cannot help: it persists through the same broken file"
+    )
 
 
 def test_a_failing_recovery_does_not_kill_the_run(tmp_path: Path) -> None:
@@ -1029,3 +1079,238 @@ def test_advisor_criteria_rescue_a_failed_planner(tmp_path: Path) -> None:
         "the advisor's criteria must be adopted when the run has none"
     )
     assert any(e.event_type == "success_criteria_adopted" for e in events)
+
+
+# =============================================== repository lock (one run per repo)
+# Two runs sharing a repository would interleave their merges into the source branch.
+
+
+def test_a_second_run_on_the_same_repository_is_refused(tmp_path: Path) -> None:
+    """The lock is cross-process: a run in another process blocks a new one, with a real message."""
+    import subprocess
+    import sys
+
+    source = _fresh_repo(tmp_path)
+    runtime_dir = tmp_path / "runtime"
+    marker = tmp_path / "locked"
+
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys, time\n"
+                "from pathlib import Path\n"
+                "sys.path.insert(0, sys.argv[1])\n"
+                "from gcae.runtime import RunLock\n"
+                "lock = RunLock(Path(sys.argv[2]), Path(sys.argv[3]), 'run deadbeef')\n"
+                "lock.acquire()\n"
+                "Path(sys.argv[4]).write_text('locked')\n"
+                "time.sleep(30)\n"
+            ),
+            str(Path(__file__).resolve().parents[1] / "src"),
+            str(runtime_dir),
+            str(source),
+            str(marker),
+        ]
+    )
+    try:
+        deadline = time.monotonic() + 20
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert marker.exists(), "the helper process never took the lock"
+
+        runtime = Runtime(
+            source_repo=source,
+            runtime_dir=runtime_dir,
+            provider=FakeProvider([]),
+            control=RuntimeControl(),
+        )
+        with pytest.raises(RuntimeError) as caught:
+            runtime.start("do the work", success_criteria=["file exists: README"])
+        message = str(caught.value)
+        assert "already working on" in message
+        assert "run deadbeef" in message, "the message names the run holding the lock"
+    finally:
+        holder.terminate()
+        holder.wait(timeout=10)
+
+
+def test_the_lock_is_released_when_the_run_object_is_done(tmp_path: Path) -> None:
+    """A finished run must not block the next one on the same repository."""
+    source = _fresh_repo(tmp_path)
+    runtime_dir = tmp_path / "runtime"
+    first = Runtime(
+        source_repo=source,
+        runtime_dir=runtime_dir,
+        provider=FakeProvider(
+            [
+                {
+                    "action": "execute_tool",
+                    "semantic_goal": "create",
+                    "reason_summary": "create it",
+                    "tool": {
+                        "name": "create_file",
+                        "arguments": {"path": "out.txt", "content": "ok\n"},
+                    },
+                },
+                {
+                    "action": "complete_semantic_step",
+                    "semantic_goal": "create",
+                    "reason_summary": "done",
+                },
+            ]
+        ),
+        control=RuntimeControl(),
+    )
+    first.start("create out.txt", success_criteria=["file exists: out.txt"])
+    first.run()
+    first.release_lock()
+
+    second = Runtime(
+        source_repo=source,
+        runtime_dir=runtime_dir,
+        provider=FakeProvider([]),
+        control=RuntimeControl(),
+    )
+    second.start("another task", success_criteria=["file exists: README"])
+    assert second.state is not None
+    second.release_lock()
+
+
+# =============================================== failover for every role
+
+
+def test_a_broken_evaluator_fails_over_and_judges_again(tmp_path: Path) -> None:
+    """Switching the evaluator is only worth it if the same work is judged again."""
+
+    class StepProvider:
+        on_progress: Any = None
+        model = "primary"
+
+        def __init__(self) -> None:
+            self.actions = 0
+
+        def complete(self, prompt: str, schema: Any) -> Any:
+            self.actions += 1
+            if self.actions == 1:
+                return schema.model_validate(
+                    {
+                        "action": "execute_tool",
+                        "semantic_goal": "create",
+                        "reason_summary": "create it",
+                        "tool": {
+                            "name": "create_file",
+                            "arguments": {"path": "out.txt", "content": "ok\n"},
+                        },
+                    }
+                )
+            return schema.model_validate(
+                {
+                    "action": "complete_semantic_step",
+                    "semantic_goal": "create",
+                    "reason_summary": "done",
+                }
+            )
+
+    class BrokenProvider:
+        model = "broken-evaluator"
+        broken = True
+
+        def complete(self, prompt: str, schema: Any) -> Any:
+            del prompt, schema
+            raise ProviderOutputError("evaluator model is offline")
+
+    class SwitchableEvaluator:
+        """Blind until the runtime swaps in the fallback provider."""
+
+        on_progress: Any = None
+
+        def __init__(self) -> None:
+            self.provider: Any = BrokenProvider()
+
+        def evaluate(self, payload: Any) -> Evaluation:
+            del payload
+            if getattr(self.provider, "broken", False):
+                raise ProviderOutputError("evaluator model is offline")
+            return Evaluation(
+                decision="accept",
+                reason="the file was created as asked",
+                progress_score=0.8,
+            )
+
+    evaluator = SwitchableEvaluator()
+    source = _fresh_repo(tmp_path)
+    runtime = Runtime(
+        source_repo=source,
+        runtime_dir=tmp_path / "runtime",
+        provider=StepProvider(),
+        evaluator=evaluator,
+        control=RuntimeControl(),
+        role_providers={"escalation": FakeProvider([])},
+    )
+    events: list[Event] = []
+    runtime.subscribe(events.append)
+    runtime.start("create out.txt", success_criteria=["file exists: out.txt"])
+    state = runtime.run()
+
+    failover = [e for e in events if e.event_type == "model_failover"]
+    assert failover and failover[0].payload["role"] == "evaluator"
+    assert state.status == "complete", state.status
+    assert state.accepted_steps == 1, "the work was accepted by the fallback evaluator"
+
+
+def test_a_repeated_failure_escalates_the_model_before_asking_the_user(tmp_path: Path) -> None:
+    """Three identical rejections are a policy signal: try the stronger model, then ask."""
+    from gcae.evaluator import DeterministicEvaluator
+    from gcae.models import Evaluation
+
+    class AlwaysRejects(DeterministicEvaluator):
+        def evaluate(self, payload: Any) -> Evaluation:
+            del payload
+            return Evaluation(
+                decision="rollback",
+                reason="the step does not address the objective",
+                progress_score=0.0,
+            )
+
+    class StepProvider:
+        on_progress: Any = None
+        model = "primary"
+
+        def complete(self, prompt: str, schema: Any) -> Any:
+            return schema.model_validate(
+                {
+                    "action": "execute_tool",
+                    "semantic_goal": "create",
+                    "reason_summary": "create it",
+                    "tool": {
+                        "name": "create_file",
+                        "arguments": {"path": "out.txt", "content": "ok\n"},
+                    },
+                }
+            )
+
+    fallback = FakeProvider([])
+    fallback.model = "stronger"  # type: ignore[attr-defined]
+    source = _fresh_repo(tmp_path)
+    runtime = Runtime(
+        source_repo=source,
+        runtime_dir=tmp_path / "runtime",
+        provider=StepProvider(),
+        evaluator=AlwaysRejects(),
+        control=RuntimeControl(),
+        role_providers={"escalation": fallback},
+        max_steps=12,
+        recovery_attempts=0,
+    )
+    events: list[Event] = []
+    runtime.subscribe(events.append)
+    runtime.start("create out.txt", success_criteria=["file exists: out.txt"])
+    runtime.run()
+
+    failover = [e for e in events if e.event_type == "model_failover"]
+    assert failover, "repeated identical failures must escalate before asking the user"
+    assert failover[0].payload["role"] == "controller"
+    assert failover[0].payload["model"] == "stronger"
+    assert runtime.active_model() == "stronger", "later decisions use the stronger model"

@@ -16,7 +16,7 @@ from textual.widgets import Static
 
 from ..models import AgentState
 from . import formatters
-from .formatters import STYLES, duration, elide, short_id, thousands
+from .formatters import STYLES, duration, elide, short_id
 from .state import UiState
 
 LABEL_WIDTH = 12
@@ -72,18 +72,30 @@ class Panel(Static):
                 width = 78
         return max(20, width)
 
+    def row_budget(self, cap: int) -> int:
+        """How many body rows to draw: the space the layout gave this panel, up to ``cap``.
+
+        Panels that grow (``height: 1fr``) use this so slack becomes *more content*
+        instead of a blank band at the bottom of a box.
+        """
+        height = self.size.height or 0
+        if height <= 3:
+            return cap
+        return max(2, min(cap, height - 2))
+
     def set_body(self, body: Text) -> None:
         """Render Rich text and keep a readable copy for tests and the demo."""
         self.body = body
         self.update(body)
 
-    def render_block(self, meta: str, lines: list[Text]) -> None:
+    def render_block(self, meta: str, lines: list[Text], *, meta_style: str = "") -> None:
         width = self.content_width
         body = Text()
         if self.panel_title:
             header = Text(self.panel_title.upper(), style=STYLES["title"])
             if meta:
-                header = formatters.pad_row(header, Text(meta, style=STYLES["muted"]), width)
+                style = meta_style or STYLES["muted"]
+                header = formatters.pad_row(header, Text(meta, style=style), width)
             body.append_text(header)
             if lines:
                 body.append("\n")
@@ -112,7 +124,8 @@ class StatusBar(Panel):
     ) -> None:
         width = self.content_width
         status = state.status if state is not None else "starting"
-        badge, badge_style = formatters.run_badge(status, paused)
+        phase = state.phase.value if state is not None else None
+        badge, badge_style = formatters.run_state(status, phase, paused)
         row = Text("GCAE", style="bold")
         row.append(" │ ", style=STYLES["muted"])
         row.append(badge, style=f"bold {STYLES[badge_style]}")
@@ -140,7 +153,7 @@ class StatusBar(Panel):
         segments.append((model_text, STYLES["value"]))
         if state is not None and ui.started_at is not None and state.status != "complete":
             elapsed = (datetime.now(UTC) - ui.started_at).total_seconds()
-            if width >= 120:
+            if width >= 74:
                 segments.append((duration(elapsed), STYLES["muted"]))
         for text, style in segments:
             row.append(" │ ", style=STYLES["muted"])
@@ -315,7 +328,7 @@ class ObjectivePanel(Panel):
         lines: list[Text] = []
         for index, chunk in enumerate(_wrap(objective, width - LABEL_WIDTH, 2)):
             lines.append(
-                _row("original" if index == 0 else "", Text(chunk, style=STYLES["value"]))
+                _row("request" if index == 0 else "", Text(chunk, style=STYLES["muted"]))
             )
         if goal:
             label = "NOW" if ui.goal_is_active else "NEXT"
@@ -364,7 +377,8 @@ class PlanPanel(Panel):
         # A long active goal is the one thing the user must be able to read, so it wraps onto
         # continuation rows and the neighbouring steps yield to it instead of being pushed out.
         active_rows = _wrap(str(steps[active].get("goal") or ""), goal_width, 3)
-        neighbours = max(1, self.max_rows - len(active_rows) + 1)
+        rows = self.row_budget(self.max_rows)
+        neighbours = max(1, rows - len(active_rows) + 1)
         visible, hidden_before, hidden_after = _window(steps, active, neighbours)
         lines: list[Text] = []
         if hidden_before:
@@ -383,112 +397,123 @@ class PlanPanel(Panel):
 
 
 class ActivityPanel(Panel):
-    """What is happening right now: goal, active tool, state, expectation."""
+    """What is happening right now: goal, action, target, expectation, state.
+
+    Deliberately free of model telemetry.  Streaming characters, first-token latency and
+    partial generations are debug detail: they live in the log screen, and at most a
+    single one-line state here ("controller · generating · 3.4s").
+    """
 
     def __init__(self) -> None:
         super().__init__("active", id="activity")
 
-    @staticmethod
-    def _stream_row(ui: UiState, width: int) -> Text | None:
-        """One line of real progress while a model call streams, or None when idle."""
-        stream = ui.stream
-        if not stream or ui.agent_done:
-            return None
-        characters = int(stream.get("characters") or 0)
-        reasoning = int(stream.get("reasoning_characters") or 0)
-        seconds = (stream.get("elapsed_ms") or 0) / 1000
-        if stream.get("waiting") or not characters:
-            detail = f"no output yet · {seconds:.0f}s"
-            if reasoning:
-                detail = f"reasoning {thousands(reasoning)} chars · {seconds:.0f}s"
-            return _row("stream", Text(detail, style=STYLES["muted"]))
-        detail = f"{thousands(characters)} chars · {seconds:.0f}s"
-        if reasoning:
-            detail = f"{thousands(reasoning)} reasoning · {detail}"
-        preview = " ".join(str(stream.get("preview") or "").split())
-        text = Text(detail, style=STYLES["accent"])
-        if preview:
-            room = max(8, width - LABEL_WIDTH - len(detail) - 3)
-            text.append("  " + elide("…" + preview, room), style=STYLES["value"])
-        return _row("stream", text)
-
-    def render_state(self, state: AgentState | None, ui: UiState) -> None:
+    def render_state(self, state: AgentState | None, ui: UiState, *, model: str = "") -> None:
         width = self.content_width
         action = ui.action
-        meta = ""
-        if action is not None and not ui.agent_done:
-            elapsed = duration(ui.action_elapsed())
-            if action.state == "running":
-                meta = f"{action.label} · {elapsed}"
-            elif action.state == "waiting":
-                # a model call is in flight: show which role is thinking and for how long
-                role = ui.provider_role or ui.role.lower() or "model"
-                meta = f"{role} · {elapsed}"
-            elif action.duration_ms is not None:
-                meta = f"{action.label} · {action.duration_ms / 1000:.1f}s"
-            else:
-                meta = action.label
         lines: list[Text] = []
         if ui.agent_done:
-            finished = Text(
-                "finished · no further model or tool action", style=STYLES["muted"]
+            lines.append(
+                _row(
+                    "state",
+                    Text("finished · no further model or tool action", style=STYLES["muted"]),
+                )
             )
-            lines.append(_row("state", finished))
             if action is not None:
-                summary = action.label
-                if action.detail:
-                    summary = f"{summary} · {action.detail}"
-                elif action.state in {"done", "failed"}:
-                    summary = f"{summary} · {action.state}"
-                if action.duration_ms is not None:
-                    summary = f"{summary} · {action.duration_ms / 1000:.1f}s"
+                summary = action.label if not action.detail else f"{action.label} · {action.detail}"
                 lines.append(_row("last", Text(elide(summary, width - LABEL_WIDTH))))
             self.render_block("", lines)
             return
+
         goal = ui.current_goal or (state.objective if state is not None else "")
         if goal:
             for chunk in _wrap(goal, width - LABEL_WIDTH, 3):
-                lines.append(_row("goal", chunk))
-        stream = self._stream_row(ui, width)
-        if stream is not None:
-            lines.append(stream)
-        if action is not None and action.state != "waiting":
-            label = action.label.upper() if len(action.label) <= 10 else "TOOL"
-            for index, argument in enumerate(action.lines[:3]):
-                name_label = label if index == 0 else ""
-                lines.append(_row(name_label, elide(argument, width - LABEL_WIDTH)))
-            state_text = {
-                "running": f"RUNNING · {duration(ui.action_elapsed())}",
+                lines.append(_row("goal", Text(chunk, style=STYLES["current"])))
+        else:
+            lines.append(
+                _row("goal", Text("waiting for the first plan", style=STYLES["muted"]))
+            )
+
+        if action is not None and action.kind == "model":
+            # a model call in flight: one calm row, never a transcript
+            role = action.label or ui.provider_role or "model"
+            what = "waiting" if action.state == "waiting" and not ui.stream else "generating"
+            detail = f"{role} · {what} · {duration(ui.action_elapsed())}"
+            lines.append(
+                _row("model", Text(elide(detail, width - LABEL_WIDTH), style=STYLES["accent"]))
+            )
+            if model:
+                lines.append(
+                    _row("", Text(elide(model, width - LABEL_WIDTH), style=STYLES["muted"]))
+                )
+            if action.expected:
+                lines.append(
+                    _row(
+                        "expected",
+                        Text(elide(action.expected, width - LABEL_WIDTH), style=STYLES["muted"]),
+                    )
+                )
+        elif action is not None and action.state != "waiting":
+            lines.append(_row("action", Text(elide(action.label, width - LABEL_WIDTH))))
+            if action.target:
+                lines.append(
+                    _row(
+                        "target",
+                        Text(elide(action.target, width - LABEL_WIDTH), style=STYLES["value"]),
+                    )
+                )
+            detail = action.detail or (action.lines[0] if action.lines else "")
+            if detail:
+                lines.append(
+                    _row("why", Text(elide(detail, width - LABEL_WIDTH), style=STYLES["muted"]))
+                )
+            if action.expected:
+                for chunk in _wrap(action.expected, width - LABEL_WIDTH, 2):
+                    lines.append(_row("expected", Text(chunk, style=STYLES["muted"])))
+            state_text, style = {
+                "running": (f"RUNNING · {duration(ui.action_elapsed())}", "accent"),
                 "done": (
-                    f"done · {action.duration_ms / 1000:.1f}s" if action.duration_ms else "done"
+                    f"DONE · {action.duration_ms / 1000:.1f}s" if action.duration_ms else "DONE",
+                    "success",
                 ),
-                "failed": f"FAILED · {action.detail}" if action.detail else "FAILED",
-                "recovered": "RECOVERED · the runtime corrected its own approach",
-            }.get(action.state, action.state)
-            style = {
-                "running": "accent",
-                "done": "success",
-                "failed": "error",
-                "recovered": "accent",
-            }.get(action.state, "muted")
+                "failed": (f"FAILED · {action.detail}" if action.detail else "FAILED", "error"),
+                "recovered": ("RECOVERED · the runtime corrected its own approach", "accent"),
+            }.get(action.state, (action.state.upper(), "muted"))
             lines.append(_row("state", Text(state_text, style=STYLES[style])))
         elif action is not None:
-            detail = action.lines[0] if action.lines else "choosing the next action"
-            waiting = Text(
-                f"waiting for model · {elide(detail, max(10, width - 26))}",
-                style=STYLES["muted"],
+            # a runtime operation waiting on something (a question, a failover, a diagnosis)
+            lines.append(_row("action", Text(elide(action.label, width - LABEL_WIDTH))))
+            for line in action.lines[:2]:
+                lines.append(
+                    _row("", Text(elide(line, width - LABEL_WIDTH), style=STYLES["muted"]))
+                )
+            lines.append(
+                _row(
+                    "state",
+                    Text(
+                        f"WAITING · {duration(ui.action_elapsed())}",
+                        style=STYLES["accent"],
+                    ),
+                )
             )
-            lines.append(_row("state", waiting))
-        if action is not None and action.expected:
-            for chunk in _wrap(action.expected, width - LABEL_WIDTH, 1):
-                lines.append(_row("expect", Text(chunk, style=STYLES["muted"])))
-        if not lines:
-            lines.append(Text("idle", style=STYLES["muted"]))
-        self.render_block(meta, lines)
+            if action.expected:
+                lines.append(
+                    _row(
+                        "expected",
+                        Text(elide(action.expected, width - LABEL_WIDTH), style=STYLES["muted"]),
+                    )
+                )
+        else:
+            lines.append(_row("state", Text("idle · waiting for the agent", style=STYLES["muted"])))
+
+        if not ui.goal_is_active and not ui.agent_done and action is None:
+            lines.append(
+                _row("plan", Text("no step is active yet", style=STYLES["muted"]))
+            )
+        self.render_block("", lines)
 
 
 class CheckpointPanel(Panel):
-    """Trusted checkpoint, candidate state and the candidate file scope."""
+    """Trusted checkpoint versus speculative candidate — GCAE's defining distinction."""
 
     def __init__(self) -> None:
         super().__init__("checkpoint", id="checkpoint")
@@ -504,14 +529,11 @@ class CheckpointPanel(Panel):
         width = self.content_width
         snapshot = ui.candidate
         dirty = bool(snapshot and snapshot.get("dirty"))
-        meta = formatters.snapshot_summary(snapshot) if dirty else ""
         lines: list[Text] = []
         if ui.rollback_active() and ui.rollback:
             discarded = ui.rollback.get("discarded") or []
-            detail = (
-                f"{len(discarded)} files discarded" if discarded else "candidate state discarded"
-            )
-            reason = elide(str(ui.rollback.get("reason") or ""), max(10, width - 40))
+            detail = f"{len(discarded)} files discarded" if discarded else "candidate discarded"
+            reason = elide(str(ui.rollback.get("reason") or ""), max(10, width - 34))
             lines.append(
                 _row(
                     "ROLLBACK",
@@ -526,52 +548,78 @@ class CheckpointPanel(Panel):
         commit = state.accepted_commit if state is not None else None
         lines.append(
             _row(
-                "trusted",
+                "TRUSTED",
                 Text(
-                    f"{short_id(commit)}  {elide(subject, max(10, width - 20))}",
+                    f"{short_id(commit)}  {elide(subject, max(10, width - 26))}",
                     style=STYLES["success"] if commit else STYLES["muted"],
                 ),
             )
         )
-        lines.append(
-            _row(
-                "candidate",
-                Text(
-                    f"DIRTY · {meta}" if dirty else "CLEAN",
-                    style=STYLES["warning"] if dirty else STYLES["success"],
-                )
-                if snapshot
-                else Text("measuring…", style=STYLES["muted"]),
-            )
-        )
-        files = (snapshot or {}).get("files") or []
-        for entry in files[: self.max_files]:
-            added = entry.get("added")
-            deleted = entry.get("deleted")
-            delta = ""
-            if added is not None or deleted is not None:
-                added_text = added if added is not None else "-"
-                deleted_text = deleted if deleted is not None else "-"
-                delta = f"  +{added_text} -{deleted_text}"
-            row = Text("      ")
-            row.append(
-                Text(f"{formatters.file_label(str(entry.get('code'))):<2} ", style=STYLES["accent"])
-            )
-            row.append(elide(str(entry.get("path")), max(10, width - 22)))
-            row.append(Text(delta, style=STYLES["muted"]))
-            lines.append(row)
-        if len(files) > self.max_files:
+        if snapshot is None:
+            lines.append(_row("CANDIDATE", Text("measuring…", style=STYLES["muted"])))
+        elif dirty:
             lines.append(
-                Text(
-                    f"      … {len(files) - self.max_files} more files (press d)",
-                    style=STYLES["muted"],
+                _row(
+                    "CANDIDATE",
+                    Text(
+                        f"DIRTY · {formatters.snapshot_summary(snapshot)}",
+                        style=f"bold {STYLES['warning']}",
+                    ),
                 )
             )
-        self.render_block(meta, lines)
+            for entry in (snapshot.get("files") or [])[: self.max_files]:
+                added = entry.get("added")
+                deleted = entry.get("deleted")
+                delta = ""
+                if added is not None or deleted is not None:
+                    plus = added if added is not None else "-"
+                    minus = deleted if deleted is not None else "-"
+                    delta = f"  +{plus} -{minus}"
+                row = Text("          ")
+                row.append(
+                    Text(
+                        f"{formatters.file_label(str(entry.get('code')))} ",
+                        style=STYLES["warning"],
+                    )
+                )
+                row.append(elide(str(entry.get("path")), max(10, width - 26)))
+                row.append(Text(delta, style=STYLES["muted"]))
+                lines.append(row)
+            extra = len(snapshot.get("files") or []) - self.max_files
+            if extra > 0:
+                lines.append(
+                    Text(
+                        f"          + {extra} more files · press d for the diff",
+                        style=STYLES["muted"],
+                    )
+                )
+        else:
+            lines.append(
+                _row(
+                    "CANDIDATE",
+                    Text("CLEAN · no speculative changes", style=STYLES["success"]),
+                )
+            )
+        if ui.rollback is not None and not ui.rollback_active():
+            lines.append(
+                _row(
+                    "restored",
+                    Text(
+                        "after rejection · "
+                        f"{short_id(str(ui.rollback.get('to_commit')))} is trusted",
+                        style=STYLES["muted"],
+                    ),
+                )
+            )
+        self.render_block("", lines)
 
 
 class ValidationPanel(Panel):
-    """Deterministic validation, verification criteria and warnings."""
+    """Deterministic validation and the final verification gate.
+
+    Structured states, never raw output: ``✓`` pass, ``×`` fail, ``…`` running,
+    ``–`` skipped.  The evaluator's decision lives in its own panel.
+    """
 
     def __init__(self) -> None:
         super().__init__("validation", id="validation")
@@ -581,78 +629,165 @@ class ValidationPanel(Panel):
         width = self.content_width
         validation = ui.validation
         verification = ui.verification
-        meta = ""
-        lines: list[Text] = []
+        # (priority, row): 0 failure, 1 gate/warning, 2 pass, 3 note
+        rows: list[tuple[int, Text]] = []
+        running = not ui.agent_done and ui.phase == "validate"
         if validation is None and verification is None:
-            lines.append(Text("not run yet", style=STYLES["muted"]))
+            message = (
+                "… validating the candidate" if running else "– awaiting a candidate to validate"
+            )
+            rows.append((1, Text(message, style=STYLES["muted"])))
         if validation is not None:
             commands = validation.get("commands") or []
             results = validation.get("command_results") or []
-            meta = "PASS" if validation.get("passed") else "FAIL"
-            for index, result in enumerate(results[: self.max_rows]):
+            for index, result in enumerate(results):
                 success = bool(result.get("success"))
                 label = str(commands[index]) if index < len(commands) else str(result.get("tool"))
-                row = Text("")
-                row.append_text(
-                    Text("✓ " if success else "× ", style=STYLES["success" if success else "error"])
-                )
-                row.append(elide(label, max(12, width - 22)), style=STYLES["value"])
-                detail = "exit 0" if success else f"exit {result.get('exit_code')}"
-                if result.get("duration_ms") is not None:
-                    detail += f" · {result['duration_ms'] / 1000:.1f}s"
-                row.append_text(
-                    formatters.pad_row(
-                        Text(""), Text(detail, style=STYLES["muted"]), width - len(row.plain)
+                rows.append((2 if success else 0, self._check_row(success, label, result, width)))
+            if validation.get("diff_check_passed") is not None:
+                ok = bool(validation.get("diff_check_passed"))
+                rows.append(
+                    (
+                        2 if ok else 0,
+                        self._check_row(
+                            ok,
+                            "git diff --check",
+                            {"evidence": "" if ok else "conflict markers or whitespace errors"},
+                            width,
+                        ),
                     )
                 )
-                lines.append(row)
-            if "diff_check_passed" in validation:
-                ok = bool(validation.get("diff_check_passed"))
-                row = Text("")
-                row.append_text(
-                    Text("✓ " if ok else "× ", style=STYLES["success" if ok else "error"])
-                )
-                row.append("git diff --check", style=STYLES["value"])
-                lines.append(row)
-            if not results and not validation.get("diff_check_passed", True):
-                lines.append(
-                    _row("scope", Text("diff check failed", style=STYLES["error"]))
+            for path in (validation.get("scope_violations") or [])[:2]:
+                rows.append(
+                    (
+                        1,
+                        _row(
+                            "scope",
+                            Text(
+                                elide(f"outside the intended scope: {path}", width - LABEL_WIDTH),
+                                style=STYLES["warning"],
+                            ),
+                        ),
+                    )
                 )
             for warning in (validation.get("warnings") or [])[:2]:
-                warn_text = Text(
-                    elide(str(warning), width - LABEL_WIDTH), style=STYLES["warning"]
+                rows.append(
+                    (
+                        3,
+                        _row(
+                            "note",
+                            Text(elide(str(warning), width - LABEL_WIDTH), style=STYLES["muted"]),
+                        ),
+                    )
                 )
-                lines.append(_row("warn", warn_text))
         if verification is not None:
-            criteria = verification.get("criteria") or []
-            room = max(0, self.max_rows - len(lines))
-            for item in criteria[:room]:
-                ok = bool(item.get("passed"))
-                row = Text("")
-                row.append_text(
-                    Text("✓ " if ok else "× ", style=STYLES["success" if ok else "error"])
+            passed = bool(verification.get("passed"))
+            rows.append(
+                (
+                    1 if passed else 0,
+                    _row(
+                        "criteria",
+                        Text(
+                            "final verification" if passed else "verification failed",
+                            style=STYLES["success"] if passed else STYLES["error"],
+                        ),
+                    ),
                 )
-                criterion = elide(str(item.get("criterion")), max(12, width - 4))
-                row.append(criterion, style=STYLES["value"])
-                lines.append(row)
-                if not ok and item.get("evidence"):
-                    evidence = elide(str(item["evidence"]), width - 6)
-                    lines.append(Text("    " + evidence, style=STYLES["muted"]))
-            meta = "VERIFIED" if verification.get("passed") else "FAILED"
-        if ui.evaluation is not None:
-            decision = str(ui.evaluation.get("decision"))
-            reason = elide(str(ui.evaluation.get("reason") or ""), max(10, width - LABEL_WIDTH))
-            style = {
-                "accept": "success",
-                "rollback": "warning",
-                "replan": "warning",
-                "continue": "muted",
-                "finish_candidate": "accent",
-            }.get(decision, "muted")
-            lines.append(
-                _row("decision", Text(f"{decision} · {reason}", style=STYLES[style]))
             )
-        self.render_block(meta, lines)
+            for item in verification.get("criteria") or []:
+                ok = bool(item.get("passed"))
+                rows.append(
+                    (1 if ok else 0, self._check_row(ok, str(item.get("criterion")), item, width))
+                )
+        # Failures first, then the gate, then passing checks and notes: a short panel must
+        # never hide the check that actually failed.
+        budget = self.row_budget(self.max_rows)
+        ordered = sorted(range(len(rows)), key=lambda index: (rows[index][0], index))
+        lines = [rows[index][1] for index in ordered[:budget]]
+        if len(rows) > budget:
+            lines.append(
+                Text(f"… {len(rows) - budget} more checks · l for the log", style=STYLES["muted"])
+            )
+        self.render_block("", lines)
+
+    @staticmethod
+    def _check_row(
+        success: bool, label: str, result: dict[str, Any], width: int
+    ) -> Text:
+        """One check: marker, label, and the shortest honest detail available."""
+        row = Text("")
+        row.append_text(
+            Text("✓ " if success else "× ", style=STYLES["success" if success else "error"])
+        )
+        row.append(elide(label, max(12, width - 24)), style=STYLES["value"])
+        detail = ""
+        if success:
+            if result.get("duration_ms") is not None:
+                detail = f"{result['duration_ms'] / 1000:.1f}s"
+        else:
+            error = str(result.get("error") or result.get("evidence") or "")
+            lines = error.strip().splitlines()
+            if lines:
+                detail = elide(lines[0], 40)
+            elif result.get("exit_code") is not None:
+                detail = f"exit {result['exit_code']}"
+        if detail:
+            row.append_text(
+                formatters.pad_row(
+                    Text(""), Text(detail, style=STYLES["muted"]), width - len(row.plain)
+                )
+            )
+        return row
+
+
+class EvaluationPanel(Panel):
+    """The evaluator's latest decision: the gate every candidate must pass."""
+
+    DECISIONS: dict[str, tuple[str, str, str]] = {
+        "accept": ("ACCEPTED", "success", "the candidate advanced the objective"),
+        "rollback": ("ROLLBACK", "warning", "the candidate was rejected and discarded"),
+        "replan": ("REPLAN", "warning", "the plan needed to change"),
+        "continue": ("CONTINUE", "muted", "more work is needed before a checkpoint"),
+        "finish_candidate": ("FINISH CANDIDATE", "accent", "the planned work is complete"),
+    }
+
+    #: cap used when the layout has not sized the panel yet
+    max_rows: int = 4
+
+    def __init__(self) -> None:
+        super().__init__("evaluation", id="evaluation")
+
+    def render_state(self, state: AgentState | None, ui: UiState, *, subject: str = "") -> None:
+        width = self.content_width
+        evaluation = ui.evaluation
+        lines: list[Text] = []
+        if evaluation is None:
+            message = "waiting for the first evaluation" if not ui.agent_done else "no evaluation"
+            lines.append(Text(message, style=STYLES["muted"]))
+            self.render_block("", lines)
+            return
+        decision = str(evaluation.get("decision") or "")
+        word, style, meaning = self.DECISIONS.get(
+            decision, (decision.upper() or "UNKNOWN", "muted", "")
+        )
+        meta = word
+        reason = " ".join(str(evaluation.get("reason") or "").split())
+        rows = max(1, self.row_budget(self.max_rows) - 1)
+        for chunk in _wrap(reason or meaning, width - 1, rows):
+            lines.append(Text(chunk, style=STYLES["value"]))
+        if decision == "rollback":
+            restored = short_id(str(ui.rollback.get("to_commit"))) if ui.rollback else ""
+            suffix = f"restored {restored}" if restored else "candidate discarded"
+            lines.append(_row("state", Text(suffix, style=STYLES["muted"])))
+        elif decision == "accept" and subject:
+            lines.append(
+                _row("step", Text(elide(subject, width - LABEL_WIDTH), style=STYLES["muted"]))
+            )
+        elif decision == "finish_candidate":
+            lines.append(
+                _row("next", Text("entering final verification", style=STYLES["muted"]))
+            )
+        self.render_block(meta, lines, meta_style=f"bold {STYLES[style]}")
 
 
 class MetricsPanel(Panel):
@@ -662,20 +797,31 @@ class MetricsPanel(Panel):
         super().__init__("", id="metrics")
 
     def render_state(self, state: AgentState | None, ui: UiState, *, limit: int) -> None:
+        """One compact strip: context, memory, iterations.  No invented numbers."""
         width = self.content_width
         row = Text()
-        bar, label = formatters.context_usage(ui.context, limit)
+        bar_width = 10 if width >= 110 else 0
+        bar, label = formatters.context_usage(ui.context, limit, bar_width=bar_width or 10)
         row.append("CTX ", style=STYLES["title"])
-        if bar:
+        if bar and bar_width:
             row.append(bar, style=STYLES["accent"])
             row.append(" ")
-        row.append(label, style=STYLES["value"])
-        if width >= 100:
+        shown = label.replace("(est)", "est") if bar_width else label
+        row.append(shown, style=STYLES["value"])
+        counts = ui.memory
+        if width >= 78:
             row.append("   MEM ", style=STYLES["title"])
-            row.append(
-                formatters.memory_summary(ui.memory, compact=width < 120), style=STYLES["value"]
-            )
-        if state is not None and width >= 90:
+            if width >= 118:
+                row.append(formatters.memory_summary(counts), style=STYLES["value"])
+            else:
+                row.append(formatters.memory_summary(counts, compact=True), style=STYLES["value"])
+                failures = counts.get("failure", 0)
+                row.append("   FAIL ", style=STYLES["title"])
+                row.append(
+                    str(failures),
+                    style=STYLES["error"] if failures else STYLES["value"],
+                )
+        if state is not None:
             row.append("   ITER ", style=STYLES["title"])
             row.append(str(state.iteration), style=STYLES["value"])
         if state is not None and state.pending_question and width >= 110:
@@ -685,7 +831,11 @@ class MetricsPanel(Panel):
 
 
 class TimelinePanel(Panel):
-    """Curated meaningful events, newest last."""
+    """The semantic story of the run, newest last.
+
+    Only events that changed the run's state appear here — never model telemetry.  The
+    log screen keeps the complete record.
+    """
 
     def __init__(self) -> None:
         super().__init__("events", id="timeline")
@@ -693,18 +843,19 @@ class TimelinePanel(Panel):
 
     def render_state(self, ui: UiState) -> None:
         width = self.content_width
-        entries = ui.timeline[-max(1, self.rows) :]
+        rows = max(1, self.rows)
+        entries = ui.timeline[-rows:]
         hidden = len(ui.timeline) - len(entries)
         lines: list[Text] = []
         if hidden > 0:
-            lines.append(Text(f"… {hidden} earlier events (l for logs)", style=STYLES["muted"]))
+            lines.append(Text(f"… {hidden} earlier · l for the full log", style=STYLES["muted"]))
         for entry in entries:
             row = Text(entry.at.astimezone().strftime("%H:%M:%S") + " ", style=STYLES["muted"])
             row.append(f"{entry.icon} ", style=STYLES[entry.style])
             row.append(elide(entry.text, max(10, width - 14)), style=STYLES["value"])
             lines.append(row)
         if not entries:
-            lines.append(Text("no events yet", style=STYLES["muted"]))
+            lines.append(Text("waiting for the first semantic step", style=STYLES["muted"]))
         self.render_block("", lines)
 
 

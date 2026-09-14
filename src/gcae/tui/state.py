@@ -20,6 +20,7 @@ PANELS = (
     "plan",
     "activity",
     "checkpoint",
+    "evaluation",
     "validation",
     "metrics",
     "timeline",
@@ -42,10 +43,19 @@ class TimelineRow:
 
 @dataclass
 class ActionView:
-    """What the agent is doing right now, from real event timing."""
+    """What the agent is doing right now, from real event timing.
+
+    ``label`` is the human action ("Write src/app.py"), ``target`` the path or scope it
+    acts on and ``lines`` any extra detail worth one row.  Raw tool names and raw
+    arguments never reach the panel: formatting happens in ``formatters``.
+    """
 
     label: str
     lines: list[str] = field(default_factory=list)
+    target: str = ""
+    #: "tool" (a worktree operation), "model" (a model call in flight) or "runtime"
+    #: (rollback, recovery, verification, a question).  The panel presents each differently.
+    kind: str = "tool"
     state: str = "waiting"
     started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     duration_ms: float | None = None
@@ -76,6 +86,8 @@ class UiState:
     stream: dict[str, Any] | None = None
     # which role the current provider call belongs to (controller, planner, evaluator…)
     provider_role: str = ""
+    # the step whose speculative changes were already announced in the timeline
+    _candidate_announced: str | None = None
     rollback: dict[str, Any] | None = None
     # bookkeeping losses (state/memory/events): visible for the rest of the run, not just an event
     degradations: list[str] = field(default_factory=list)
@@ -223,6 +235,7 @@ class UiState:
         return {"plan", "objective", "metrics"}
 
     def _on_step_started(self, event: Event, payload: dict[str, Any]) -> set[str]:
+        self._candidate_announced = None
         self.current_step = {
             "id": event.step_id,
             "goal": payload.get("goal"),
@@ -235,6 +248,7 @@ class UiState:
         self.action = ActionView(
             label="model",
             lines=["choosing the next action"],
+            kind="model",
             state="waiting",
             started_at=event.timestamp,
         )
@@ -245,12 +259,14 @@ class UiState:
         expected = str(payload.get("expected_result") or "")
         reason = str(payload.get("reason_summary") or "")
         if isinstance(tool, dict) and tool.get("name"):
-            lines = formatters.tool_argument_lines(
+            action_label, target = formatters.tool_presentation(
                 str(tool.get("name")), tool.get("arguments") or {}
             )
             self.action = ActionView(
-                label=str(tool.get("name")),
-                lines=lines or [reason],
+                label=action_label,
+                lines=[reason] if reason else [],
+                target=target,
+                kind="tool",
                 state="running",
                 started_at=event.timestamp,
                 expected=expected or reason,
@@ -266,27 +282,58 @@ class UiState:
         return {"activity"}
 
     def _on_tool_result(self, event: Event, payload: dict[str, Any]) -> set[str]:
+        """Finish the current action: keep its human label, add the shortest honest outcome.
+
+        The tool's raw name never replaces the action's wording ("Read src/parser.py" must
+        not turn back into ``read_file`` when it completes).
+        """
+        previous = self.action
         success = bool(payload.get("success"))
         detail = ""
-        if not success:
+        if success:
+            detail = _first_line(payload.get("output"), 44)
+        else:
             if payload.get("exit_code") is not None:
                 detail = f"exit {payload['exit_code']}"
-            message = str(payload.get("error") or "").strip().splitlines()
+            message = _first_line(payload.get("error") or payload.get("output"), 60)
             if message:
-                detail = f"{detail} · {message[0]}" if detail else message[0]
+                detail = f"{detail} · {message}" if detail else message
+        label = previous.label if previous and previous.kind == "tool" else ""
+        if not label:
+            label, _ = formatters.tool_presentation(
+                str(payload.get("tool") or "tool"), payload.get("arguments") or {}
+            )
         self.action = ActionView(
-            label=str(payload.get("tool") or "tool"),
-            lines=self.action.lines if self.action else [],
+            label=label,
+            lines=previous.lines if previous else [],
+            target=previous.target if previous else "",
+            kind=previous.kind if previous else "tool",
             state="done" if success else "failed",
-            started_at=self.action.started_at if self.action else event.timestamp,
+            started_at=previous.started_at if previous else event.timestamp,
             duration_ms=payload.get("duration_ms"),
-            expected=self.action.expected if self.action else "",
+            expected=previous.expected if previous else "",
             detail=detail,
         )
         return {"activity"}
 
     def _on_candidate_state(self, event: Event, payload: dict[str, Any]) -> set[str]:
+        """Track speculative work; announce it once per step instead of per tool call.
+
+        ``candidate_state`` fires after every tool call, so rendering each one would bury
+        the semantic story.  The panel always shows the live scope; the timeline gets a
+        single ``+ candidate changed`` row per step, when speculative work first appears.
+        """
         self.candidate = payload
+        step_id = self.current_step.get("id") if self.current_step else None
+        if payload.get("dirty") and step_id != self._candidate_announced:
+            self._candidate_announced = step_id
+            self._add_timeline(
+                event.timestamp,
+                "+",
+                f"candidate changed · {formatters.snapshot_summary(payload)}",
+                "warning",
+            )
+            return {"checkpoint", "timeline"}
         return {"checkpoint"}
 
     def _on_checkpoint_created(self, event: Event, payload: dict[str, Any]) -> set[str]:
@@ -315,7 +362,7 @@ class UiState:
             self.rollbacks += 1
         if decision == "replan":
             self.replans += 1
-        return {"validation", "banner", "status", "objective"}
+        return {"evaluation", "validation", "banner", "status", "objective"}
 
     def _on_rollback_completed(self, event: Event, payload: dict[str, Any]) -> set[str]:
         self.rollback = payload
@@ -323,6 +370,7 @@ class UiState:
         self.action = ActionView(
             label="rollback",
             lines=[str(payload.get("reason") or "")],
+            kind="runtime",
             state="done",
             started_at=event.timestamp,
         )
@@ -332,6 +380,7 @@ class UiState:
         self.action = ActionView(
             label="verification",
             lines=["checking success criteria"],
+            kind="runtime",
             state="running",
             started_at=event.timestamp,
         )
@@ -342,6 +391,7 @@ class UiState:
         self.action = ActionView(
             label="verification",
             lines=[],
+            kind="runtime",
             state="done" if payload.get("passed") else "failed",
             started_at=self.action.started_at if self.action else event.timestamp,
         )
@@ -363,6 +413,7 @@ class UiState:
         self.action = ActionView(
             label=str(payload.get("role") or "model"),
             lines=[str(payload.get("model") or "")],
+            kind="model",
             state="waiting",
             started_at=event.timestamp,
         )
@@ -397,6 +448,7 @@ class UiState:
         self.action = ActionView(
             label="failover",
             lines=[f"{payload.get('role')} → {payload.get('model')}"],
+            kind="runtime",
             state="waiting",
             detail=str(payload.get("reason") or ""),
         )
@@ -406,6 +458,7 @@ class UiState:
         self.action = ActionView(
             label="self-diagnosis",
             lines=[str(payload.get("trigger") or "")],
+            kind="runtime",
             state="running",
             started_at=event.timestamp,
         )
@@ -418,6 +471,7 @@ class UiState:
                 str(payload.get("root_cause") or ""),
                 f"next: {payload.get('corrective_instruction') or ''}",
             ],
+            kind="runtime",
             state="recovered",
             started_at=event.timestamp,
         )
@@ -431,7 +485,16 @@ class UiState:
         self.action = ActionView(
             label="question",
             lines=[str(payload.get("question") or "")],
+            kind="runtime",
             state="waiting",
             started_at=event.timestamp,
         )
         return {"activity", "banner"}
+
+def _first_line(value: Any, width: int) -> str:
+    """First non-empty line of a tool's output, elided: one row, never a dump."""
+    for line in str(value or "").splitlines():
+        text = " ".join(line.split())
+        if text:
+            return text[:width]
+    return ""

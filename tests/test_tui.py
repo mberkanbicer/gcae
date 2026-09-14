@@ -29,6 +29,7 @@ from gcae.tui.widgets import (
     ActivityPanel,
     BannerPanel,
     CheckpointPanel,
+    EvaluationPanel,
     FooterBar,
     MetricsPanel,
     ObjectivePanel,
@@ -188,7 +189,9 @@ def test_empty_state_renders_without_a_task(tmp_path: Path) -> None:
             await pilot.pause()
             assert isinstance(app.screen, RequestModal)
             assert "no task yet" in str(app.query_one(ObjectivePanel).body.plain)
-            assert "not run yet" in str(app.query_one(ValidationPanel).body.plain)
+            assert "awaiting a candidate to validate" in str(
+                app.query_one(ValidationPanel).body.plain
+            )
 
     asyncio.run(scenario())
 
@@ -303,9 +306,9 @@ def test_step_and_tool_events_update_activity(tmp_path: Path) -> None:
             assert "NOW" in objective
             assert "fix quote state across chunks" in objective
             activity = str(app.query_one(ActivityPanel).body.plain)
-            assert "waiting for model" in activity
-            # a model call in flight shows the role and how long it has been waiting
-            assert "act · " in activity
+            # a model call in flight is one calm row: role, state, elapsed
+            assert "model · waiting" in activity
+            assert "s" in activity
 
             app._consume_event(
                 event(
@@ -380,10 +383,9 @@ def test_validation_and_verification_update_the_panel(tmp_path: Path) -> None:
                 )
             )
             panel = str(app.query_one(ValidationPanel).body.plain)
-            assert "FAIL" in panel
-            assert "pytest tests/parser/" in panel
-            assert "ruff check ." in panel
-            assert "git diff --check" in panel
+            assert "× pytest tests/parser/" in panel
+            assert "✓ ruff check ." in panel
+            assert "✓ git diff --check" in panel
             assert "dependency manifests changed" in panel
 
             app._consume_event(
@@ -407,7 +409,7 @@ def test_validation_and_verification_update_the_panel(tmp_path: Path) -> None:
                 )
             )
             panel = str(app.query_one(ValidationPanel).body.plain)
-            assert "FAILED" in panel
+            assert "verification failed" in panel
             assert "2 failed, 10 passed" in panel
 
     asyncio.run(scenario())
@@ -1024,9 +1026,16 @@ def test_responsive_smoke(tmp_path: Path, size: tuple[int, int]) -> None:
             width, _ = size
             main = app.query_one("#main")
             assert main.has_class("stacked") == (width < 100)
-            assert app.query_one(MetricsPanel).display == (width >= 90)
-            assert str(app.query_one(ObjectivePanel).body.plain).strip() != ""
-            assert str(app.query_one(ActivityPanel).body.plain).strip() != ""
+            assert app.query_one(MetricsPanel).display == (width >= 80)
+            # priority 1 at every size: objective/NOW, plan, active, checkpoint
+            for panel in (ObjectivePanel, PlanPanel, ActivityPanel, CheckpointPanel):
+                text = str(app.query_one(panel).body.plain).strip()
+                assert text, f"{panel.__name__} rendered nothing at {size}"
+            assert "NOW" in str(app.query_one(ObjectivePanel).body.plain)
+            assert "CANDIDATE" in str(app.query_one(CheckpointPanel).body.plain)
+            activity = str(app.query_one(ActivityPanel).body.plain)
+            assert "do work" in activity
+            assert "model · waiting" in activity or "RUNNING" in activity
             assert app.size.width == width
 
     asyncio.run(scenario())
@@ -1094,13 +1103,17 @@ def test_formatters() -> None:
     clean = {"dirty": False, "files": [], "added": 0, "deleted": 0}
     assert formatters.snapshot_summary(clean) == "CLEAN"
     assert formatters.memory_summary({}) == "empty"
-    lines = formatters.tool_argument_lines(
-        "read_file", {"path": "src/parser.py", "content": "x" * 200, "offset": 3}
+    action, target = formatters.tool_presentation("read_file", {"path": "src/parser.py"})
+    assert action == "Read src/parser.py" and target == "src/parser.py"
+    action, target = formatters.tool_presentation("run_command", {"command": "pytest -q"})
+    assert action == "pytest -q" and target == ""
+    action, target = formatters.tool_presentation(
+        "search_text", {"query": "population", "path": "src/"}
     )
-    assert lines[0] == "src/parser.py"
-    assert "200 chars" in lines[1]
-    assert lines[2] == "offset=3"
-    assert all("{" not in line for line in lines)
+    assert action == 'Search "population"' and target == "src/"
+    action, _ = formatters.tool_presentation("create_file", {"path": "src/app.py"})
+    assert action == "Create src/app.py"
+    assert "{" not in action
     assert formatters.timeline_entry("tool_result", {"tool": "read_file"}, succeeded=True) is None
     failed = formatters.timeline_entry(
         "tool_result", {"tool": "read_file", "error": "boom"}, False
@@ -1112,8 +1125,12 @@ def test_formatters() -> None:
     assert [name for name, _, _, _ in sections] == ["objective", "plan", "diff"]
     assert sections[2][1] == len("Current diff:\n+a\n-b")
     assert formatters.status_style("failed: provider output") == "error"
-    assert formatters.run_badge("complete", paused=False) == ("COMPLETE", "success")
-    assert formatters.run_badge("running", paused=True) == ("PAUSED", "warning")
+    assert formatters.run_state("complete", "complete", False) == ("COMPLETE", "success")
+    assert formatters.run_state("running", "execute", True) == ("PAUSED", "warning")
+    assert formatters.run_state("running", "execute", False) == ("ACTING", "accent")
+    assert formatters.run_state("running", "validate", False) == ("VALIDATING", "accent")
+    assert formatters.run_state("running", "rollback", False) == ("ROLLING BACK", "accent")
+    assert formatters.run_state("waiting_for_user", "plan", False) == ("WAITING", "warning")
     assert formatters.role_for_phase("evaluate") == "EVAL"
 
 
@@ -1444,3 +1461,435 @@ def test_a_degraded_run_is_flagged_in_the_status_bar() -> None:
         )
     )
     assert len(ui.degradations) == 1
+
+
+def _event(event_type: str, payload: dict[str, object], step_id: str | None = None) -> Event:
+    return Event(
+        run_id="test-run",
+        event_type=event_type,
+        step_id=step_id,
+        timestamp=datetime.now(UTC),
+        payload=payload,
+    )
+
+
+# =============================================================== redesign: event curation
+# Model streaming is telemetry: it must never enter the semantic timeline and never put
+# generated text on the main screen.  It belongs to the log screen.
+
+
+def test_streaming_telemetry_never_reaches_the_semantic_timeline() -> None:
+    ui = UiState()
+    telemetry = [
+        ("provider_started", {"role": "controller", "model": "qwen/qwen3-coder"}),
+        ("provider_first_token", {"role": "controller", "elapsed_ms": 800.0}),
+        (
+            "provider_progress",
+            {
+                "role": "controller",
+                "characters": 1300,
+                "elapsed_ms": 3000.0,
+                "preview": "def fib(",
+            },
+        ),
+        ("provider_waiting", {"role": "planner", "elapsed_ms": 12000.0}),
+        ("provider_finished", {"role": "controller", "elapsed_ms": 3400.0}),
+    ]
+    for event_type, payload in telemetry:
+        ui.apply(event(event_type, payload))
+
+    assert ui.timeline == [], "streaming telemetry must not appear in the timeline"
+    assert len(ui.logs) == len(telemetry), "the log screen keeps every raw event"
+    assert any("[model]" in line and "progress" in line for line in ui.logs)
+    assert any("chars=1300" in line for line in ui.logs), "logs keep the raw counters"
+    assert any("preview=def fib(" in line for line in ui.logs)
+
+
+def test_semantic_events_do_appear_in_the_timeline() -> None:
+    ui = UiState()
+    ui.apply(
+        event(
+            "step_started",
+            {"goal": "design the model", "index": 2, "total": 5},
+            step_id="step-2",
+        )
+    )
+    ui.apply(
+        event(
+            "validation",
+            {"passed": False, "command_results": [{"success": False, "tool": "pytest"}]},
+            step_id="step-2",
+        )
+    )
+    ui.apply(
+        event(
+            "rollback_completed",
+            {"reason": "global mutable state", "to_commit": "abc1234", "discarded": ["a.py"]},
+            step_id="step-2",
+        )
+    )
+    icons = [row.icon for row in ui.timeline]
+    assert "●" in icons and "×" in icons and "↩" in icons
+    assert any("rollback" in row.text for row in ui.timeline)
+
+
+def test_a_dirty_candidate_is_announced_once_per_step() -> None:
+    """candidate_state fires after every tool call; the timeline must not flood."""
+    ui = UiState()
+    ui.apply(
+        event("step_started", {"goal": "write the model", "index": 1, "total": 2}, step_id="s1")
+    )
+    dirty = {
+        "dirty": True,
+        "files": [{"code": " M", "path": "src/model.py", "added": 10, "deleted": 2}],
+        "added": 10,
+        "deleted": 2,
+    }
+    for _ in range(5):
+        ui.apply(event("candidate_state", dirty, step_id="s1"))
+    changed = [row for row in ui.timeline if "candidate changed" in row.text]
+    assert len(changed) == 1, "one announcement per step, not one per tool call"
+    assert "+10 -2" in changed[0].text
+
+    ui.apply(event("step_started", {"goal": "next step", "index": 2, "total": 2}, step_id="s2"))
+    ui.apply(event("candidate_state", dirty, step_id="s2"))
+    assert len([row for row in ui.timeline if "candidate changed" in row.text]) == 2
+
+
+def _rendered(app: GcaeApp, panel_type: type, ui: UiState, **kwargs: object) -> str:
+    """Render one panel inside a running app and return its text."""
+
+    async def scenario() -> str:
+        async with app.run_test(size=(120, 35)) as pilot:
+            await pilot.pause()
+            app.ui = ui
+            panel = app.query_one(panel_type)
+            panel.render_state(app.runtime.state, ui, **kwargs)  # type: ignore[attr-defined]
+            return str(panel.body.plain)
+
+    return asyncio.run(scenario())
+
+
+def test_the_active_panel_shows_state_not_streaming(tmp_path: Path) -> None:
+    """No character counts, no partial generation: the panel reports the operation."""
+    ui = UiState()
+    ui.apply(
+        event(
+            "decision",
+            {
+                "action": "execute_tool",
+                "reason_summary": "create the model file",
+                "expected_result": "state and one transition exist",
+                "tool": {
+                    "name": "create_file",
+                    "arguments": {"path": "src/model.py", "content": "x" * 400},
+                },
+            },
+            step_id="step-1",
+        )
+    )
+    ui.apply(
+        event(
+            "provider_progress",
+            {"role": "controller", "characters": 982, "preview": "import random\nclass"},
+        )
+    )
+    body = _rendered(
+        GcaeApp(make_runtime(tmp_path, start=False), auto_run=False),
+        ActivityPanel,
+        ui,
+        model="qwen/qwen3-coder",
+    )
+    assert "Create src/model.py" in body, "the action is human-readable, not a tool name"
+    assert "src/model.py" in body, "the target is its own row"
+    assert "create the model file" in body
+    assert "RUNNING" in body
+    assert "982" not in body, "character counts are telemetry"
+    assert "import random" not in body, "partial generation is telemetry"
+
+
+def test_the_active_panel_shows_one_calm_row_while_a_model_generates(tmp_path: Path) -> None:
+    """A model call in flight is a state, not a transcript."""
+    ui = UiState()
+    ui.apply(
+        event("step_started", {"goal": "design the model", "index": 1, "total": 3}, step_id="s1")
+    )
+    ui.apply(event("provider_started", {"role": "controller", "model": "qwen/qwen3-coder"}))
+    ui.apply(
+        event(
+            "provider_progress",
+            {
+                "role": "controller",
+                "characters": 2400,
+                "reasoning_characters": 900,
+                "preview": "class Population:\n    def __init__",
+            },
+        )
+    )
+    body = _rendered(
+        GcaeApp(make_runtime(tmp_path, start=False), auto_run=False),
+        ActivityPanel,
+        ui,
+        model="qwen/qwen3-coder",
+    )
+    assert "controller · generating" in body
+    assert "qwen/qwen3-coder" in body
+    assert "2400" not in body and "900" not in body, "no character telemetry"
+    assert "class Population" not in body, "no generated text on the main screen"
+
+
+def test_the_checkpoint_panel_separates_trusted_from_candidate(tmp_path: Path) -> None:
+    class _State:
+        accepted_commit = "1f383c6deaf"
+
+    ui = UiState()
+    ui.apply(
+        event(
+            "candidate_state",
+            {
+                "dirty": True,
+                "files": [
+                    {"code": " M", "path": "src/simulation.py", "added": 24, "deleted": 5},
+                    {"code": "??", "path": "tests/test_simulation.py", "added": 3, "deleted": 0},
+                ],
+                "added": 27,
+                "deleted": 5,
+            },
+        )
+    )
+    app = GcaeApp(make_runtime(tmp_path, start=False), auto_run=False)
+
+    async def scenario() -> None:
+        async with app.run_test(size=(120, 35)) as pilot:
+            await pilot.pause()
+            panel = app.query_one(CheckpointPanel)
+            panel.render_state(_State(), ui, subject="Base commit")  # type: ignore[arg-type]
+            body = panel.body.plain
+            assert "TRUSTED" in body and "1f383c6" in body
+            assert "CANDIDATE" in body and "DIRTY" in body and "2 files" in body
+            assert "src/simulation.py" in body and "+24 -5" in body
+
+            ui.candidate = {"dirty": False, "files": [], "added": 0, "deleted": 0}
+            panel.render_state(_State(), ui, subject="Base commit")  # type: ignore[arg-type]
+            assert "CLEAN · no speculative changes" in panel.body.plain
+
+    asyncio.run(scenario())
+
+
+def test_the_validation_panel_reports_structured_checks(tmp_path: Path) -> None:
+    ui = UiState()
+    ui.apply(
+        event(
+            "validation",
+            {
+                "passed": False,
+                "commands": ["pytest -q tests/test_population.py"],
+                "command_results": [
+                    {
+                        "tool": "run_command",
+                        "success": False,
+                        "exit_code": 1,
+                        "error": "Expected: 120\nActual: 0",
+                    }
+                ],
+                "diff_check_passed": True,
+            },
+        )
+    )
+    body = _rendered(
+        GcaeApp(make_runtime(tmp_path, start=False), auto_run=False), ValidationPanel, ui
+    )
+    assert "× pytest -q tests/test_population.py" in body
+    assert "Expected: 120" in body, "the failing check explains itself"
+    assert "✓ git diff --check" in body
+    assert "decision" not in body, "the evaluator has its own panel"
+
+
+def test_the_evaluation_panel_shows_the_decision_and_reason(tmp_path: Path) -> None:
+    ui = UiState()
+    ui.apply(
+        event(
+            "evaluation",
+            {
+                "decision": "rollback",
+                "reason": "candidate introduced unnecessary global mutable state",
+            },
+        )
+    )
+    body = _rendered(
+        GcaeApp(make_runtime(tmp_path, start=False), auto_run=False), EvaluationPanel, ui
+    )
+    assert "ROLLBACK" in body
+    assert "candidate introduced unnecessary global mutable state" in body
+
+    empty = _rendered(
+        GcaeApp(make_runtime(tmp_path, start=False), auto_run=False), EvaluationPanel, UiState()
+    )
+    assert "waiting for the first evaluation" in empty
+
+
+def test_each_run_state_renders_its_headline(tmp_path: Path) -> None:
+    """The state matrix the redesign promises: every condition has a visible headline."""
+    from gcae.tui.widgets import EvaluationPanel
+
+    cases: list[tuple[str, list[tuple[str, dict[str, object]]], type, str]] = [
+        (
+            "candidate dirty",
+            [
+                (
+                    "candidate_state",
+                    {
+                        "dirty": True,
+                        "files": [{"code": " M", "path": "src/sim.py", "added": 8, "deleted": 1}],
+                        "added": 8,
+                        "deleted": 1,
+                    },
+                )
+            ],
+            CheckpointPanel,
+            "DIRTY",
+        ),
+        (
+            "validation failed",
+            [
+                (
+                    "validation",
+                    {
+                        "passed": False,
+                        "commands": ["pytest -q"],
+                        "command_results": [
+                            {"success": False, "exit_code": 1, "tool": "run_command"}
+                        ],
+                        "diff_check_passed": True,
+                    },
+                )
+            ],
+            ValidationPanel,
+            "× pytest -q",
+        ),
+        (
+            "rollback",
+            [
+                # a real run emits the decision first, then the rollback that acted on it
+                (
+                    "evaluation",
+                    {
+                        "decision": "rollback",
+                        "reason": "global mutable state is not acceptable",
+                    },
+                ),
+                (
+                    "rollback_completed",
+                    {
+                        "reason": "global mutable state is not acceptable",
+                        "to_commit": "abc1234",
+                        "discarded": ["a.py"],
+                    },
+                ),
+            ],
+            EvaluationPanel,
+            "global mutable state is not acceptable",
+        ),
+        (
+            "accepted",
+            [("evaluation", {"decision": "accept", "reason": "the goal was met"})],
+            EvaluationPanel,
+            "ACCEPTED",
+        ),
+        (
+            "replan",
+            [("evaluation", {"decision": "replan", "reason": "the assumption was wrong"})],
+            EvaluationPanel,
+            "REPLAN",
+        ),
+        (
+            "finish candidate",
+            [("evaluation", {"decision": "finish_candidate", "reason": "all steps done"})],
+            EvaluationPanel,
+            "FINISH CANDIDATE",
+        ),
+    ]
+    app = GcaeApp(make_runtime(tmp_path, start=False), auto_run=False)
+
+    async def scenario() -> None:
+        async with app.run_test(size=(130, 40)) as pilot:
+            await pilot.pause()
+            for label, events, panel_type, expected in cases:
+                ui = UiState()
+                for event_type, payload in events:
+                    ui.apply(event(event_type, payload))
+                app.ui = ui
+                panel = app.query_one(panel_type)
+                kwargs = {"subject": "Base commit"} if panel_type is CheckpointPanel else {}
+                panel.render_state(app.runtime.state, ui, **kwargs)  # type: ignore[attr-defined]
+                body = str(panel.body.plain)
+                assert expected in body, f"{label}: {expected!r} not in {body!r}"
+
+    asyncio.run(scenario())
+
+
+def test_a_model_call_never_renders_generated_text() -> None:
+    """Belt and braces for the central rule of the redesign."""
+    from gcae.tui import formatters
+
+    payload = {
+        "role": "planner",
+        "model": "qwen/qwen3-coder",
+        "characters": 4096,
+        "reasoning_characters": 12000,
+        "elapsed_ms": 9000,
+        "preview": '{"steps": [{"id": "step-1", "goal": "leaked"}]}',
+    }
+    assert formatters.timeline_entry("provider_progress", payload) is None
+    assert formatters.timeline_entry("provider_first_token", payload) is None
+    assert formatters.timeline_entry("provider_started", payload) is None
+    log = formatters.log_line("provider_progress", "plan", payload)
+    assert "step-1" not in log or "preview=" in log, "the log may keep the preview, labelled"
+    assert "preview=" in log
+
+
+def test_a_finished_tool_keeps_its_human_label_and_reports_the_outcome(tmp_path: Path) -> None:
+    """`Read src/parser.py` must not revert to `read_file`, and the result is one line."""
+    ui = UiState()
+    ui.apply(
+        event(
+            "decision",
+            {
+                "action": "execute_tool",
+                "reason_summary": "inspect the parser",
+                "expected_result": "chunk handling located",
+                "tool": {"name": "read_file", "arguments": {"path": "src/parser.py"}},
+            },
+            step_id="s1",
+        )
+    )
+    ui.apply(
+        event(
+            "tool_result",
+            {
+                "tool": "read_file",
+                "success": True,
+                "duration_ms": 320.0,
+                "output": "def feed(chunk):\n    return chunk\n",
+            },
+            step_id="s1",
+        )
+    )
+    body = _rendered(
+        GcaeApp(make_runtime(tmp_path, start=False), auto_run=False), ActivityPanel, ui
+    )
+    assert "Read src/parser.py" in body, body
+    assert "read_file" not in body, "the raw tool name must not come back"
+    assert "DONE" in body and "def feed(chunk)" in body, "one line of the real outcome"
+
+    ui.apply(
+        event(
+            "tool_result",
+            {"tool": "run_command", "success": False, "exit_code": 1, "error": "3 failed"},
+            step_id="s1",
+        )
+    )
+    failure = _rendered(
+        GcaeApp(make_runtime(tmp_path, start=False), auto_run=False), ActivityPanel, ui
+    )
+    assert "FAILED" in failure and "exit 1" in failure and "3 failed" in failure

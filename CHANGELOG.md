@@ -4,6 +4,50 @@ All notable changes to GCAE are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] — 2026-09-14
+
+### Changed
+
+- **The dashboard shows state, not telemetry.** The main screen answers "what is being
+  accomplished, with what, and how far did it get" in about three seconds; model streaming lives in
+  the log screen where it belongs.
+  - Provider events (`provider_started`, `provider_first_token`, `provider_progress`,
+    `provider_waiting`) no longer create timeline entries. They used to fill the curated event list
+    with `streaming controller · 1.2k chars · 3s` lines and push the semantic story out of view.
+    The log screen keeps every one of them, now with role, model, character and reasoning counts and
+    the streamed preview.
+  - The ACTIVE panel no longer prints character counts or partial generations. It shows GOAL,
+    ACTION (in human words — "Create src/model.py", not `create_file` + raw JSON), TARGET, WHY,
+    EXPECTED and a single state row; a model call in flight is one calm line (`controller ·
+    generating · 3.4s`) plus the model name.
+  - The timeline is a bounded strip (3–10 rows) instead of a `1fr` panel. On a tall terminal the
+    old layout turned the screen into a mostly empty log; now the two columns absorb the slack, so
+    a taller terminal shows more plan steps and more checks.
+  - `candidate_state` (which fires after every tool call) is announced **once per step** as
+    `+ candidate changed · 2 files · +81 -4`; the panel itself always shows the live scope.
+  - The evaluator's decision has its own EVALUATION section (decision word plus the stored reason)
+    instead of a `decision` row inside VALIDATION.
+  - VALIDATION is a structured check list (`✓`/`×`/`…`/`–`) that never dumps command output, and
+    rows are ordered failures first so a short panel cannot hide the failing check. A failed
+    criterion now carries its evidence.
+  - The CHECKPOINT panel states the distinction in words: `TRUSTED <commit> <subject>`,
+    `CANDIDATE DIRTY · N files · +A -D` with the file scope, `CLEAN · no speculative changes`, and
+    `restored after rejection` after a rollback.
+  - The top bar names the run state from the real phase (`PLANNING`, `ACTING`, `VALIDATING`,
+    `EVALUATING`, `CHECKPOINTING`, `ROLLING BACK`, `VERIFYING`, `PAUSED`, terminal states) and keeps
+    the elapsed time at every width.
+  - Empty states are deliberate: `waiting for the first plan`, `– awaiting a candidate to validate`,
+    `waiting for the first evaluation`, `waiting for the first semantic step`.
+  - Panel row budgets follow the space the layout gives them, so panels fill with content instead of
+    leaving holes at the bottom of a box.
+
+### Removed
+
+- `formatters.run_badge`, `formatters.thousands` and `ActivityPanel._stream_row` (dead after the
+  redesign); the `original` label on the objective, replaced by `request` under an `OBJECTIVE`
+  heading; the duplicated merge note in the timeline (the runtime's `merge_completed` event already
+  reports it).
+
 ## [0.1.7] — 2026-09-14
 
 ### Fixed

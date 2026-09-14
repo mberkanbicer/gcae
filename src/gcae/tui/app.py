@@ -36,6 +36,7 @@ from .widgets import (
     ActivityPanel,
     BannerPanel,
     CheckpointPanel,
+    EvaluationPanel,
     FooterBar,
     MetricsPanel,
     ObjectivePanel,
@@ -98,7 +99,15 @@ class GcaeApp(App[None]):
         self.last_error: str | None = None
         self.checkpoint_subject = ""
         self.agent_done = False
-        self.focus_order = ["plan", "checkpoint", "validation", "activity", "objective", "timeline"]
+        self.focus_order = [
+            "plan",
+            "activity",
+            "checkpoint",
+            "evaluation",
+            "validation",
+            "objective",
+            "timeline",
+        ]
         self.focus_index = 0
         self._needs_start = request is not None and runtime.state is None
         self._merge_attempted = False
@@ -119,6 +128,7 @@ class GcaeApp(App[None]):
                 yield ActivityPanel()
                 yield CheckpointPanel()
                 yield ValidationPanel()
+                yield EvaluationPanel()
         yield BannerPanel()
         yield MetricsPanel()
         yield Static("", id="rule-top", classes="rule")
@@ -149,6 +159,11 @@ class GcaeApp(App[None]):
         self._refresh_panels(set(PANELS))
 
     def _apply_responsive(self) -> None:
+        """Three practical tiers: large (2 columns), normal (2 columns), narrow (stacked).
+
+        Width decides the layout, height decides how much *history* fits.  Priority order
+        everywhere: run state, NOW, ACTIVE, PLAN, CHECKPOINT, EVALUATION, VALIDATION.
+        """
         width = self.size.width
         height = self.size.height
         try:
@@ -157,25 +172,28 @@ class GcaeApp(App[None]):
             timeline = self.query_one(TimelinePanel)
             plan = self.query_one(PlanPanel)
             checkpoint = self.query_one(CheckpointPanel)
+            evaluation = self.query_one(EvaluationPanel)
             validation = self.query_one(ValidationPanel)
         except NoMatches:  # pragma: no cover - resize before composition
             return
-        main.set_class(width < WIDTH_NORMAL, "stacked")
-        timeline.set_class(width < WIDTH_NORMAL, "compact")
-        metrics.display = width >= 90
-        timeline.display = height >= 20
         stacked = width < WIDTH_NORMAL
+        large = width >= WIDTH_LARGE
+        main.set_class(stacked, "stacked")
+        timeline.set_class(stacked, "compact")
+        metrics.display = width >= 80
+        timeline.display = height >= 18
         if stacked:
-            timeline.rows = 3
+            timeline.rows = 3 if height < HEIGHT_SHORT else 4
         elif height >= HEIGHT_TALL:
-            timeline.rows = 16 if width >= WIDTH_LARGE else 12
+            timeline.rows = 10 if large else 8
         elif height >= HEIGHT_SHORT:
-            timeline.rows = 8
+            timeline.rows = 6
         else:
-            timeline.rows = 4
-        plan.max_rows = 5 if stacked or height < HEIGHT_SHORT else 10
+            timeline.rows = 3
+        plan.max_rows = 6 if stacked or height < HEIGHT_SHORT else (12 if large else 9)
         checkpoint.max_files = 4 if height >= HEIGHT_SHORT else 2
-        validation.max_rows = 4 if height < HEIGHT_SHORT else 8
+        validation.max_rows = 4 if height < HEIGHT_SHORT else (8 if large else 6)
+        evaluation.max_rows = 3 if height < HEIGHT_SHORT else 4
         rule = "─" * max(10, width)
         for rule_id in ("rule-top", "rule-bottom"):
             rule_widget = self.query_one(f"#{rule_id}", Static)
@@ -302,9 +320,13 @@ class GcaeApp(App[None]):
         elif name == "plan":
             self.query_one(PlanPanel).render_state(state, ui)
         elif name == "activity":
-            self.query_one(ActivityPanel).render_state(state, ui)
+            self.query_one(ActivityPanel).render_state(state, ui, model=self._model_label())
         elif name == "checkpoint":
             self.query_one(CheckpointPanel).render_state(
+                state, ui, subject=self._checkpoint_subject()
+            )
+        elif name == "evaluation":
+            self.query_one(EvaluationPanel).render_state(
                 state, ui, subject=self._checkpoint_subject()
             )
         elif name == "validation":
@@ -501,10 +523,13 @@ class GcaeApp(App[None]):
         commit = str(getattr(record, "merge_commit", ""))[:7]
         state = self.runtime.state
         unverified = state is not None and state.status != "complete"
-        note = f"merged into {target} · {commit}"
         if unverified:
-            note += " · accepted work only, final verification did not pass"
-        self.ui.add_note("✓", f"{note} · gcae undo reverses it", "success")
+            self.ui.add_note(
+                "✓",
+                f"merged into {target} · {commit} · accepted work only, "
+                "final verification did not pass",
+                "warning",
+            )
         self._refresh_panels({"banner", "footer", "timeline", "checkpoint"})
 
     def _on_merge_failed(self, reason: str) -> None:

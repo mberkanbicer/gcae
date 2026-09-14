@@ -145,6 +145,45 @@ def script(runtime: Runtime, stop: threading.Event) -> None:
         runtime._event(kind, phase, step_id=step, payload=payload or {})
         time.sleep(pause)
 
+    def model_call(role: str, model: str, *, chunks: int = 4, characters: int = 420) -> None:
+        """Emit the streaming telemetry a real provider produces for one call."""
+        started = time.monotonic()
+        runtime._event(
+            "provider_started",
+            None,
+            payload={"role": role, "model": model},
+        )
+        time.sleep(0.2)
+        runtime._event(
+            "provider_first_token",
+            None,
+            payload={"role": role, "model": model, "elapsed_ms": 200.0, "characters": 1},
+        )
+        for index in range(1, chunks + 1):
+            time.sleep(0.15)
+            runtime._event(
+                "provider_progress",
+                None,
+                payload={
+                    "role": role,
+                    "model": model,
+                    "characters": index * characters,
+                    "reasoning_characters": index * 90,
+                    "elapsed_ms": (time.monotonic() - started) * 1000,
+                    "preview": "partial generation that must never reach the main screen",
+                },
+            )
+        runtime._event(
+            "provider_finished",
+            None,
+            payload={
+                "role": role,
+                "model": model,
+                "elapsed_ms": (time.monotonic() - started) * 1000,
+                "characters": chunks * characters,
+            },
+        )
+
     def plan_payload(reason: str, completed: int, **extra: object) -> dict[str, object]:
         payload: dict[str, object] = {
             "reason": reason,
@@ -172,6 +211,7 @@ def script(runtime: Runtime, stop: threading.Event) -> None:
         "step-1",
     )
     emit("memory_updated", {"counts": {"user_instruction": 3, "fact": 4, "decision": 2}})
+    model_call("controller", "qwen/qwen3-coder")
     emit(
         "decision",
         {

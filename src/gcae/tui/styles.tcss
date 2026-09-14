@@ -1,21 +1,27 @@
 /* GCAE dashboard theme.
  *
- * Semantic selectors only: status, checkpoint, candidate, validation and focus
- * states.  Colours come from the Textual theme so terminal themes stay usable.
- * Text colour inside panels is set by gcae.tui.formatters.STYLES.
+ * Semantic selectors only: run state, checkpoint/candidate, validation, evaluation and
+ * focus.  Colours come from the Textual theme so terminal themes stay usable; text
+ * colour inside panels is set by gcae.tui.formatters.STYLES.
+ *
+ * Layout principle: the main region absorbs slack so a long plan or a long check list
+ * becomes *more visible content*, while the event timeline keeps a bounded height.  The
+ * old design gave the timeline `1fr`, which turned most of the screen into an empty log
+ * panel on a tall terminal.
  */
 
 Screen {
     background: $background;
 }
 
-/* Panels take the container width: content must never set the width, otherwise
- * a render before the first layout locks the panel into a tiny width. */
+/* Panels take the container width: content must never set the width, otherwise a render
+ * before the first layout locks the panel into a tiny width. */
 #status,
 #objective,
 #plan,
 #activity,
 #checkpoint,
+#evaluation,
 #validation,
 #banner,
 #metrics,
@@ -36,94 +42,87 @@ Screen {
 
 /* ------------------------------------------------------------------ layout */
 
-/* The main area is content sized; the timeline absorbs the slack, so slack becomes
- * more visible history instead of a blank band. */
 #main {
-    height: auto;
+    height: 1fr;
     layout: horizontal;
 }
 
 #column-left {
     width: 2fr;
-    height: auto;
+    height: 1fr;
 }
 
 #column-right {
     width: 3fr;
-    height: auto;
+    height: 1fr;
 }
 
-/* Stacked (narrow) screens scroll inside the main region so the status bar,
- * timeline and footer stay pinned and reachable. */
+/* Left column: the objective is capped, the plan grows (more steps visible). */
+#objective {
+    height: auto;
+    max-height: 8;
+    padding: 0 1;
+}
+
+#plan {
+    height: 1fr;
+    padding: 0 1;
+}
+
+/* Right column: ACTIVE, CHECKPOINT and VALIDATION size to their content (validation up to a
+ * cap) and the EVALUATION box absorbs the slack, so spare rows land at the bottom edge of the
+ * column rather than as a hole between two panels. */
+#activity {
+    height: auto;
+    max-height: 13;
+    padding: 0 1;
+}
+
+#checkpoint {
+    height: auto;
+    max-height: 12;
+    padding: 0 1;
+}
+
+#evaluation {
+    height: 1fr;
+    padding: 0 1;
+}
+
+#validation {
+    height: auto;
+    max-height: 12;
+    padding: 0 1;
+}
+
+/* Stacked (narrow) screens scroll inside the main region so the status bar, timeline
+ * and footer stay pinned and reachable. */
 #main.stacked {
     layout: vertical;
     height: 1fr;
     overflow-y: auto;
-    /* keep panel text clear of the overlay scrollbar */
     padding-right: 2;
 }
 
 #main.stacked #column-left,
 #main.stacked #column-right {
     width: 1fr;
-}
-
-/* Panels are content sized with caps: no interior holes, no reflow surprises.
- * Slack collects in the plan (left) and validation (right) regions, which are the
- * two places where extra rows are actually useful. */
-#objective {
     height: auto;
-    min-height: 4;
-    max-height: 7;
-    padding: 0 1;
-}
-
-#plan {
-    height: auto;
-    min-height: 4;
-    max-height: 11;
-    padding: 0 1;
-}
-
-#activity {
-    height: auto;
-    min-height: 4;
-    max-height: 8;
-    padding: 0 1;
-}
-
-#checkpoint {
-    height: auto;
-    min-height: 3;
-    max-height: 9;
-    padding: 0 1;
-}
-
-#validation {
-    height: auto;
-    min-height: 4;
-    max-height: 11;
-    padding: 0 1;
 }
 
 #main.stacked #objective,
 #main.stacked #activity,
-#main.stacked #checkpoint {
+#main.stacked #checkpoint,
+#main.stacked #evaluation,
+#main.stacked #validation,
+#main.stacked #plan {
     height: auto;
-    min-height: 4;
-    max-height: 10;
-}
-
-#main.stacked #plan,
-#main.stacked #validation {
-    height: auto;
-    min-height: 4;
-    max-height: 10;
+    max-height: 12;
 }
 
 #banner {
     height: auto;
-    max-height: 6;
+    max-height: 7;
     padding: 0 1;
     background: $surface;
 }
@@ -143,16 +142,17 @@ Screen {
 
 /* ---------------------------------------------------------------- timeline */
 
+/* Bounded: the semantic story is a strip, not the screen.  Extra rows become more
+ * visible history up to the cap, then the panel scrolls its window. */
 #timeline {
-    height: 1fr;
-    min-height: 4;
+    height: auto;
+    min-height: 5;
+    max-height: 13;
     padding: 0 1;
 }
 
-/* Narrow screens: keep the event strip small so the checkpoint and validation
- * panels fit above it. */
 #timeline.compact {
-    height: 4;
+    max-height: 6;
 }
 
 #footer {
@@ -168,6 +168,7 @@ Screen {
 #objective:focus,
 #activity:focus,
 #checkpoint:focus,
+#evaluation:focus,
 #validation:focus,
 #plan:focus,
 #timeline:focus {

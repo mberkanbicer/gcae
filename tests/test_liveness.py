@@ -668,58 +668,93 @@ def test_a_silent_model_call_marks_the_waiting_action() -> None:
     assert ui.stream is not None and ui.stream["waiting"] is True
 
 
-def test_the_activity_panel_renders_the_live_stream() -> None:
+def _panel_app() -> Any:
+    """An app with a started runtime, for rendering a single panel with real wiring."""
+    import tempfile
+
+    from gcae.providers import FakeProvider
+    from gcae.runtime import Runtime, RuntimeControl
+    from gcae.tui.app import GcaeApp
+
+    root = Path(tempfile.mkdtemp())
+    source = root / "source"
+    source.mkdir()
+    init_repo(source)
+    runtime = Runtime(source, root / "runtime", provider=FakeProvider([]), control=RuntimeControl())
+    runtime.start("do the work", success_criteria=["file exists: README"])
+    return GcaeApp(runtime, auto_run=False)
+
+
+def _render_panel(panel_type: type, ui: UiState, **kwargs: object) -> str:
+    import asyncio
+
+    async def scenario() -> str:
+        app = _panel_app()
+        async with app.run_test(size=(120, 35)) as pilot:
+            await pilot.pause()
+            app.ui = ui
+            widget = app.query_one(panel_type)
+            widget.render_state(app.runtime.state, ui, **kwargs)  # type: ignore[attr-defined]
+            return str(widget.body.plain)
+
+    return asyncio.run(scenario())
+
+
+def test_the_activity_panel_shows_one_calm_model_row_while_streaming() -> None:
+    """Redesign: streaming is state, not a transcript.  Counters live in the log screen."""
+    from gcae.tui import formatters
     from gcae.tui.widgets import ActivityPanel
 
     ui = UiState()
     ui.plan = [{"id": "step-1", "goal": "do the work", "status": "active"}]
     ui.current_step = ui.plan[0]
-    ui.action = ActionView(label="controller", lines=["model"], state="running")
+    ui.provider_role = "controller"
+    ui.action = ActionView(label="controller", lines=["model"], kind="model", state="running")
     ui.stream = {
         "characters": 1234,
         "reasoning_characters": 36_000,
         "elapsed_ms": 12_000,
         "preview": "carrying quote state across the boundary",
     }
-    row = ActivityPanel._stream_row(ui, 120)
-    assert row is not None
-    text = row.plain
-    assert "1.2k chars" in text and "36k reasoning" in text and "12s" in text
-    assert "carrying quote state" in text
 
-    ui.stream = {"characters": 0, "reasoning_characters": 0, "elapsed_ms": 12_000, "waiting": True}
-    waiting = ActivityPanel._stream_row(ui, 120)
-    assert waiting is not None and "no output yet" in waiting.plain
+    body = _render_panel(ActivityPanel, ui, model="qwen/qwen3-coder")
+    assert "controller · generating" in body
+    assert "qwen/qwen3-coder" in body
+    assert "1234" not in body and "36000" not in body, "no character telemetry on the main screen"
+    assert "carrying quote state" not in body, "no partial generation on the main screen"
 
-    ui.agent_done = True
-    assert ActivityPanel._stream_row(ui, 120) is None, "no stream row after the run ends"
-
-
-def test_timeline_reports_streaming_and_waiting() -> None:
-    from gcae.tui import formatters
-
-    streaming = formatters.timeline_entry(
+    # the same numbers are available where they belong: the log screen
+    line = formatters.log_line(
         "provider_progress",
+        "execute",
         {
             "role": "controller",
             "characters": 2048,
             "reasoning_characters": 36_000,
             "elapsed_ms": 5000,
+            "preview": "carrying quote state",
         },
     )
-    waiting = formatters.timeline_entry(
-        "provider_waiting", {"role": "controller", "elapsed_ms": 20_000}
-    )
-    started = formatters.timeline_entry(
-        "provider_started", {"role": "planner", "model": "m"}
-    )
-    assert streaming is not None
-    assert "2.0k chars" in streaming[1]
-    assert "36k chars reasoning" in streaming[1]
-    assert waiting is not None and "no output yet" in waiting[1]
-    assert started is not None and "planner request" in started[1]
+    assert "chars=2048" in line and "reasoning=36000" in line
+    assert "carrying quote state" in line, "the log keeps the raw preview"
 
 
+def test_the_timeline_stays_semantic_while_a_model_streams() -> None:
+    """The timeline must not fill with 'streaming controller · N chars' lines."""
+    from gcae.tui import formatters
+
+    for event_type, payload in (
+        ("provider_progress", {"role": "controller", "characters": 2048, "elapsed_ms": 5000}),
+        ("provider_waiting", {"role": "controller", "elapsed_ms": 20_000}),
+        ("provider_started", {"role": "planner", "model": "m"}),
+        ("provider_first_token", {"role": "planner", "elapsed_ms": 800}),
+    ):
+        assert formatters.timeline_entry(event_type, payload) is None, event_type
+        assert formatters.log_line(event_type, "execute", payload), event_type
+
+    # semantic events still reach the timeline
+    assert formatters.timeline_entry("step_started", {"goal": "x", "index": 1, "total": 2})
+    assert formatters.timeline_entry("rollback_completed", {"to_commit": "abc"})
 def test_a_long_active_step_wraps_instead_of_being_cut_off() -> None:
     """The plan must stay readable when the current step is a long sentence."""
     from gcae.tui.widgets import PlanPanel
@@ -753,8 +788,10 @@ def test_a_long_active_step_wraps_instead_of_being_cut_off() -> None:
     assert meta.endswith("steps")
 
 
-def test_dashboard_shows_streaming_progress_end_to_end(tmp_path: Path) -> None:
-    """The real app renders a streamed call: the panel and the timeline both move."""
+def test_dashboard_shows_streaming_end_to_end_without_flooding_the_timeline(
+    tmp_path: Path,
+) -> None:
+    """A real streamed run: the model row appears, the timeline stays semantic, logs fill."""
     pytest.importorskip("textual")
     from gcae.tui.app import GcaeApp
     from gcae.tui.widgets import TimelinePanel
@@ -777,12 +814,13 @@ def test_dashboard_shows_streaming_progress_end_to_end(tmp_path: Path) -> None:
                     break
                 await pilot.pause(0.05)
             await pilot.pause(0.3)
-            timeline = app.query_one(TimelinePanel).body.plain
-            # the timeline keeps the streamed progress visible after the run ends; the
-            # ACTIVE row intentionally disappears once there is nothing running
-            assert "streaming" in timeline or "first tokens" in timeline
-            assert "controller" in timeline
-            assert app.ui.stream is not None, "the last stream count stays readable"
+            timeline = str(app.query_one(TimelinePanel).body.plain)
+            assert "streaming" not in timeline, "streaming telemetry must stay out"
+            assert "chars" not in timeline
+            assert app.ui.stream is not None, "the stream state is still tracked"
+            # the raw telemetry went to the log screen instead
+            assert any("chars=" in line for line in app.ui.logs)
+            assert any("provider" in line or "[model]" in line for line in app.ui.logs)
 
     asyncio.run(scenario())
 

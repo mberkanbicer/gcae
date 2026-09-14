@@ -93,15 +93,38 @@ def status_style(status: str) -> str:
     return "accent"
 
 
-def run_badge(status: str, paused: bool) -> tuple[str, str]:
-    if paused and status == "running":
-        return ("PAUSED", "warning")
-    head = status.split(":", 1)[0].strip().lower()
-    return RUN_BADGES.get(head, (head.upper() or "UNKNOWN", status_style(status)))
-
 
 def role_for_phase(phase: str) -> str:
     return PHASE_ROLE.get(phase, "ACT")
+
+#: What the agent is doing, as a word the user can act on.  Derived from the real phase,
+#: never invented: a run that is not running keeps its own terminal status.
+PHASE_STATE: dict[str, str] = {
+    "analyze": "PLANNING",
+    "plan": "PLANNING",
+    "execute": "ACTING",
+    "validate": "VALIDATING",
+    "evaluate": "EVALUATING",
+    "checkpoint": "CHECKPOINTING",
+    "rollback": "ROLLING BACK",
+    "verify": "VERIFYING",
+    "complete": "COMPLETE",
+    "failed": "FAILED",
+}
+
+
+def run_state(status: str, phase: str | None, paused: bool) -> tuple[str, str]:
+    """(label, style key) for the top status bar."""
+    head = status.split(":", 1)[0].strip().lower()
+    if head in {"complete", "failed", "stopped", "waiting_for_user"}:
+        return RUN_BADGES.get(head, (head.upper(), status_style(status)))
+    if paused:
+        return ("PAUSED", "warning")
+    if phase:
+        label = PHASE_STATE.get(phase)
+        if label:
+            return (label, "accent")
+    return RUN_BADGES.get(head, (head.upper() or "UNKNOWN", status_style(status)))
 
 
 def short_id(value: str | None, length: int = 7) -> str:
@@ -130,14 +153,6 @@ def human_tokens(count: int) -> str:
         return str(count)
     return f"{count / 1000:.1f}k"
 
-
-def thousands(value: int) -> str:
-    """Compact counter: 940, 1.2k, 36k — enough precision, no jitter."""
-    if value < 1000:
-        return str(value)
-    if value < 10_000:
-        return f"{value / 1000:.1f}k"
-    return f"{value // 1000}k"
 
 
 def elide(text: str, width: int) -> str:
@@ -209,44 +224,47 @@ def memory_summary(counts: dict[str, int], compact: bool = False) -> str:
     return " · ".join(parts)
 
 
-ARG_ORDER = (
-    "path",
-    "command",
-    "pattern",
-    "query",
-    "content",
-    "text",
-    "old",
-    "new",
-    "name",
-    "url",
-)
+def _argument(arguments: dict[str, Any], key: str) -> str:
+    value = arguments.get(key)
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return " ".join(value.split())
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    return str(value)
 
 
-def tool_argument_lines(name: str, arguments: dict[str, Any] | None) -> list[str]:
-    """Render tool arguments as short human lines instead of raw JSON."""
-    if not arguments:
-        return []
-    lines: list[str] = []
-    remaining = {key: value for key, value in arguments.items() if key not in ARG_ORDER}
-    ordered = [key for key in ARG_ORDER if key in arguments]
-    for key in ordered + sorted(remaining):
-        value = arguments[key]
-        if isinstance(value, str):
-            collapsed = " ".join(value.split())
-            if len(collapsed) > 96:
-                lines.append(f"{collapsed[:93]}… ({len(collapsed)} chars)")
-            elif collapsed:
-                lines.append(collapsed)
-        elif isinstance(value, (int, float, bool)) or value is None:
-            lines.append(f"{key}={value}")
-        elif isinstance(value, list):
-            preview = ", ".join(str(item) for item in value[:4])
-            suffix = "…" if len(value) > 4 else ""
-            lines.append(f"{preview}{suffix}" if preview else f"{key}: []")
-        else:
-            lines.append(f"{key}: {elide(str(value), 60)}")
-    return lines
+def tool_presentation(name: str, arguments: dict[str, Any] | None) -> tuple[str, str]:
+    """(action, target) in human words — no raw JSON, no tool names on screen.
+
+    ``action`` is a verb phrase; ``target`` is the path, scope or command it acts on.
+    Unknown tools fall back to their name so a new tool is visible, never blank.
+    """
+    args = arguments or {}
+    if name in {"write_file", "create_file"}:
+        verb = "Create" if name == "create_file" else "Write"
+        target = _argument(args, "path")
+        return (f"{verb} {target}" if target else verb, target)
+    if name == "read_file":
+        target = _argument(args, "path")
+        return (f"Read {target}" if target else "Read file", target)
+    if name == "apply_patch":
+        return ("Apply a patch", "")
+    if name == "search_text":
+        query = _argument(args, "query")
+        scope = _argument(args, "path")
+        action = f'Search "{query}"' if query else "Search text"
+        return (action, scope)
+    if name == "list_files":
+        scope = _argument(args, "path") or _argument(args, "pattern")
+        return ("List files", scope)
+    if name == "run_tests":
+        return ("Run the project tests", "")
+    if name == "run_command":
+        command = _argument(args, "command")
+        return (command or "Run a command", "")
+    return (name.replace("_", " ").capitalize(), _argument(args, "path"))
 
 
 def timeline_entry(
@@ -333,22 +351,9 @@ def timeline_entry(
         missing = payload.get("missing_requirements") or []
         detail = elide(", ".join(str(item) for item in missing[:2]), 70) or "hygiene failed"
         return ("×", f"verification failed · {detail}", "error")
-    if event_type == "provider_started":
-        return ("◌", f"{payload.get('role')} request · {payload.get('model')}", "muted")
-    if event_type == "provider_first_token":
-        seconds = (payload.get("elapsed_ms") or 0) / 1000
-        return ("▸", f"first tokens · {seconds:.1f}s", "accent")
-    if event_type == "provider_progress":
-        characters = int(payload.get("characters") or 0)
-        reasoning = int(payload.get("reasoning_characters") or 0)
-        seconds = (payload.get("elapsed_ms") or 0) / 1000
-        detail = f"{thousands(characters)} chars"
-        if reasoning:
-            detail = f"{thousands(reasoning)} chars reasoning · {detail}"
-        return ("▸", f"streaming {payload.get('role')} · {detail} · {seconds:.0f}s", "muted")
-    if event_type == "provider_waiting":
-        seconds = (payload.get("elapsed_ms") or 0) / 1000
-        return ("…", f"waiting for {payload.get('role')} · {seconds:.0f}s, no output yet", "muted")
+    # Model streaming (provider_started / first_token / progress / waiting) is telemetry:
+    # it stays in the log screen and in the ACTIVE panel's single state row.  Putting it
+    # here buried the semantic story under "streaming controller · 1.2k chars" lines.
     if event_type == "recovery_started":
         trigger = elide(str(payload.get("trigger", "")), 60)
         return ("⟲", f"self-diagnosis #{payload.get('attempt')} · {trigger}", "warning")
@@ -426,6 +431,29 @@ def log_line(event_type: str, phase: str | None, payload: dict[str, Any]) -> str
         tool = payload.get("tool")
         name = tool.get("name") if isinstance(tool, dict) else "-"
         return f"[decision]{phase_part} {payload.get('action')} tool={name}"
+    if event_type in {
+        "provider_started",
+        "provider_first_token",
+        "provider_progress",
+        "provider_waiting",
+    }:
+        role = payload.get("role")
+        model = payload.get("model")
+        seconds = (payload.get("elapsed_ms") or 0) / 1000
+        characters = payload.get("characters")
+        reasoning = payload.get("reasoning_characters")
+        detail = f"[model]{phase_part} {event_type.removeprefix('provider_')} role={role}"
+        if model:
+            detail += f" model={model}"
+        if characters is not None:
+            detail += f" chars={characters}"
+        if reasoning:
+            detail += f" reasoning={reasoning}"
+        if seconds:
+            detail += f" {seconds:.1f}s"
+        if payload.get("preview"):
+            detail += f" preview={elide(str(payload['preview']), 60)}"
+        return detail
     if event_type == "context_built":
         return (
             f"[context]{phase_part} {payload.get('estimated_tokens')} tok (est) "

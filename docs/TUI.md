@@ -24,15 +24,16 @@ prompt so the same session can be retried after the repository is fixed.
 ```
 ┌ top status bar ───────────────────────────────────────────────────────────────────────┐
 ├─────────────────────────────┬─────────────────────────────────────────────────────────┤
-│ OBJECTIVE  (original + NOW) │ ACTIVE      (goal · tool · state · expectation)         │
-│ PLAN       (roadmap)        │ CHECKPOINT  (trusted · candidate · file scope)          │
-│                             │ VALIDATION  (checks · criteria · last decision)         │
+│ OBJECTIVE  (request + NOW)  │ ACTIVE      (goal · action · target · expected · state) │
+│ PLAN       (roadmap)        │ CHECKPOINT  (TRUSTED · CANDIDATE · file scope)          │
+│                             │ VALIDATION  (checks · criteria · failures first)        │
+│                             │ EVALUATION  (the latest decision and its reason)        │
 ├─────────────────────────────┴─────────────────────────────────────────────────────────┤
 │ completion / failure banner (only when a run ends)                                    │
 ├───────────────────────────────────────────────────────────────────────────────────────┤
-│ CTX ███░░ 9.8k/32k (est)   MEM 18 facts · 6 decisions   ITER 12                       │
+│ CTX ███░░ 9.8k/32k 31% est   MEM 6 facts · 2 decisions   FAIL 1   ITER 12             │
 ├───────────────────────────────────────────────────────────────────────────────────────┤
-│ EVENTS  (curated: checkpoints, accept/rollback/replan, validation, failures, user)     │
+│ EVENTS  (semantic only: checkpoints, accept/rollback/replan, validation, failures, user)│
 ├───────────────────────────────────────────────────────────────────────────────────────┤
 │ [p] Pause  [s] Stop  [d] Diff  [l] Logs  [m] Memory  [c] Context  [i] Instruct  [?] …  │
 └───────────────────────────────────────────────────────────────────────────────────────┘
@@ -42,16 +43,20 @@ Differences from a plain log viewer:
 
 - **No decorative panels.** Sections use one dim uppercase title row and aligned label columns;
   borders are reserved for dialogs.
-- **Slack becomes history.** Panels are content sized with caps, and the event timeline takes the
-  remaining rows, so idle screens show more history instead of a blank band.
-- **Curated events.** Routine tool successes are not timeline entries; the full stream is one
-  keystroke away (`l`). Tool failures, rollbacks, replans, checkpoints, validation results, user
-  instructions and terminal states always appear.
+- **State, not telemetry.** The main screen answers "what is being accomplished, with what, and
+  how far did it get". Model streaming — first tokens, character counts, partial generations,
+  heartbeats — is *debug* detail: it never enters the timeline and never reaches the ACTIVE panel.
+  The log screen (`l`) keeps every raw event, including the streamed preview.
+- **Slack becomes content.** The two columns absorb the spare rows (a long plan and a long check
+  list grow), while the timeline is a bounded strip of 3–10 rows. The old layout gave the timeline
+  `1fr`, which turned most of a tall terminal into an empty log panel.
+- **Curated events.** Routine tool successes and model telemetry are not timeline entries; the full
+  stream is one keystroke away (`l`). Tool failures, rollbacks, replans, checkpoints, validation
+  results, user instructions and terminal states always appear.
 - **A slow model is never a frozen screen.** Every model call is bracketed by `provider_started` /
-  `provider_finished` events (the ACTIVE panel shows elapsed time and, for the streamed call, the
-  role), a silent call emits a `provider_waiting` heartbeat every 10s, and a streaming one reports
-  content and reasoning character counts with a preview tail as tokens arrive. The timeline shows
-  `streaming controller · 36k chars reasoning · 2.0k chars · 24s` instead of nothing at all.
+  `provider_finished` events; a silent call emits a `provider_waiting` heartbeat every 10 s. The
+  ACTIVE panel shows one calm row (`controller · generating · 3.4s`) plus the model name, and the
+  elapsed time keeps moving without the layout moving with it.
 - **A stalled run asks, it does not die.** When an approach is exhausted the status bar shows
   `WAITING`, the request/question appears in the metrics strip, and `i` (or `r`) applies your
   instruction and continues the same run with its accepted checkpoints intact.
@@ -82,13 +87,47 @@ Differences from a plain log viewer:
 
 | Width | Behaviour |
 | --- | --- |
-| ≥ 140 | two columns, full status bar (project, run, provider, model, role, elapsed), 12–16 event rows |
-| 100–139 | two columns, metrics strip shows memory and iteration, 8–12 event rows |
-| 90–99 | two columns, metrics strip hidden, timeline 4–8 rows |
-| < 90 | single stacked column in priority order (objective/NOW → plan → active → checkpoint → validation), the main region scrolls, timeline fixed at 4 rows, status bar shortened |
+| ≥ 140 | two columns, full status bar (project, run id, provider, model, role, elapsed), 10 event rows |
+| 100–139 | two columns, model and provider shortened, elapsed shown, 6–8 event rows |
+| 80–99 | single stacked column in priority order (objective/NOW → plan → active → checkpoint → validation → evaluation), the main region scrolls, 3–4 event rows |
+| < 80 | same stacked order, metrics strip reduced to context and memory, 3 event rows |
 
-Short terminals (< 40 rows) reduce the plan and validation row budgets; below 20 rows the timeline
-is hidden. The status bar, rules and shortcut footer stay pinned at every size.
+Height decides how much history fits: ≥ 40 rows gives long panels, 30–39 medium, 18–29 short, and
+below 18 rows the timeline is hidden while the status bar, rules and shortcut footer stay pinned.
+Every panel keeps a floor (NOW, ACTIVE, CHECKPOINT and PLAN always render their headline), so the
+dashboard never becomes a scrolled list of empty boxes.
+
+Panel row budgets follow the space the layout actually gives them (`Panel.row_budget`), which is why
+a taller terminal shows more plan steps and more checks instead of a blank band at the bottom of a
+box.
+
+## Trusted versus candidate
+
+The CHECKPOINT panel is the run's identity: it shows the trusted commit (a verified tree) and the
+speculative candidate (the worktree right now), never a raw porcelain dump.
+
+```
+TRUSTED    1f383c6  Implement simulation model
+CANDIDATE  DIRTY · 2 files · +86 -4
+           M src/simulation.py   +24 -5
+           A tests/test_simulation.py   +3 -0
+           + 7 more files · press d for the diff
+```
+
+When there is nothing speculative it says `CLEAN · no speculative changes`; after a rejection it
+adds `restored after rejection · <commit> is trusted`. The words carry the meaning, so the panel
+still reads correctly without colour.
+
+## Validation and evaluation
+
+VALIDATION is a structured check list — `✓` pass, `×` fail, `…` running, `–` not applicable — and
+it never dumps command output. A failing check carries its shortest honest detail (`exit 1`,
+`Expected: 120`). Rows are ordered failures first, then the verification gate, then passing checks,
+so a short panel cannot hide the check that failed.
+
+EVALUATION is a separate section showing the latest decision word (`ACCEPTED`, `ROLLBACK`, `REPLAN`,
+`CONTINUE`, `FINISH CANDIDATE`) and the evaluator's stored reason — never chain-of-thought, never
+raw JSON. The full structured evaluation, including promoted memories and the next goal, is on `e`.
 
 ## Failure visibility
 
@@ -162,6 +201,17 @@ src/gcae/tui/
 
 ## Developer demo
 
+`tools/tui_demo.py` replays a realistic trajectory through a real runtime (real git, real
+validation, real rollback) against a temporary repository — including the **streaming telemetry a
+live provider emits**, which is what keeps the "telemetry must not reach the main screen" rule
+honest:
+
+```bash
+python tools/tui_demo.py                                     # interactive dashboard
+python tools/tui_demo.py --plain --size 160x45               # final frame as text
+python tools/tui_demo.py --plain --size 90x30 --capture 13   # narrow frame, mid-run
+```
+
 `tools/tui_demo.py` replays a realistic run against a temporary repository using real git
 operations, real validation commands and a real rollback and checkpoint, so the interface can be
 inspected without spending model tokens:
@@ -174,7 +224,22 @@ inspected without spending model tokens:
 
 ## Testing
 
-`tests/test_tui.py` covers rendering for empty/running/paused/completed/failed states, every event
-→ section mapping, the reducer, detail screens, key handling and five terminal sizes (160×45 down
-to 60×18). `tests/test_control.py` and `tests/test_phase2.py` cover the runtime events and git data
-the dashboard renders. Formatters have direct unit tests.
+`tests/test_tui.py` covers rendering for the empty, running, dirty-candidate, validating,
+rollback, replan, paused, complete and failed states; every event → section mapping; the reducer;
+detail screens; key handling; and five terminal sizes (160×45 down to 60×18). Redesign-specific
+coverage:
+
+| Test | Contract |
+| --- | --- |
+| `test_streaming_telemetry_never_reaches_the_semantic_timeline` | provider events stay out of the timeline and remain in the logs |
+| `test_the_active_panel_shows_state_not_streaming` | no character counts or generated text on the main screen |
+| `test_the_active_panel_shows_one_calm_row_while_a_model_generates` | one state row while a model call streams |
+| `test_a_dirty_candidate_is_announced_once_per_step` | `candidate_state` cannot flood the timeline |
+| `test_the_checkpoint_panel_separates_trusted_from_candidate` | TRUSTED/CANDIDATE structure and file scope |
+| `test_the_validation_panel_reports_structured_checks` | structured `✓`/`×` rows with failure detail, no evaluator decision |
+| `test_the_evaluation_panel_shows_the_decision_and_reason` | decision word plus reason, empty state included |
+| `test_each_run_state_renders_its_headline` | dirty/validation/rollback/accept/replan/finish all visible |
+| `test_responsive_smoke[160×45 … 60×18]` | priority-1 panels render at every size, stacked below 100 columns |
+
+`tests/test_control.py` and `tests/test_phase2.py` cover the runtime events and git data the
+dashboard renders. Formatters have direct unit tests.

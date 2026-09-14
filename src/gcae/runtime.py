@@ -54,6 +54,19 @@ from .verifier import FinalVerifier
 
 logger = logging.getLogger("gcae")
 
+# phases with a one-hop legal transition to PLAN (see state_machine._ALLOWED)
+_DIRECT_TO_PLAN = frozenset(
+    {
+        RunPhase.ANALYZE,
+        RunPhase.PLAN,
+        RunPhase.EXECUTE,
+        RunPhase.EVALUATE,
+        RunPhase.ROLLBACK,
+        RunPhase.VERIFY,
+        RunPhase.COMPLETE,
+    }
+)
+
 # How often a provider call reports itself while it has produced nothing. Keeps the event log
 # and the dashboard moving during a long deliberation instead of showing a frozen screen.
 PROVIDER_HEARTBEAT_SECONDS = 10.0
@@ -917,7 +930,8 @@ class Runtime:
         model = str(getattr(provider, "model", provider.__class__.__name__))
         logger.warning("recovery %d: diagnosing %s", self._recoveries, trigger)
         try:
-            diagnosis = RecoveryAdvisor(provider).diagnose(self._recovery_trace())
+            with self._progress("recovery", provider):
+                diagnosis = RecoveryAdvisor(provider).diagnose(self._recovery_trace())
         except ProviderOutputError as exc:
             logger.error("recovery diagnosis unavailable: %s", exc)
             self._remember("failure", f"recovery diagnosis unavailable: {exc}", immutable=True)
@@ -983,7 +997,7 @@ class Runtime:
         self._reset_working_memory()
         self.repetition = RepetitionGuard(self.repetition_limit)
         self.state.working_memory.hypotheses.append(f"recovery: {instruction}")
-        self._transition(RunPhase.PLAN)
+        self._enter_plan()
         self._emit_plan(reason=f"recovery: {instruction}", replaced=plan.id if plan else None,
                         failed=True)
         self._event(
@@ -993,6 +1007,28 @@ class Runtime:
             payload={"reason": f"recovery: {instruction}"},
         )
         self._persist()
+
+    def _enter_plan(self) -> None:
+        """Move to PLAN from wherever recovery found the run, through legal transitions.
+
+        Recovery can fire immediately after an accepted step (the budget is checked after the
+        checkpoint), and neither ``checkpoint -> plan`` nor ``checkpoint -> rollback`` is legal:
+        the run used to die with an "unexpected error" raised by its own recovery handler.
+        CHECKPOINT therefore goes through EXECUTE, which the state machine allows.
+        """
+        assert self.state is not None
+        phase = self.state.phase
+        if phase in _DIRECT_TO_PLAN:
+            self._transition(RunPhase.PLAN)
+            return
+        if phase is RunPhase.CHECKPOINT:
+            self._transition(RunPhase.EXECUTE)
+            self._transition(RunPhase.PLAN)
+            return
+        # FAILED is terminal for the state machine; recovery may reopen a run that failed while
+        # it was already diagnosing, exactly as `resume` reopens one from disk.
+        self.state.phase = RunPhase.PLAN
+        self.state.updated_at = now_utc()
 
     def _recovery_trace(self) -> str:
         assert self.state is not None and self.memory is not None

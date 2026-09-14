@@ -257,6 +257,90 @@ def test_state_is_persisted_before_the_planner_runs(tmp_path: Path) -> None:
     assert not thread.is_alive()
 
 
+def test_recovery_from_a_checkpoint_uses_legal_phase_transitions(tmp_path: Path) -> None:
+    """Reproduces `unexpected error: ValueError: invalid transition checkpoint -> plan`.
+
+    The budget is checked right after a step is accepted, so recovery can start while the
+    phase is CHECKPOINT; the run used to die inside its own recovery handler.
+    """
+    from gcae.models import PlanStep
+    from gcae.planner import Planner
+
+    source = tmp_path / "source"
+    source.mkdir()
+    init_repo(source)
+    provider = FakeProvider(
+        [
+            {
+                "action": "execute_tool",
+                "semantic_goal": "create",
+                "reason_summary": "create it",
+                "tool": {
+                    "name": "create_file",
+                    "arguments": {"path": "fib.py", "content": "print('fib')\n"},
+                },
+            },
+            {
+                "action": "complete_semantic_step",
+                "semantic_goal": "create",
+                "reason_summary": "done",
+            },
+            {
+                "root_cause": "the plan has an open step",
+                "corrective_instruction": "finish the remaining step",
+                "strategy": "replan",
+            },
+            {
+                "action": "execute_tool",
+                "semantic_goal": "finish",
+                "reason_summary": "finish it",
+                "tool": {
+                    "name": "write_file",
+                    "arguments": {"path": "other.py", "content": "print('other')\n"},
+                },
+            },
+            {
+                "action": "complete_semantic_step",
+                "semantic_goal": "finish",
+                "reason_summary": "done",
+            },
+        ]
+    )
+
+    class TwoSteps(Planner):
+        def plan(self, state: AgentState) -> InitialPlan:
+            return InitialPlan(
+                objective=state.objective,
+                success_criteria=list(state.success_criteria),
+                steps=[
+                    PlanStep(id="step-1", goal="create fib.py", intended_scope=["fib.py"]),
+                    PlanStep(id="step-2", goal="add other.py", intended_scope=["other.py"]),
+                ],
+            )
+
+    runtime = Runtime(
+        source,
+        tmp_path / "runtime",
+        provider=provider,
+        planner=TwoSteps(),
+        control=RuntimeControl(),
+        max_steps=2,          # exhausted exactly when step-1 has just been accepted
+    )
+    events = collect(runtime)
+    runtime.start("create the files", success_criteria=["file exists: fib.py"])
+    state = runtime.run()
+
+    failures = [str(e.payload.get("reason")) for e in events if e.event_type == "run_failed"]
+    assert not [reason for reason in failures if "unexpected error" in reason], failures
+    assert "invalid transition" not in state.status
+    assert state.status == "complete", state.status
+    # the diagnosis must be visible: a recovery call is a model call like any other
+    started = [e for e in events if e.event_type == "provider_started"]
+    assert any(e.payload.get("role") == "recovery" for e in started), (
+        "the recovery advisor call must be instrumented"
+    )
+
+
 def test_a_finished_plan_is_verified_at_the_budget_limit(tmp_path: Path) -> None:
     """A plan that completes exactly at the budget must verify, not self-diagnose."""
     from gcae.models import PlanStep

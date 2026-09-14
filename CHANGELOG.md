@@ -4,6 +4,23 @@ All notable changes to GCAE are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.4] — 2026-09-14
+
+### Fixed
+
+- **Recovery from a checkpoint crashed the run it was trying to save.** The iteration budget is
+  checked immediately after a step is accepted, so recovery could start while the phase was
+  `CHECKPOINT` — and neither `checkpoint -> plan` nor `checkpoint -> rollback` is a legal state
+  transition. The run died with `unexpected error: ValueError: invalid transition checkpoint ->
+  plan`, and its own crash handler then started a second diagnosis of that error. Recovery now
+  returns to planning through legal transitions (`checkpoint -> execute -> plan`), verified by a
+  regression test that exhausts the budget exactly at an acceptance.
+- **The diagnosis call was invisible.** The recovery advisor call was the only model call not
+  wrapped in the progress reporter, so it produced no `provider_started` / `provider_progress` /
+  `provider_finished` events: the dashboard showed nothing while it ran, and the event log could
+  not account for the time. Traced from a live run whose log showed two `recovery_completed`
+  events but only 11 provider calls.
+
 ## [0.1.3] — 2026-09-14
 
 ### Fixed

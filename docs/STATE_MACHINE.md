@@ -25,16 +25,41 @@ plan advanced.
 
 The response is a ladder:
 
-1. store an immutable decision memory that the previous approach is exhausted, so the next decision
-   must change hypothesis;
+1. store a decision memory that the previous approach is exhausted, so the next decision must change
+   hypothesis;
 2. escalate to the configured stronger model (`[models.escalation]`) once per session;
-3. ask the user: the run enters `waiting_for_user` with a question that names the attempts, the
-   accepted steps and the latest checkpoint. The plan and every accepted commit are preserved;
-4. fail with `execution stagnated` only when the user was already asked in that session and nothing
-   changed. Accepted checkpoints are still delivered by the merge step.
+3. **diagnose itself**: the recovery advisor (`[models.recovery]`, default: the controller's model)
+   receives a trace built from the run's own persisted record — state, filtered events, validation
+   and verification evidence, failure memories, candidate diff — and answers with a structured
+   `Diagnosis`: root cause, one corrective instruction, and a strategy. `replan` queues the
+   instruction as the next step and grants `runtime.recovery_budget` extra iterations; `ask_user`
+   asks directly; `stop` declares the task impossible as stated;
+4. ask the user: `waiting_for_user` with a question naming the attempts, the accepted steps and the
+   latest checkpoint. The plan and every accepted commit are preserved;
+5. fail only when the user was already asked in that session, or when recovery attempts are spent
+   and the advisor produced nothing usable. Accepted checkpoints are still delivered by the merge.
 
-A resumed run is a new user intervention, so it asks again instead of dying. Answering an
+Everything is bounded by `runtime.recovery_attempts` (default 2), so self-recovery can never become an
+endless loop, and a diagnosis that cannot be parsed leaves the caller's ladder intact.
+
+A resumed run is a new user intervention, so it may ask again instead of dying. Answering an
 instruction (`i` in the dashboard, `gcae resume` in the CLI) re-plans from the accepted state.
+
+## Recovery triggers
+
+Recovery is not only for stagnation. The same advisor reads the trace when a run is about to end
+because:
+
+| Trigger | Why it is recoverable |
+| --- | --- |
+| `step budget exhausted after N iterations` | the advisor can prescribe the missing step; a successful diagnosis grants extra iterations |
+| `provider output: …` | repeated unusable provider output may be a prompting/schema problem, not a dead end |
+| `evaluator output: …` | same, for the evaluation call |
+| `stagnation: …` | repeated non-productive attempts |
+
+The advisor never *replaces* deterministic evidence: a recovery step is a normal semantic step, so it
+is validated, evaluated and checkpointed like any other, and the run only completes through the
+verification gate.
 
 ## Controller actions
 

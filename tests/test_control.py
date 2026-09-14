@@ -4,10 +4,11 @@ import time
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from gcae.git import NothingToMerge
 from gcae.models import Event
-from gcae.providers import FakeProvider
+from gcae.providers import FakeProvider, ProviderOutputError
 from gcae.runtime import Runtime, RuntimeControl
 
 
@@ -376,6 +377,180 @@ def test_stagnation_escalates_before_asking(tmp_path: Path) -> None:
     assert state.pending_question is None
     # the stronger model produced the work inside the run's own worktree
     assert (Path(state.worktree) / "answer.txt").read_text() == "ok"
+
+
+def _replan(reason: str) -> dict[str, object]:
+    return {"action": "replan", "semantic_goal": "s", "reason_summary": reason}
+
+
+def _diagnosis(instruction: str, strategy: str = "replan") -> dict[str, object]:
+    return {
+        "root_cause": "the same step keeps being replanned without producing a file",
+        "corrective_instruction": instruction,
+        "strategy": strategy,
+    }
+
+
+class RecordingProvider:
+    """Provider that captures the prompts it is given (for trace/observation claims)."""
+
+    def __init__(self, outputs: list[dict[str, object]]) -> None:
+        self.outputs = list(outputs)
+        self.prompts: list[str] = []
+
+    def complete(self, prompt, schema):  # type: ignore[no-untyped-def]
+        self.prompts.append(prompt)
+        if not self.outputs:
+            raise AssertionError("provider trajectory exhausted")
+        try:
+            return schema.model_validate(self.outputs.pop(0))
+        except ValidationError as exc:  # same contract as the real provider
+            raise ProviderOutputError(str(exc)) from exc
+
+
+def test_recovery_diagnoses_the_trace_and_continues_the_run(tmp_path: Path) -> None:
+    """A stagnating run fixes itself instead of asking: the advisor's correction is queued."""
+    source = tmp_path / "source"
+    source.mkdir()
+    init_repo(source)
+    provider = RecordingProvider(
+        [
+            _replan("the parser assumption was wrong"),
+            _replan("still the wrong assumption"),
+            _replan("no progress"),
+            _diagnosis("create answer.txt containing ok"),
+            *TRAJECTORY,
+        ]
+    )
+    runtime = Runtime(source, tmp_path / "runtime", provider=provider, control=RuntimeControl())
+    runtime.start("do the work", success_criteria=["file exists: answer.txt"])
+    state = runtime.run()
+
+    assert state.status == "complete"
+    assert state.pending_question is None
+    assert state.recovery is not None
+    assert state.recovery.strategy == "replan"
+    assert "the same step keeps being replanned" in state.recovery.root_cause
+    assert (Path(state.worktree) / "answer.txt").read_text() == "ok"
+    # the corrective instruction became the next step, and memory holds the diagnosis
+    trace = next((prompt for prompt in provider.prompts if "recovery advisor" in prompt), "")
+    assert trace, "the advisor was never called"
+    assert "OBJECTIVE: do the work" in trace
+    assert "EVENTS (last" in trace and "replan" in trace
+    assert "the parser assumption was wrong" in trace
+    kinds = {record.content for record in runtime.memory.all(state.run_id)}  # type: ignore[union-attr]
+    assert any("create answer.txt containing ok" in content for content in kinds)
+
+
+def test_recovery_asks_the_user_when_the_task_needs_a_decision(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    init_repo(source)
+    provider = RecordingProvider(
+        [
+            _replan("a"),
+            _replan("b"),
+            _replan("c"),
+            _diagnosis("the criteria contradict each other", strategy="ask_user"),
+        ]
+    )
+    runtime = Runtime(source, tmp_path / "runtime", provider=provider, control=RuntimeControl())
+    runtime.start("do the work", success_criteria=["file exists: README"])
+    state = runtime.run()
+
+    assert state.status == "waiting_for_user"
+    assert state.pending_question and "recovery could not fix the run" in state.pending_question
+    assert state.recovery is not None and state.recovery.strategy == "ask_user"
+
+
+def test_recovery_is_bounded_and_then_asks_the_user(tmp_path: Path) -> None:
+    """Self-recovery never becomes an infinite loop: exhausted attempts fall back to asking."""
+    source = tmp_path / "source"
+    source.mkdir()
+    init_repo(source)
+    provider = RecordingProvider(
+        [
+            _replan("a"),
+            _replan("b"),
+            _replan("c"),
+            _diagnosis("try the same thing again"),
+            _replan("d"),
+            _replan("e"),
+            _replan("f"),
+            _diagnosis("and again"),
+        ]
+    )
+    runtime = Runtime(
+        source, tmp_path / "runtime", provider=provider, control=RuntimeControl(),
+        recovery_attempts=1,
+    )
+    runtime.start("do the work", success_criteria=["file exists: README"])
+    state = runtime.run()
+
+    assert state.status == "waiting_for_user"
+    assert state.recovery is not None and state.recovery.attempt == 1
+    recoveries = [prompt for prompt in provider.prompts if "recovery advisor" in prompt]
+    assert len(recoveries) == 1, "recovery_attempts must bound the self-diagnoses"
+
+
+def test_recovery_recovers_from_a_provider_failure(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    init_repo(source)
+    provider = RecordingProvider(
+        [
+            {"action": "not-an-action"},
+            _diagnosis("write the file with the create_file tool"),
+            *TRAJECTORY,
+        ]
+    )
+    runtime = Runtime(source, tmp_path / "runtime", provider=provider, control=RuntimeControl())
+    runtime.start("do the work", success_criteria=["file exists: answer.txt"])
+    state = runtime.run()
+
+    assert state.status == "complete", state.status
+    assert state.recovery is not None
+    assert "provider output" in state.recovery.trigger
+
+
+def test_recovery_grants_budget_so_a_run_can_finish(tmp_path: Path) -> None:
+    """Budget exhaustion is a trigger too: a correction buys bounded extra iterations."""
+    source = tmp_path / "source"
+    source.mkdir()
+    init_repo(source)
+    provider = RecordingProvider(
+        [
+            _replan("one attempt used up"),
+            _diagnosis("stop analysing and create answer.txt"),
+            *TRAJECTORY,
+        ]
+    )
+    runtime = Runtime(
+        source, tmp_path / "runtime", provider=provider, control=RuntimeControl(),
+        max_steps=1, recovery_budget=3,
+    )
+    runtime.start("do the work", success_criteria=["file exists: answer.txt"])
+    state = runtime.run()
+
+    assert state.status == "complete", state.status
+    assert state.recovery is not None
+    assert "step budget exhausted" in state.recovery.trigger
+
+
+def test_recovery_is_absent_when_disabled(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    init_repo(source)
+    provider = RecordingProvider([_replan("a"), _replan("b"), _replan("c")])
+    runtime = Runtime(
+        source, tmp_path / "runtime", provider=provider, control=RuntimeControl(),
+        recovery_attempts=0,
+    )
+    runtime.start("do the work", success_criteria=["file exists: README"])
+    state = runtime.run()
+
+    assert state.status == "waiting_for_user"
+    assert not [prompt for prompt in provider.prompts if "recovery advisor" in prompt]
 
 
 def test_stagnation_asks_once_per_session_then_fails_honestly(tmp_path: Path) -> None:

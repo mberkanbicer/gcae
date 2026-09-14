@@ -10,6 +10,18 @@ All notable changes to GCAE are documented here. The format follows
 
 ### Added
 
+- **Self-recovery**: a run that is about to fail — stagnation, unusable provider or evaluator
+  output, or an exhausted step budget — now reads its own persisted trace (filtered events,
+  validation and verification evidence, failure memories, candidate diff) and asks the configured
+  recovery model for a structured diagnosis: root cause, one corrective instruction, and a
+  strategy. A `replan` strategy queues the correction as the next semantic step and grants extra
+  iterations; `ask_user` and `stop` end the run honestly. Bounded by `[runtime] recovery_attempts`
+  (default 2) with `[runtime] recovery_budget` (default 5) extra iterations per correction, and a
+  diagnosis that cannot be parsed leaves the old ladder intact. New `[models.recovery]` role
+  (defaults to the controller's model, i.e. the escalated one after escalation), new
+  `recovery_started` / `recovery_completed` / `recovery_failed` events in the dashboard timeline,
+  and `gcae inspect` prints the last diagnosis.
+
 - **Stagnation ladder** — an exhausted approach now stores a "change hypothesis" memory, escalates to
   the configured stronger model, and then asks the user (`waiting_for_user`) instead of stopping the
   run. Only a run that was already asked and still makes no progress fails, and its accepted

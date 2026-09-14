@@ -23,6 +23,7 @@ model.
 | `tools.py` | sandboxed tool registry |
 | `git.py` | worktree, checkpoint, rollback, merge, undo |
 | `safeguards.py` | repetition guard, stagnation window, hygiene check |
+| `recovery.py` | self-recovery: trace assembly from the run's own record, advisor prompt, `Diagnosis` |
 | `providers.py`, `http_provider.py` | structured-output providers |
 | `cli.py` | run/resume/list/inspect/merge/undo, headless and TUI modes |
 | `tui/` | Textual dashboard: presentation reducer, widgets, viewers, dialogs (see `docs/TUI.md`) |
@@ -76,6 +77,33 @@ Replanning discards speculative changes, keeps accepted commits and knowledge, a
 completed steps. Identical tool calls are blocked after `repetition_limit`; repeated
 non-progressing iterations trip `stagnation_window`; two consecutive rejected steps escalate
 controller decisions to `models.escalation` when configured.
+
+## Self-recovery
+
+When a run is about to give up, the loop leaves the model-driven path and asks the recovery advisor
+instead:
+
+```
+stagnation | provider failure | evaluator failure | budget exhausted
+        │
+        ▼
+  build_trace(state, events, memories, candidate)   ← the run's own record, not its context
+        │
+        ▼
+  Diagnosis{root_cause, corrective_instruction, strategy}
+        │
+   replan ──► corrective step queued + extra iterations ──► back to EXECUTE
+   ask_user ──► waiting_for_user (question = root cause + suggested correction)
+   stop ──────► failed: recovery advised stopping: <root cause>
+```
+
+The advisor is an independent reading of the same run: it sees what was tried — filtered events,
+failure memories, validation and verification evidence, the candidate diff — rather than what the
+controller currently believes, which is exactly the perspective a stuck loop lacks. A recovery result
+is an ordinary semantic step: validated, evaluated and checkpointed like any other, and still subject
+to the final verification gate. Self-diagnoses are bounded by `runtime.recovery_attempts` and each
+successful correction grants `runtime.recovery_budget` extra iterations; a diagnosis that cannot be
+parsed leaves the ladder (ask the user, then fail) intact.
 
 ## Final verification and completion
 

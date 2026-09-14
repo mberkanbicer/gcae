@@ -25,7 +25,7 @@ from .runtime import (
 )
 from .verifier import FinalVerifier
 
-ROLES = ("controller", "planner", "evaluator", "verifier", "escalation")
+ROLES = ("controller", "planner", "evaluator", "verifier", "escalation", "recovery")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -427,6 +427,13 @@ def _inspect_run(run_id: str, runtime_dir: Path, as_json: bool) -> None:
         )
     if state.pending_question:
         print(f"pending question: {state.pending_question}")
+    if state.recovery is not None:
+        print(
+            f"recovery #{state.recovery.attempt} ({state.recovery.trigger}) "
+            f"-> {state.recovery.strategy}"
+        )
+        print(f"  root cause: {state.recovery.root_cause}")
+        print(f"  correction: {state.recovery.corrective_instruction}")
 
 
 def _build_runtime(args: argparse.Namespace, config: Config, runtime_dir: Path) -> Runtime:
@@ -439,6 +446,8 @@ def _build_runtime(args: argparse.Namespace, config: Config, runtime_dir: Path) 
         provider=base_provider,
         validator_commands=config.validation.commands,
         max_steps=config.runtime.max_steps,
+        recovery_attempts=config.runtime.recovery_attempts,
+        recovery_budget=config.runtime.recovery_budget,
         command_timeout=config.runtime.command_timeout,
         context_limit=config.provider.context_limit,
         evaluator=_evaluator(config, role_providers.get("evaluator", base_provider)),

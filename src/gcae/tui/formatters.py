@@ -324,6 +324,19 @@ def timeline_entry(
         missing = payload.get("missing_requirements") or []
         detail = elide(", ".join(str(item) for item in missing[:2]), 70) or "hygiene failed"
         return ("×", f"verification failed · {detail}", "error")
+    if event_type == "recovery_started":
+        trigger = elide(str(payload.get("trigger", "")), 60)
+        return ("⟲", f"self-diagnosis #{payload.get('attempt')} · {trigger}", "warning")
+    if event_type == "recovery_completed":
+        cause = elide(str(payload.get("root_cause", "")), 60)
+        strategy = payload.get("strategy")
+        if strategy == "replan":
+            correction = elide(str(payload.get("corrective_instruction", "")), 60)
+            return ("⟲", f"recovery · {cause} → {correction}", "accent")
+        return ("⟲", f"recovery · {cause} → {strategy}", "warning")
+    if event_type == "recovery_failed":
+        error = elide(str(payload.get("error", "")), 60)
+        return ("!", f"self-diagnosis unavailable · {error}", "muted")
     if event_type == "model_escalated":
         reason = elide(str(payload.get("reason", "")), 60)
         return ("!", f"escalated to stronger model · {reason}", "warning")

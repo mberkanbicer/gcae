@@ -26,6 +26,10 @@ class StagnationDetector:
         self._progress.append(accepted_progress)
         return len(self._progress) == self.window and not any(self._progress)
 
+    def reset(self) -> None:
+        """Forget the current window: a corrected approach starts fresh."""
+        self._progress.clear()
+
 
 @dataclass(frozen=True)
 class HygieneReport:

@@ -50,6 +50,8 @@ class ModelsConfig(BaseModel):
     evaluator: ModelOverride = Field(default_factory=ModelOverride)
     verifier: ModelOverride = Field(default_factory=ModelOverride)
     escalation: ModelOverride = Field(default_factory=ModelOverride)
+    # model that diagnoses a failing run from its own trace (defaults to controller)
+    recovery: ModelOverride = Field(default_factory=ModelOverride)
 
 
 class RuntimeConfig(BaseModel):
@@ -75,6 +77,11 @@ class RuntimeConfig(BaseModel):
     stagnation_window: int = 3
     repetition_limit: int = 2
     scope_warning_files: int = 10
+    # A run that is about to fail reads its own trace and tries a correction before it
+    # asks the user: how many self-diagnoses per run, and how many extra iterations each
+    # successful correction buys.
+    recovery_attempts: int = 2
+    recovery_budget: int = 5
 
 
 class ValidationConfig(BaseModel):

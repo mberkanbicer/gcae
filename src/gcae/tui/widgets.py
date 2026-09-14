@@ -422,10 +422,14 @@ class ActivityPanel(Panel):
                     f"done · {action.duration_ms / 1000:.1f}s" if action.duration_ms else "done"
                 ),
                 "failed": f"FAILED · {action.detail}" if action.detail else "FAILED",
+                "recovered": "RECOVERED · the runtime corrected its own approach",
             }.get(action.state, action.state)
-            style = {"running": "accent", "done": "success", "failed": "error"}.get(
-                action.state, "muted"
-            )
+            style = {
+                "running": "accent",
+                "done": "success",
+                "failed": "error",
+                "recovered": "accent",
+            }.get(action.state, "muted")
             lines.append(_row("state", Text(state_text, style=STYLES[style])))
         elif action is not None:
             detail = action.lines[0] if action.lines else "choosing the next action"

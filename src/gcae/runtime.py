@@ -6,6 +6,7 @@ import sqlite3
 import threading
 import time
 import uuid
+from collections import deque
 from collections.abc import Callable
 from pathlib import Path
 
@@ -25,6 +26,7 @@ from .models import (
     MergeRecord,
     Observation,
     PlanStep,
+    RecoveryRecord,
     RunPhase,
     SemanticStep,
     ToolResult,
@@ -35,6 +37,7 @@ from .models import (
 from .persistence import StateStore
 from .planner import Planner, PlannerLike, next_step
 from .providers import DecisionProvider, FakeProvider, Provider, ProviderOutputError
+from .recovery import RecoveryAction, RecoveryAdvisor, build_trace
 from .safeguards import RepetitionGuard, StagnationDetector
 from .state_machine import StateMachine
 from .tools import ToolRegistry
@@ -190,6 +193,8 @@ class Runtime:
         merge_accepted_on_failure: bool = True,
         cleanup_after_merge: bool = True,
         resolve_merge_conflicts: bool = True,
+        recovery_attempts: int = 2,
+        recovery_budget: int = 5,
     ) -> None:
         self.source_repo = Path(source_repo).resolve()
         self.runtime_dir = Path(runtime_dir).expanduser().resolve()
@@ -216,6 +221,13 @@ class Runtime:
         self._conflict_failed = False
         self._stagnation_escalated = False
         self._stagnation_asked = False
+        # self-recovery: how often this session may diagnose itself, and how many extra
+        # iterations each successful diagnosis buys.
+        self.recovery_attempts = recovery_attempts
+        self.recovery_budget = recovery_budget
+        self._recoveries = 0
+        self._recovery_extensions = 0
+        self._decision_error: str | None = None
         self.validator_commands = list(validator_commands or [])
         self.max_steps = max_steps
         self.command_timeout = command_timeout
@@ -235,6 +247,7 @@ class Runtime:
         self.repetition = RepetitionGuard(repetition_limit)
         self.stagnation = StagnationDetector(stagnation_window)
         self._subscribers: list[EventSubscriber] = []
+        self._trace: deque[Event] = deque(maxlen=200)
         self._consecutive_failures = 0
         self._escalated = False
         self.last_context_info: dict[str, int] = {}
@@ -421,7 +434,22 @@ class Runtime:
             return self.state
         assert self.repo is not None and self.memory is not None
 
-        for _ in range(self.max_steps):
+        iterations = 0
+        while True:
+            if iterations >= self._step_budget():
+                budget_message = (
+                    f"step budget exhausted after {iterations} iterations "
+                    "(raise [runtime] max_steps for longer tasks)"
+                )
+                outcome = self._recover(budget_message, None)
+                if outcome is RecoveryAction.CONTINUE:
+                    continue
+                if outcome is RecoveryAction.UNAVAILABLE:
+                    if self.repo.status():
+                        self._rollback(budget_message)
+                    return self._fail(budget_message)
+                return self.state
+            iterations += 1
             if self._pump_control():
                 return self.state
             self.state.iteration += 1
@@ -469,6 +497,15 @@ class Runtime:
             tools = self._tools()
             decision = self._decide(step, plan, tools)
             if decision is None:
+                reason = self._decision_error or "provider returned no usable decision"
+                self._decision_error = None
+                outcome = self._recover(f"provider output: {reason}", plan)
+                if outcome is RecoveryAction.CONTINUE:
+                    continue
+                if outcome is RecoveryAction.UNAVAILABLE:
+                    self.state.status = "failed: provider output"
+                    self.state.phase = RunPhase.FAILED
+                    self._persist()
                 return self.state
 
             if decision.action is Action.ASK_USER:
@@ -525,15 +562,11 @@ class Runtime:
                 if self._evaluate_step(plan, tools):
                     return self.state
 
-        budget_message = (
-            f"step budget exhausted after {self.max_steps} iterations "
-            "(raise [runtime] max_steps for longer tasks)"
-        )
-        if self.repo.status():
-            self._rollback(budget_message)
-        return self._fail(budget_message)
-
     # ------------------------------------------------------------------ steps
+
+    def _step_budget(self) -> int:
+        """Iterations available to this run() call, including budget won by recovery."""
+        return self.max_steps + self._recovery_extensions
 
     def _decide(
         self,
@@ -572,11 +605,10 @@ class Runtime:
                 DecisionProvider(self.provider_for("controller")), tools.names()
             ).decide(context.text)
         except ProviderOutputError as exc:
+            # not fatal yet: run() lets the recovery advisor read the trace first
             logger.error("provider failure: %s", exc)
             self._remember("failure", f"provider failure: {exc}", immutable=True)
-            self.state.status = "failed: provider output"
-            self.state.phase = RunPhase.FAILED
-            self._persist()
+            self._decision_error = str(exc)
             return None
         self._event(
             "decision",
@@ -624,9 +656,13 @@ class Runtime:
         except ProviderOutputError as exc:
             logger.error("evaluator failure: %s", exc)
             self._remember("failure", f"evaluator failure: {exc}", immutable=True)
-            self.state.status = "failed: evaluator output"
-            self.state.phase = RunPhase.FAILED
-            self._persist()
+            outcome = self._recover(f"evaluator output: {exc}", plan)
+            if outcome is RecoveryAction.CONTINUE:
+                return False
+            if outcome is RecoveryAction.UNAVAILABLE:
+                self.state.status = "failed: evaluator output"
+                self.state.phase = RunPhase.FAILED
+                self._persist()
             return True
         self._promote(evaluation.memories_to_promote)
         self._event(
@@ -724,6 +760,12 @@ class Runtime:
             self._stagnation_escalated = True
             self._escalate(reason)
             return None
+        outcome = self._recover(f"stagnation: {reason}", self._current_plan_step())
+        if outcome is RecoveryAction.CONTINUE:
+            return None
+        if outcome is not RecoveryAction.UNAVAILABLE:
+            # the advisor asked the user or declared the task impossible itself
+            return self.state
         if not self._stagnation_asked:
             self._stagnation_asked = True
             committed = (
@@ -743,6 +785,135 @@ class Runtime:
             logger.warning("run %s is waiting for the user: %s", self.state.run_id, reason)
             return self.state
         return self._fail(f"execution stagnated after asking: {reason}")
+
+    # ------------------------------------------------------------------ recovery
+
+    def _recovery_provider(self) -> Provider:
+        """The advisor runs on [models.recovery], else on the controller's model (which is
+        the escalated one after escalation)."""
+        return self.role_providers.get("recovery") or self.provider_for("controller")
+
+    def _recover(self, trigger: str, plan: PlanStep | None) -> RecoveryAction:
+        """Read this run's own trace and try to correct it before giving up.
+
+        The advisor sees the persisted record — state, filtered events, validation and
+        verification evidence, failure memories — not the controller's working context, so it
+        can question an assumption the controller keeps repeating. Bounded by
+        ``runtime.recovery_attempts``; a failed or unusable diagnosis returns
+        ``UNAVAILABLE`` and leaves the caller's own ladder intact.
+        """
+        assert self.state is not None and self.memory is not None
+        if self._recoveries >= self.recovery_attempts:
+            logger.warning("no recovery attempts left for %s", trigger)
+            return RecoveryAction.UNAVAILABLE
+        self._recoveries += 1
+        self._event(
+            "recovery_started",
+            self.state.phase,
+            payload={"trigger": trigger, "attempt": self._recoveries},
+        )
+        provider = self._recovery_provider()
+        model = str(getattr(provider, "model", provider.__class__.__name__))
+        logger.warning("recovery %d: diagnosing %s", self._recoveries, trigger)
+        try:
+            diagnosis = RecoveryAdvisor(provider).diagnose(self._recovery_trace())
+        except ProviderOutputError as exc:
+            logger.error("recovery diagnosis unavailable: %s", exc)
+            self._remember("failure", f"recovery diagnosis unavailable: {exc}", immutable=True)
+            self._event(
+                "recovery_failed",
+                self.state.phase,
+                payload={"trigger": trigger, "error": str(exc)},
+            )
+            self._persist()
+            return RecoveryAction.UNAVAILABLE
+        record = RecoveryRecord(
+            attempt=self._recoveries,
+            trigger=trigger,
+            root_cause=diagnosis.root_cause,
+            corrective_instruction=diagnosis.corrective_instruction,
+            strategy=diagnosis.strategy,
+            model=model,
+        )
+        self.state.recovery = record
+        self._remember(
+            "decision",
+            f"recovery: {diagnosis.root_cause} — next attempt: "
+            f"{diagnosis.corrective_instruction}",
+        )
+        self._event(
+            "recovery_completed",
+            self.state.phase,
+            payload=record.model_dump(mode="json"),
+        )
+        logger.warning(
+            "recovery %d: %s -> %s", self._recoveries, diagnosis.root_cause,
+            diagnosis.corrective_instruction,
+        )
+        if diagnosis.strategy == "ask_user":
+            question = (
+                f"recovery could not fix the run: {diagnosis.root_cause}. "
+                f"Suggested next step: {diagnosis.corrective_instruction} "
+                "Tell me how to proceed, or stop the run."
+            )
+            self.state.pending_question = question
+            self.state.status = "waiting_for_user"
+            self._event("user_question", payload={"question": question, "reason": trigger})
+            self._persist()
+            return RecoveryAction.ASK_USER
+        if diagnosis.strategy == "stop":
+            self._fail(f"recovery advised stopping: {diagnosis.root_cause}")
+            return RecoveryAction.FAILED
+        self.stagnation.reset()
+        self._recovery_extensions += self.recovery_budget
+        self._queue_correction(plan, diagnosis.corrective_instruction)
+        return RecoveryAction.CONTINUE
+
+    def _queue_correction(self, plan: PlanStep | None, instruction: str) -> None:
+        """Discard speculative work and queue the step the advisor prescribed."""
+        assert self.state is not None
+        if self.repo is not None and self.repo.worktree is not None and self.repo.status():
+            self._rollback(f"recovery: {instruction}")
+        plan = plan or self._current_plan_step()
+        if plan is not None:
+            plan.status = "failed"
+            self.state.plan = [item for item in self.state.plan if item.id != plan.id]
+        self.state.plan.extend(next_step(self.state, instruction))
+        self._reset_working_memory()
+        self.repetition = RepetitionGuard(self.repetition_limit)
+        self.state.working_memory.hypotheses.append(f"recovery: {instruction}")
+        self._transition(RunPhase.PLAN)
+        self._emit_plan(reason=f"recovery: {instruction}", replaced=plan.id if plan else None,
+                        failed=True)
+        self._event(
+            "replan",
+            RunPhase.PLAN,
+            step_id=plan.id if plan else None,
+            payload={"reason": f"recovery: {instruction}"},
+        )
+        self._persist()
+
+    def _recovery_trace(self) -> str:
+        assert self.state is not None and self.memory is not None
+        memories = [
+            record
+            for record in self.memory.recent(self.state.run_id, limit=60)
+            if record.kind in {"failure", "decision", "user_instruction"}
+        ]
+        candidate = ""
+        if self.repo is not None and self.repo.worktree is not None:
+            try:
+                snapshot = self.repo.candidate_snapshot()
+            except GitError:
+                snapshot = {}
+            if snapshot:
+                files = [entry["path"] for entry in snapshot.get("files", [])]
+                candidate = (
+                    f"{len(files)} changed file(s) "
+                    f"(+{snapshot.get('added', 0)} -{snapshot.get('deleted', 0)}): "
+                    f"{', '.join(files[:8])}"
+                )
+        return build_trace(self.state, list(self._trace), memories, candidate=candidate)
 
     def _replan(self, plan: PlanStep, reason: str, failed: bool) -> bool:
         """Discard speculative work and the current step, queue a new one.
@@ -1237,6 +1408,7 @@ class Runtime:
             payload=payload or {},
         )
         self.events.append(event)
+        self._trace.append(event)
         for callback in list(self._subscribers):
             try:
                 callback(event)

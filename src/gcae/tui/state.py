@@ -352,6 +352,27 @@ class UiState:
     def _on_model_escalated(self, event: Event, payload: dict[str, Any]) -> set[str]:
         return {"status"}
 
+    def _on_recovery_started(self, event: Event, payload: dict[str, Any]) -> set[str]:
+        self.action = ActionView(
+            label="self-diagnosis",
+            lines=[str(payload.get("trigger") or "")],
+            state="running",
+            started_at=event.timestamp,
+        )
+        return {"activity"}
+
+    def _on_recovery_completed(self, event: Event, payload: dict[str, Any]) -> set[str]:
+        self.action = ActionView(
+            label="recovery",
+            lines=[
+                str(payload.get("root_cause") or ""),
+                f"next: {payload.get('corrective_instruction') or ''}",
+            ],
+            state="recovered",
+            started_at=event.timestamp,
+        )
+        return {"activity"}
+
     def _on_user_override(self, event: Event, payload: dict[str, Any]) -> set[str]:
         self.request = str(payload.get("text") or self.request or "")
         return {"objective", "status"}

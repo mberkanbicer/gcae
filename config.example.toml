@@ -16,6 +16,11 @@ resolve_merge_conflicts = true
 # still reverses the merge and the work can be merged again.
 cleanup_after_merge = true
 max_steps = 20
+# Self-recovery: a run that is about to fail reads its own trace and tries a correction
+# before it asks the user. recovery_attempts bounds the self-diagnoses per run;
+# recovery_budget is how many extra iterations each successful correction buys.
+recovery_attempts = 2
+recovery_budget = 5
 command_timeout = 30
 max_tool_calls_per_step = 8
 stagnation_window = 3
@@ -44,6 +49,9 @@ max_tokens = 1024
 # [models.evaluator]
 # model = "qwen3:32b"
 # [models.escalation]
+# model = "anthropic/claude-sonnet-4"
+# Diagnoses a failing run from its own trace (defaults to the controller's model).
+# [models.recovery]
 # model = "anthropic/claude-sonnet-4"
 
 [planner]

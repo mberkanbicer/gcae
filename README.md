@@ -69,6 +69,7 @@ documents: none — the run produced no files
 | Work is verified, not assumed | Deterministic criteria (`file exists:`, `file contains:`, `file contains exactly:`, `command succeeds:`) run first; a model judge is opt-in and fails closed. |
 | Every git operation is the loop's job | Base commit, commit identity, run branch, worktree, merge, conflict resolution and cleanup are automatic. The model is never allowed to run `git`. |
 | Your working tree is never the workshop | The agent edits an isolated worktree under the state directory, one worktree per run. |
+| A blocked run fixes itself first | Before asking you, a failing run (stagnation, unusable model output, exhausted budget) reads its own trace — events, validation evidence, failure memories — and diagnoses the root cause, then retries with the correction. Bounded, and always outranked by the verification gate. |
 
 ## The execution loop
 
@@ -95,6 +96,10 @@ PLAN → SEMANTIC STEP → EXECUTE → OBSERVE → VALIDATE → EVALUATE → ACC
   replaced by a replanned one.
 - **VERIFY** — every success criterion is checked again on the final tree before the run may
   complete.
+- **RECOVER** — if the run is about to give up (stagnation, unusable provider output, exhausted
+  budget), the recovery advisor reads the run's own trace and returns a `Diagnosis`: root cause,
+  one corrective instruction, and a strategy. `replan` queues the correction as the next step and
+  grants bounded extra iterations; `ask_user` and `stop` end the run honestly.
 
 ## Install
 

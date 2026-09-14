@@ -27,9 +27,13 @@ and runs. It runs headless or with an interactive Textual TUI.
    asking the user to run git. The only git a user may still choose to run is inspecting history;
    no workflow may require it. A repository GCAE cannot safely touch (mid-merge/rebase) is
    refused with an explanation instead of being modified.
-4. **A blocked run asks instead of dying.** Stagnation and ambiguity pause the run
-   (`waiting_for_user`) with a question, keeping the plan and every accepted commit; a run only
-   fails when the user was asked and nothing changed, and its accepted work is still delivered.
+4. **A blocked run diagnoses itself, then asks.** Stagnation, unusable provider output and an
+   exhausted step budget first trigger `recovery.py`: the advisor reads the run's own trace
+   (`build_trace` over state, filtered events, validation evidence, failure memories) and returns a
+   structured `Diagnosis`. `replan` queues the correction and grants bounded extra iterations;
+   otherwise the run pauses (`waiting_for_user`) with a question, keeping the plan and every accepted
+   commit. A run only fails when the user was asked or recovery was exhausted, and its accepted work
+   is still delivered.
 5. **Verified work reaches the user.** A completed run merges its branch into the source
    branch (`[runtime] auto_merge`, default on) with the pre-merge and merge commits recorded in
    `state.json`, so the work is visible in the checkout and `gcae undo` reverses it. A run that

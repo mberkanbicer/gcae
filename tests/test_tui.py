@@ -628,6 +628,27 @@ class _LiveLoop:
     is_running = True
 
 
+def test_timeline_shows_the_self_diagnosis() -> None:
+    """The dashboard is where the run's self-recovery has to be observable."""
+    started = formatters.timeline_entry(
+        "recovery_started", {"trigger": "stagnation: wrong assumption", "attempt": 1}
+    )
+    completed = formatters.timeline_entry(
+        "recovery_completed",
+        {
+            "root_cause": "the patch had no valid input",
+            "corrective_instruction": "write the file with create_file",
+            "strategy": "replan",
+        },
+    )
+    failed = formatters.timeline_entry("recovery_failed", {"error": "no diagnosis"})
+    assert started is not None and "self-diagnosis #1" in started[1]
+    assert completed is not None
+    assert "the patch had no valid input" in completed[1]
+    assert "write the file with create_file" in completed[1]
+    assert failed is not None and "unavailable" in failed[1]
+
+
 def test_instruction_modal_queues_an_instruction_while_the_loop_runs(tmp_path: Path) -> None:
     runtime = make_runtime(tmp_path)
     app = GcaeApp(runtime, auto_run=False)
@@ -664,6 +685,10 @@ def test_instruction_revives_a_run_that_stalled_waiting_for_the_user(tmp_path: P
             [
                 replan,
                 replan,
+                replan,
+                # the self-diagnosis attempt consumes this and cannot parse it as a
+                # diagnosis, so the run falls through to asking the user (see
+                # _handle_stagnation's ladder: change hypothesis, escalate, diagnose, ask)
                 replan,
                 # consumed after the user's instruction revives the run
                 {

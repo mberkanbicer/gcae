@@ -186,6 +186,29 @@ class VerificationReport(BaseModel):
     details: list[str] = Field(default_factory=list)
 
 
+class Diagnosis(BaseModel):
+    """The recovery advisor's structured reading of a failing run's own trace."""
+
+    model_config = ConfigDict(extra="forbid")
+    root_cause: str
+    corrective_instruction: str
+    strategy: Literal["replan", "ask_user", "stop"] = "replan"
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+
+
+class RecoveryRecord(BaseModel):
+    """One self-diagnosis, persisted so a run can explain its own recovery."""
+
+    model_config = ConfigDict(extra="forbid")
+    attempt: int
+    trigger: str
+    root_cause: str
+    corrective_instruction: str
+    strategy: str
+    model: str = ""
+    created_at: datetime = Field(default_factory=now_utc)
+
+
 class MergeRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
     branch: str
@@ -231,6 +254,7 @@ class AgentState(BaseModel):
     step_tool_calls: int = 0
     latest_validation: ValidationResult | None = None
     last_verification: VerificationReport | None = None
+    recovery: RecoveryRecord | None = None
     merge: MergeRecord | None = None
     created_at: datetime = Field(default_factory=now_utc)
     updated_at: datetime = Field(default_factory=now_utc)

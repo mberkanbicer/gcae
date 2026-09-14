@@ -2,8 +2,10 @@
 
 import asyncio
 import subprocess
+import time
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -11,7 +13,7 @@ pytest.importorskip("textual")
 
 from gcae.models import Event, RunPhase
 from gcae.planner import LLMPlanner
-from gcae.providers import FakeProvider
+from gcae.providers import FakeProvider, StreamProgress
 from gcae.runtime import Runtime, RuntimeControl
 from gcae.tui import formatters
 from gcae.tui.app import GcaeApp
@@ -1893,3 +1895,174 @@ def test_a_finished_tool_keeps_its_human_label_and_reports_the_outcome(tmp_path:
         GcaeApp(make_runtime(tmp_path, start=False), auto_run=False), ActivityPanel, ui
     )
     assert "FAILED" in failure and "exit 1" in failure and "3 failed" in failure
+
+
+# =============================================================== layout stability
+# The redesign's promise is a screen that does not move while the agent works.  Geometry is
+# checked on the *rendered* app, not on the presentation state: a panel that grows by one row
+# would push every panel below it and is exactly what this test exists to catch.
+
+
+class _TrickleProvider:
+    """Streams progress, then replays a trajectory — so the layout can be sampled across the
+    shape changes a real call goes through (model waiting → generating → tool running → done)."""
+
+    on_progress: Any = None
+    model = "trickle-model"
+
+    def __init__(
+        self, outputs: list[dict[str, Any]], updates: int = 6, delay: float = 0.06
+    ) -> None:
+        self._outputs = iter(outputs)
+        self.updates = updates
+        self.delay = delay
+
+    def complete(self, prompt: str, schema: Any) -> Any:
+        del prompt
+        for index in range(self.updates):
+            if self.on_progress is not None:
+                self.on_progress(
+                    StreamProgress(
+                        characters=(index + 1) * 240,
+                        reasoning_characters=(index + 1) * 90,
+                        elapsed_ms=index * 50,
+                        preview=f"partial generation line {index} that must not be rendered",
+                    )
+                )
+            time.sleep(self.delay)
+        return schema.model_validate(next(self._outputs))
+
+
+def test_panel_boxes_never_move_while_a_model_streams(tmp_path: Path) -> None:
+    """The rendered layout is identical while the agent works, including across the shape
+    changes of a call (waiting → generating → tool → done).
+
+    The test also proves it sampled those transitions; a window that only spanned a steady
+    state would not exercise the guard.  The completion banner is a deliberate end-state
+    change: it may resize the flexible (`1fr`) boxes, but no panel may move.
+    """
+    from gcae.tui.state import PANELS
+
+    source = tmp_path / "source"
+    source.mkdir()
+    init_repo(source)
+    provider = _TrickleProvider(
+        [
+            {
+                # a real command that takes ~0.8s: the tool phase must be long enough to
+                # sample, otherwise the ACTIVE panel's tool shape is never observed
+                "action": "execute_tool",
+                "semantic_goal": "write the answer",
+                "reason_summary": "create the file",
+                "expected_result": "answer.txt exists",
+                "tool": {
+                    "name": "run_command",
+                    "arguments": {
+                        "command": (
+                            "python -c \"import time; time.sleep(0.8); "
+                            "open('answer.txt','w').write('ok')\""
+                        )
+                    },
+                },
+            },
+            {
+                "action": "complete_semantic_step",
+                "semantic_goal": "write the answer",
+                "reason_summary": "done",
+            },
+            {
+                "action": "finish_candidate",
+                "semantic_goal": "finish",
+                "reason_summary": "nothing left",
+            },
+        ]
+    )
+    runtime = Runtime(
+        source,
+        tmp_path / "runtime",
+        provider=provider,
+        planner=LLMPlanner(FakeProvider([PLAN])),
+        control=RuntimeControl(),
+    )
+    app = GcaeApp(
+        runtime, request="create answer.txt", criteria=["file exists: answer.txt"], auto_run=False
+    )
+    #: boxes that absorb the slack; the completion banner may resize them
+    FLEXIBLE = {"plan", "evaluation"}
+    visible = [name for name in PANELS if name != "banner"]
+
+    async def scenario() -> None:
+        async with app.run_test(size=(160, 45)):
+            # _launch_agent spawns the worker; _run_agent *is* the worker body and would block
+            # the event loop, which is exactly what stops a test from seeing a live layout
+            app._launch_agent()
+            # Raw sleeps, not pilot.pause(): pause() waits for the screen to settle, which only
+            # happens once the run is over — every sample would be post-mortem.
+            for _ in range(200):
+                if app.ui.stream is not None and not app.agent_done:
+                    break
+                await asyncio.sleep(0.02)
+            assert app.ui.stream is not None and not app.agent_done, (
+                "never observed a live streaming call"
+            )
+
+            samples: list[tuple[bool, dict[str, tuple[int, int, int, int]]]] = []
+            activities: list[str] = []
+            leaks: list[str] = []
+            for _ in range(140):
+                await asyncio.sleep(0.03)
+                frame = {}
+                for name in visible:
+                    region = app.query_one(f"#{name}").region
+                    frame[name] = (region.x, region.y, region.width, region.height)
+                samples.append((app.agent_done, frame))
+                activity = app.query_one(ActivityPanel).body.plain
+                activities.append(activity)
+                timeline = app.query_one(TimelinePanel).body.plain
+                leaks.extend(
+                    marker
+                    for marker in ("chars", "reasoning", "partial generation")
+                    if marker in timeline or marker in activity
+                )
+                if app.agent_done and len(samples) > 20:
+                    break
+
+            live = [frame for done, frame in samples if not done]
+            assert len(live) >= 5, f"only {len(live)} live samples: {len(samples)} total"
+
+            # the samples must cover the transitions, otherwise this guard proves nothing
+            assert any("model" in text and "generating" in text for text in activities), activities
+            assert any("time.sleep(0.8)" in text and "RUNNING" in text for text in activities), (
+                activities[:6]
+            )
+            assert any("finished" in text for text in activities), activities[-3:]
+
+            # 1. no box changes at all while the run is live
+            first = live[0]
+            for index, frame in enumerate(live[1:], start=2):
+                moved = {
+                    name: (first[name], frame[name])
+                    for name in visible
+                    if first[name] != frame[name]
+                }
+                assert not moved, f"layout moved while running (live sample {index}): {moved}"
+
+            # 2. nothing ever moves; only the flexible boxes may resize (completion banner)
+            origin = samples[0][1]
+            for index, (_done, frame) in enumerate(samples[1:], start=2):
+                moved = {
+                    name: (origin[name], frame[name])
+                    for name in visible
+                    if origin[name][:3] != frame[name][:3]
+                }
+                assert not moved, f"panel moved at sample {index}: {moved}"
+                resized = {
+                    name: (origin[name][3], frame[name][3])
+                    for name in visible
+                    if name not in FLEXIBLE and origin[name][3] != frame[name][3]
+                }
+                assert not resized, f"non-flexible panel resized at sample {index}: {resized}"
+
+            assert not leaks, f"telemetry reached the main screen: {set(leaks)}"
+
+    asyncio.run(scenario())

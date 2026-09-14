@@ -9,6 +9,12 @@ accepted checkpoint, pause and completion.
     python tools/tui_demo.py --plain --size 150x46             # final frame as text
     python tools/tui_demo.py --plain --size 80x28 --capture 12  # mid-run frame
 
+The `--frames` mode exists to verify what the tests cannot: that the *rendered* screen stays
+put while model telemetry streams in.  It prints consecutive frames plus the geometry of every
+panel (x, y, width, height, body rows), so a reflow or a jumping box is visible as a diff.
+
+    python tools/tui_demo.py --plain --size 160x45 --capture 3.3 --frames 5 --interval 0.15
+
 Not imported by any product code.
 """
 
@@ -410,8 +416,61 @@ def script(runtime: Runtime, stop: threading.Event) -> None:
     stop.set()
 
 
-def plain_render(size: tuple[int, int], capture: float = 0.0) -> None:
-    """Render one frame at a given size and print it (text only)."""
+PANEL_IDS = (
+    "status",
+    "objective",
+    "plan",
+    "activity",
+    "checkpoint",
+    "validation",
+    "evaluation",
+    "banner",
+    "metrics",
+    "timeline",
+    "footer",
+)
+
+#: Text that must never reach the main screen: model telemetry, not run state.
+TELEMETRY_MARKERS = ("chars", "streaming", "first token", "preview", "reasoning")
+
+
+def print_frame(app: GcaeApp, size: tuple[int, int]) -> None:
+    strips = app.screen._compositor.render_strips()
+    print("=== full frame " + "=" * (size[0] - 17))
+    for strip in strips:
+        print(strip.text.rstrip())
+    print()
+
+
+def print_geometry(app: GcaeApp) -> None:
+    """Panel geometry + a telemetry scan: the machine-readable part of a visual check."""
+    print("--- geometry " + "-" * 60)
+    for panel_id in PANEL_IDS:
+        try:
+            widget = app.query_one(f"#{panel_id}")
+        except Exception:  # noqa: BLE001 - a panel may be absent at this size
+            continue
+        body = getattr(widget, "body", None)
+        rows = len(body.plain.splitlines()) if body is not None else 0
+        region = widget.region
+        hidden = "" if widget.display else " hidden"
+        print(
+            f"{panel_id:11} x={region.x:3} y={region.y:2} w={region.width:3} "
+            f"h={region.height:2} rows={rows:2}{hidden}"
+        )
+    timeline = str(app.query_one("#timeline").body.plain)
+    activity = str(app.query_one("#activity").body.plain)
+    leaked_timeline = [m for m in TELEMETRY_MARKERS if m in timeline]
+    leaked_activity = [m for m in TELEMETRY_MARKERS if m in activity]
+    print(f"timeline telemetry={leaked_timeline or 'none'}")
+    print(f"activity telemetry={leaked_activity or 'none'}")
+    print()
+
+
+def plain_render(
+    size: tuple[int, int], capture: float = 0.0, frames: int = 1, interval: float = 0.25
+) -> None:
+    """Render frames at a given size and print them (text only) with panel geometry."""
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         repo = demo_repo(root)
@@ -440,33 +499,12 @@ def plain_render(size: tuple[int, int], capture: float = 0.0) -> None:
                     while not thread_stop.is_set():
                         await pilot.pause(0.2)
                     await pilot.pause(1.5)
-                strips = app.screen._compositor.render_strips()
-                print("=== full frame " + "=" * (size[0] - 17))
-                for strip in strips:
-                    print(strip.text.rstrip())
-                print()
-                for panel in (
-                    "status",
-                    "objective",
-                    "plan",
-                    "activity",
-                    "checkpoint",
-                    "validation",
-                    "metrics",
-                    "timeline",
-                    "banner",
-                    "footer",
-                ):
-                    widget = (
-                        app.query_one(f"#{panel}")
-                        if panel != "status"
-                        else app.query_one("#status")
-                    )
-                    body = getattr(widget, "body", None)
-                    if body is None:
-                        continue
-                    print(f"--- {panel} " + "-" * (size[0] - len(panel) - 5))
-                    print(body.plain)
+                for index in range(max(1, frames)):
+                    if index:
+                        await asyncio.sleep(interval)
+                    print(f"### frame {index + 1}/{max(1, frames)}")
+                    print_frame(app, size)
+                    print_geometry(app)
 
         asyncio.run(scenario())
 
@@ -481,10 +519,18 @@ def main() -> None:
         default=0.0,
         help="capture the frame this many seconds into the run (default: final frame)",
     )
+    parser.add_argument(
+        "--frames", type=int, default=1, help="print this many consecutive frames"
+    )
+    parser.add_argument(
+        "--interval", type=float, default=0.25, help="seconds between printed frames"
+    )
     args = parser.parse_args()
     if args.plain:
         width, height = (int(part) for part in args.size.split("x"))
-        plain_render((width, height), capture=args.capture)
+        plain_render(
+            (width, height), capture=args.capture, frames=args.frames, interval=args.interval
+        )
         return
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)

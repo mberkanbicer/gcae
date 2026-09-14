@@ -88,6 +88,8 @@ class UiState:
     provider_role: str = ""
     # the step whose speculative changes were already announced in the timeline
     _candidate_announced: str | None = None
+    #: the goal the run was last working on (the objective box keeps it after completion)
+    last_goal: str = ""
     rollback: dict[str, Any] | None = None
     # bookkeeping losses (state/memory/events): visible for the rest of the run, not just an event
     degradations: list[str] = field(default_factory=list)
@@ -236,6 +238,7 @@ class UiState:
 
     def _on_step_started(self, event: Event, payload: dict[str, Any]) -> set[str]:
         self._candidate_announced = None
+        self.last_goal = str(payload.get("goal") or self.last_goal)
         self.current_step = {
             "id": event.step_id,
             "goal": payload.get("goal"),

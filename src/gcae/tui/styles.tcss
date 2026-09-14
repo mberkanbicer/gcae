@@ -58,9 +58,11 @@ Screen {
 }
 
 /* Left column: the objective is capped, the plan grows (more steps visible). */
+/* Every panel is either fixed (its content changes several times per step) or `1fr` (it
+ * absorbs the slack).  No panel is content sized, so nothing on the screen moves while the
+ * agent works: content windows inside the boxes instead of resizing them. */
 #objective {
-    height: auto;
-    max-height: 8;
+    height: 5;
     padding: 0 1;
 }
 
@@ -69,18 +71,23 @@ Screen {
     padding: 0 1;
 }
 
-/* Right column: ACTIVE, CHECKPOINT and VALIDATION size to their content (validation up to a
- * cap) and the EVALUATION box absorbs the slack, so spare rows land at the bottom edge of the
- * column rather than as a hole between two panels. */
+/* Right column: ACTIVE, CHECKPOINT and VALIDATION are fixed (7 + 6 + 5 rows) because their
+ * content changes several times per step; the EVALUATION box absorbs the slack, so spare rows
+ * land at the bottom edge of the column instead of moving the panels above it. */
+/* Fixed, not content sized: the ACTIVE box changes shape several times per tool call
+ * (waiting for the model → generating → running → done).  A fixed box means nothing below
+ * it moves while the agent works; the panel keeps its most important rows and drops the
+ * least important one when the content does not fit. */
 #activity {
-    height: auto;
-    max-height: 13;
+    height: 7;
     padding: 0 1;
 }
 
+/* Fixed boxes for the two panels whose content arrives during a step (the candidate file
+ * list, then the check results).  They are sized for the shape they normally have, so the
+ * column never reflows while the agent works; the evaluation box below absorbs the slack. */
 #checkpoint {
-    height: auto;
-    max-height: 12;
+    height: 6;
     padding: 0 1;
 }
 
@@ -90,8 +97,7 @@ Screen {
 }
 
 #validation {
-    height: auto;
-    max-height: 12;
+    height: 5;
     padding: 0 1;
 }
 
@@ -111,10 +117,7 @@ Screen {
 }
 
 #main.stacked #objective,
-#main.stacked #activity,
-#main.stacked #checkpoint,
 #main.stacked #evaluation,
-#main.stacked #validation,
 #main.stacked #plan {
     height: auto;
     max-height: 12;
@@ -142,17 +145,28 @@ Screen {
 
 /* ---------------------------------------------------------------- timeline */
 
-/* Bounded: the semantic story is a strip, not the screen.  Extra rows become more
- * visible history up to the cap, then the panel scrolls its window. */
+/* Fixed per breakpoint: the semantic story is a strip, not the screen.  A fixed box means
+ * a long run does not *grow* the timeline and push the panels above it; the panel shows the
+ * newest rows and counts the rest ("N earlier · l for the full log"). */
 #timeline {
-    height: auto;
-    min-height: 5;
-    max-height: 13;
+    height: 7;
     padding: 0 1;
 }
 
+#timeline.tall {
+    height: 11;
+}
+
+#timeline.mid {
+    height: 9;
+}
+
+#timeline.short {
+    height: 5;
+}
+
 #timeline.compact {
-    max-height: 6;
+    height: 4;
 }
 
 #footer {

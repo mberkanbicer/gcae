@@ -79,9 +79,9 @@ class Panel(Static):
         instead of a blank band at the bottom of a box.
         """
         height = self.size.height or 0
-        if height <= 3:
+        if height <= 2:
             return cap
-        return max(2, min(cap, height - 2))
+        return max(2, min(cap, height - 1))
 
     def set_body(self, body: Text) -> None:
         """Render Rich text and keep a readable copy for tests and the demo."""
@@ -314,7 +314,9 @@ class ObjectivePanel(Panel):
     def render_state(self, state: AgentState | None, ui: UiState) -> None:
         width = self.content_width
         objective = state.objective if state is not None else (ui.request or "")
-        goal = "" if ui.agent_done else ui.current_goal
+        goal = ui.current_goal or (ui.plan[0].get("goal", "") if ui.plan else "")
+        if ui.agent_done and not goal:
+            goal = ui.last_goal
         meta = ""
         if state is not None:
             meta = (
@@ -333,7 +335,7 @@ class ObjectivePanel(Panel):
         if goal:
             label = "NOW" if ui.goal_is_active else "NEXT"
             style = f"bold {STYLES['accent']}" if ui.goal_is_active else STYLES["value"]
-            for index, chunk in enumerate(_wrap(goal, width - LABEL_WIDTH, 3)):
+            for index, chunk in enumerate(_wrap(goal, width - LABEL_WIDTH, 2)):
                 lines.append(_row(label if index == 0 else "", Text(chunk, style=style)))
         if (
             state is not None
@@ -404,15 +406,26 @@ class ActivityPanel(Panel):
     single one-line state here ("controller · generating · 3.4s").
     """
 
+    #: cap for the fixed box; the layout normally decides through ``row_budget``
+    max_rows: int = 6
+
     def __init__(self) -> None:
         super().__init__("active", id="activity")
 
     def render_state(self, state: AgentState | None, ui: UiState, *, model: str = "") -> None:
+        """Rows in priority order, truncated to the fixed box: nothing below ever moves.
+
+        Order (most important first): goal, action, model state, target, expected, state,
+        why.  The box height is constant, so a model that starts streaming cannot reflow the
+        column; only content that genuinely arrived changes what is shown.
+        """
         width = self.content_width
         action = ui.action
-        lines: list[Text] = []
+        rows: list[Text] = []
+        budget = self.row_budget(self.max_rows)
+
         if ui.agent_done:
-            lines.append(
+            rows.append(
                 _row(
                     "state",
                     Text("finished · no further model or tool action", style=STYLES["muted"]),
@@ -420,55 +433,66 @@ class ActivityPanel(Panel):
             )
             if action is not None:
                 summary = action.label if not action.detail else f"{action.label} · {action.detail}"
-                lines.append(_row("last", Text(elide(summary, width - LABEL_WIDTH))))
-            self.render_block("", lines)
+                rows.append(_row("last", Text(elide(summary, width - LABEL_WIDTH))))
+            self.render_block("", rows)
             return
 
         goal = ui.current_goal or (state.objective if state is not None else "")
         if goal:
-            for chunk in _wrap(goal, width - LABEL_WIDTH, 3):
-                lines.append(_row("goal", Text(chunk, style=STYLES["current"])))
+            for chunk in _wrap(goal, width - LABEL_WIDTH, 2):
+                rows.append(_row("goal", Text(chunk, style=STYLES["current"])))
         else:
-            lines.append(
-                _row("goal", Text("waiting for the first plan", style=STYLES["muted"]))
-            )
+            rows.append(_row("goal", Text("waiting for the first plan", style=STYLES["muted"])))
 
         if action is not None and action.kind == "model":
-            # a model call in flight: one calm row, never a transcript
             role = action.label or ui.provider_role or "model"
             what = "waiting" if action.state == "waiting" and not ui.stream else "generating"
-            detail = f"{role} · {what} · {duration(ui.action_elapsed())}"
-            lines.append(
-                _row("model", Text(elide(detail, width - LABEL_WIDTH), style=STYLES["accent"]))
+            rows.append(
+                _row(
+                    "model",
+                    Text(
+                        elide(
+                            f"{role} · {what} · {duration(ui.action_elapsed())}",
+                            width - LABEL_WIDTH,
+                        ),
+                        style=STYLES["accent"],
+                    ),
+                )
             )
             if model:
-                lines.append(
+                rows.append(
                     _row("", Text(elide(model, width - LABEL_WIDTH), style=STYLES["muted"]))
                 )
             if action.expected:
-                lines.append(
+                rows.append(
                     _row(
                         "expected",
                         Text(elide(action.expected, width - LABEL_WIDTH), style=STYLES["muted"]),
                     )
                 )
+            if action.lines:
+                rows.append(
+                    _row(
+                        "why",
+                        Text(elide(action.lines[0], width - LABEL_WIDTH), style=STYLES["muted"]),
+                    )
+                )
         elif action is not None and action.state != "waiting":
-            lines.append(_row("action", Text(elide(action.label, width - LABEL_WIDTH))))
+            rows.append(_row("action", Text(elide(action.label, width - LABEL_WIDTH))))
             if action.target:
-                lines.append(
+                rows.append(
                     _row(
                         "target",
                         Text(elide(action.target, width - LABEL_WIDTH), style=STYLES["value"]),
                     )
                 )
-            detail = action.detail or (action.lines[0] if action.lines else "")
-            if detail:
-                lines.append(
-                    _row("why", Text(elide(detail, width - LABEL_WIDTH), style=STYLES["muted"]))
-                )
             if action.expected:
-                for chunk in _wrap(action.expected, width - LABEL_WIDTH, 2):
-                    lines.append(_row("expected", Text(chunk, style=STYLES["muted"])))
+                rows.append(
+                    _row(
+                        "expected",
+                        Text(elide(action.expected, width - LABEL_WIDTH), style=STYLES["muted"]),
+                    )
+                )
             state_text, style = {
                 "running": (f"RUNNING · {duration(ui.action_elapsed())}", "accent"),
                 "done": (
@@ -478,46 +502,40 @@ class ActivityPanel(Panel):
                 "failed": (f"FAILED · {action.detail}" if action.detail else "FAILED", "error"),
                 "recovered": ("RECOVERED · the runtime corrected its own approach", "accent"),
             }.get(action.state, (action.state.upper(), "muted"))
-            lines.append(_row("state", Text(state_text, style=STYLES[style])))
+            rows.append(_row("state", Text(state_text, style=STYLES[style])))
+            detail = action.detail or (action.lines[0] if action.lines else "")
+            if detail:
+                rows.append(
+                    _row("why", Text(elide(detail, width - LABEL_WIDTH), style=STYLES["muted"]))
+                )
         elif action is not None:
-            # a runtime operation waiting on something (a question, a failover, a diagnosis)
-            lines.append(_row("action", Text(elide(action.label, width - LABEL_WIDTH))))
+            rows.append(_row("action", Text(elide(action.label, width - LABEL_WIDTH))))
             for line in action.lines[:2]:
-                lines.append(
+                rows.append(
                     _row("", Text(elide(line, width - LABEL_WIDTH), style=STYLES["muted"]))
                 )
-            lines.append(
+            rows.append(
                 _row(
                     "state",
-                    Text(
-                        f"WAITING · {duration(ui.action_elapsed())}",
-                        style=STYLES["accent"],
-                    ),
+                    Text(f"WAITING · {duration(ui.action_elapsed())}", style=STYLES["accent"]),
                 )
             )
-            if action.expected:
-                lines.append(
-                    _row(
-                        "expected",
-                        Text(elide(action.expected, width - LABEL_WIDTH), style=STYLES["muted"]),
-                    )
-                )
         else:
-            lines.append(_row("state", Text("idle · waiting for the agent", style=STYLES["muted"])))
+            rows.append(_row("state", Text("idle · waiting for the agent", style=STYLES["muted"])))
 
-        if not ui.goal_is_active and not ui.agent_done and action is None:
-            lines.append(
-                _row("plan", Text("no step is active yet", style=STYLES["muted"]))
-            )
-        self.render_block("", lines)
+        self.render_block("", rows[:budget])
 
 
 class CheckpointPanel(Panel):
     """Trusted checkpoint versus speculative candidate — GCAE's defining distinction."""
 
+    #: The dashboard shows the top few files and counts the rest; the diff screen lists them
+    #: all.  A short list means the panel grows once (when speculative work first appears)
+    #: instead of growing every time the agent touches another file.
+    max_files: int = 2
+
     def __init__(self) -> None:
         super().__init__("checkpoint", id="checkpoint")
-        self.max_files = 4
 
     def render_state(
         self,

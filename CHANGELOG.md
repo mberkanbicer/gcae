@@ -4,6 +4,35 @@ All notable changes to GCAE are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] — 2026-09-14
+
+### Fixed
+
+- **The dashboard no longer moves while the agent works.** The boxes above the flexible ones were
+  content sized, so a model call, a new speculative file or a finished check resized a panel and
+  pushed everything below it. Measured on a live run: the right column jumped three rows when ACTIVE
+  changed shape (waiting → tool running), and again when the candidate's file list appeared. Every
+  panel is now either fixed (OBJECTIVE 5 rows, ACTIVE 7, CHECKPOINT 6, VALIDATION 5) or flexible
+  (`1fr`: PLAN, EVALUATION), and the timeline is fixed per breakpoint (4–11 rows) instead of growing
+  as events accumulate. Content is windowed inside the boxes, so nothing on screen moves:
+  - the ACTIVE box is constant across a call's shape changes (waiting → generating → tool → done),
+  - the candidate file list is capped at two files plus `+ N more · press d` (it grows once, when
+    speculative work appears, instead of growing per touched file),
+  - the plan absorbs the left column's slack and the evaluation box absorbs the right column's,
+  - a failed check can no longer be pushed out of VALIDATION by the checks above it.
+
+### Added
+
+- `tools/tui_demo.py --frames N --interval S`: prints consecutive frames of a live run together with
+  every panel's geometry (x, y, width, height, body rows) and a telemetry scan of the timeline and
+  ACTIVE bodies — the visual-QA counterpart to the automated check.
+- `tests/test_tui.py::test_panel_boxes_never_move_while_a_model_streams`: samples the rendered app
+  during a streaming call, asserts every box is identical while the run is live, that nothing moves
+  afterwards (the completion banner may only resize the flexible boxes), that no telemetry string
+  reaches the main screen, and that the samples actually covered the transitions (model generating,
+  tool running, run finished) — otherwise the guard would prove nothing. Verified to fail when any
+  fixed box is turned back into a content-sized one.
+
 ## [0.2.0] — 2026-09-14
 
 ### Changed

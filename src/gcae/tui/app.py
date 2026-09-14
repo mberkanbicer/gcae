@@ -182,16 +182,20 @@ class GcaeApp(App[None]):
         timeline.set_class(stacked, "compact")
         metrics.display = width >= 80
         timeline.display = height >= 18
+        # the timeline box is fixed per breakpoint (see styles.tcss), and its row budget
+        # follows the box so nothing is hidden behind it
         if stacked:
-            timeline.rows = 3 if height < HEIGHT_SHORT else 4
+            size_class, timeline.rows = "compact", 3
         elif height >= HEIGHT_TALL:
-            timeline.rows = 10 if large else 8
+            size_class, timeline.rows = ("tall", 10) if large else ("mid", 8)
         elif height >= HEIGHT_SHORT:
-            timeline.rows = 6
+            size_class, timeline.rows = "short", 4
         else:
-            timeline.rows = 3
+            size_class, timeline.rows = "compact", 3
+        for name in ("tall", "mid", "short", "compact"):
+            timeline.set_class(name == size_class, name)
         plan.max_rows = 6 if stacked or height < HEIGHT_SHORT else (12 if large else 9)
-        checkpoint.max_files = 4 if height >= HEIGHT_SHORT else 2
+        checkpoint.max_files = 2 if height >= HEIGHT_SHORT else 1
         validation.max_rows = 4 if height < HEIGHT_SHORT else (8 if large else 6)
         evaluation.max_rows = 3 if height < HEIGHT_SHORT else 4
         rule = "─" * max(10, width)

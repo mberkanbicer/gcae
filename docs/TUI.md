@@ -47,9 +47,16 @@ Differences from a plain log viewer:
   how far did it get". Model streaming — first tokens, character counts, partial generations,
   heartbeats — is *debug* detail: it never enters the timeline and never reaches the ACTIVE panel.
   The log screen (`l`) keeps every raw event, including the streamed preview.
-- **Slack becomes content.** The two columns absorb the spare rows (a long plan and a long check
-  list grow), while the timeline is a bounded strip of 3–10 rows. The old layout gave the timeline
-  `1fr`, which turned most of a tall terminal into an empty log panel.
+- **The screen does not move.** Every panel is either *fixed* (its content changes several times a
+  step: OBJECTIVE 5 rows, ACTIVE 7, CHECKPOINT 6, VALIDATION 5) or flexible (`1fr`, it absorbs the
+  slack: PLAN and EVALUATION). The timeline is fixed per breakpoint (4–11 rows). No panel is content
+  sized, so a model that starts streaming — or a candidate that gains a file, or a check that
+  finishes — changes what is *inside* a box and never where the box is. Content that does not fit is
+  windowed (plan steps, check rows, timeline entries) with a count of what is hidden.
+  Verified by `tools/tui_demo.py --frames` over a live run: 12 consecutive frames across a streaming
+  call, a candidate change, a validation and a completion, with every panel's geometry identical,
+  and by `test_panel_boxes_never_move_while_a_model_streams` (which fails if any fixed box is turned
+  back into a content-sized one).
 - **Curated events.** Routine tool successes and model telemetry are not timeline entries; the full
   stream is one keystroke away (`l`). Tool failures, rollbacks, replans, checkpoints, validation
   results, user instructions and terminal states always appear.
@@ -210,7 +217,14 @@ honest:
 python tools/tui_demo.py                                     # interactive dashboard
 python tools/tui_demo.py --plain --size 160x45               # final frame as text
 python tools/tui_demo.py --plain --size 90x30 --capture 13   # narrow frame, mid-run
+
+# layout stability: consecutive frames + panel geometry while the model streams
+python tools/tui_demo.py --plain --size 160x45 --capture 3.2 --frames 12 --interval 0.4
 ```
+
+`--frames` prints the geometry of every panel (x, y, width, height, body rows) next to each frame and
+scans the timeline and ACTIVE bodies for telemetry markers, so a reflow or a leaked counter is
+visible as a diff instead of something to squint at.
 
 `tools/tui_demo.py` replays a realistic run against a temporary repository using real git
 operations, real validation commands and a real rollback and checkpoint, so the interface can be

@@ -24,6 +24,15 @@ def make_state(run_id: str, updated: str) -> AgentState:
     return state
 
 
+def test_version_reports_the_installed_distribution() -> None:
+    """`gcae --version` must come from packaging metadata, never a hardcoded string."""
+    import importlib.metadata
+
+    from gcae.cli import _version
+
+    assert _version() == importlib.metadata.version("gcae")
+
+
 def test_list_and_inspect_runs(tmp_path: Path, capsys) -> None:
     runtime_dir = tmp_path / "runtime"
     StateStore(runtime_dir / "runs" / "run-a" / "state.json").save(

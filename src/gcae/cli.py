@@ -28,9 +28,21 @@ from .verifier import FinalVerifier
 ROLES = ("controller", "planner", "evaluator", "verifier", "escalation", "recovery")
 
 
+def _version() -> str:
+    """The installed distribution version, so packaging metadata stays the single source."""
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+    except ImportError:  # pragma: no cover - stdlib since 3.8
+        return "unknown"
+    try:
+        return version("gcae")
+    except PackageNotFoundError:  # running from a source tree without installation
+        return "0.0.0+source"
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="gcae", description="Git-Checkpointed Adaptive Execution")
-    parser.add_argument("--version", action="version", version="0.1.0")
+    parser.add_argument("--version", action="version", version=_version())
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     def add_runtime_flags(sub: argparse.ArgumentParser) -> None:

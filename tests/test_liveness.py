@@ -16,7 +16,15 @@ from typing import Any
 
 import pytest
 
-from gcae.models import Decision, Event, PlanStep
+from gcae.models import (
+    AgentState,
+    Decision,
+    Event,
+    InitialPlan,
+    PlanStep,
+    SemanticStep,
+    ToolCall,
+)
 from gcae.providers import FakeProvider, ProviderOutputError, StreamProgress
 from gcae.runtime import Runtime, RuntimeControl
 from gcae.tui.state import ActionView, UiState
@@ -247,6 +255,307 @@ def test_state_is_persisted_before_the_planner_runs(tmp_path: Path) -> None:
     planner.release.set()
     thread.join(timeout=10)
     assert not thread.is_alive()
+
+
+def test_a_finished_plan_is_verified_at_the_budget_limit(tmp_path: Path) -> None:
+    """A plan that completes exactly at the budget must verify, not self-diagnose."""
+    from gcae.models import PlanStep
+    from gcae.planner import Planner
+
+    source = tmp_path / "source"
+    source.mkdir()
+    init_repo(source)
+    provider = FakeProvider(
+        [
+            {
+                "action": "execute_tool",
+                "semantic_goal": "create",
+                "reason_summary": "create it",
+                "tool": {
+                    "name": "create_file",
+                    "arguments": {"path": "fib.py", "content": "print('fib')\n"},
+                },
+            },
+            {
+                "action": "complete_semantic_step",
+                "semantic_goal": "create",
+                "reason_summary": "done",
+            },
+        ]
+    )
+
+    class SingleStep(Planner):
+        def plan(self, state: AgentState) -> InitialPlan:
+            return InitialPlan(
+                objective=state.objective,
+                success_criteria=list(state.success_criteria),
+                steps=[PlanStep(id="step-1", goal="create fib.py", intended_scope=["fib.py"])],
+            )
+
+    runtime = Runtime(
+        source,
+        tmp_path / "runtime",
+        provider=provider,
+        planner=SingleStep(),
+        control=RuntimeControl(),
+        max_steps=2,          # the second iteration finishes the plan
+        recovery_attempts=2,
+    )
+    events = collect(runtime)
+    runtime.start("create fib.py", success_criteria=["file exists: fib.py"])
+    state = runtime.run()
+
+    assert state.status == "complete", state.status
+    assert state.accepted_steps == 1
+    assert not [e for e in events if e.event_type == "recovery_started"], (
+        "a finished plan must be verified, not diagnosed as an exhausted budget"
+    )
+    assert state.iteration <= 3
+
+
+def test_the_context_diff_includes_untracked_files(tmp_path: Path) -> None:
+    """The agent must see the file it just created, or it rewrites it forever.
+
+    Observed live: a complete 30-line script was written six times because `git diff` skipped
+    the untracked file, so the agent concluded its own file was missing or incomplete.
+    """
+    import subprocess
+
+    source = tmp_path / "source"
+    source.mkdir()
+    init_repo(source)
+    runtime = Runtime(
+        source, tmp_path / "runtime", provider=FakeProvider([]), control=RuntimeControl()
+    )
+    runtime.start("do the work", success_criteria=["file exists: new.py"])
+    assert runtime.state is not None and runtime.repo is not None
+    worktree = Path(runtime.state.worktree)
+    (worktree / "new.py").write_text("def main():\n    return 0\n")
+
+    diff = runtime.repo.diff()
+    assert "new.py" in diff, "an untracked file must appear in the diff"
+    assert "def main()" in diff, "its content must be visible, not just its name"
+    # unchanged tracking semantics: validation still sees it as a new file
+    entries = runtime.repo.status_entries()
+    assert ("??", "new.py") in entries
+    subprocess.run(["git", "-C", str(worktree), "add", "new.py"], check=True)
+    tracked = runtime.repo.diff()
+    assert "def main()" in tracked
+
+
+def test_the_next_decision_context_contains_a_created_file(tmp_path: Path) -> None:
+    """The guarantee behind the fix: what the agent wrote is in the next prompt."""
+    from gcae.tools import ToolRegistry
+
+    source = tmp_path / "source"
+    source.mkdir()
+    init_repo(source)
+    provider = FakeProvider(
+        [{"action": "complete_semantic_step", "semantic_goal": "write", "reason_summary": "ok"}]
+    )
+    runtime = Runtime(source, tmp_path / "runtime", provider=provider, control=RuntimeControl())
+    runtime.start("create fib.py", success_criteria=["file exists: fib.py"])
+    assert runtime.state is not None
+
+    tools = ToolRegistry(runtime.state.worktree, 5)
+    tools.execute(
+        ToolCall(name="write_file", arguments={"path": "fib.py", "content": "print('fib')\n"})
+    )
+    plan = runtime.state.plan[0]
+    runtime._decide(SemanticStep(id=plan.id, goal=plan.goal), plan, tools)
+    assert "print('fib')" in runtime.last_context_text, "the created file must be visible"
+
+
+# ------------------------------------- repeated failures must reach the ladder fast
+
+
+class RewriteForever:
+    """Writes the file the task asks for, then completes the step (the user's real job)."""
+
+    on_progress: Any = None
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def complete(self, prompt: str, schema: Any) -> Any:
+        self.calls += 1
+        if self.calls == 1:
+            return schema.model_validate(
+                {
+                    "action": "execute_tool",
+                    "semantic_goal": "create fib.py",
+                    "reason_summary": "write the script",
+                    "tool": {
+                        "name": "write_file",
+                        "arguments": {"path": "fib.py", "content": "print('fib')\n"},
+                    },
+                }
+            )
+        return schema.model_validate(
+            {
+                "action": "complete_semantic_step",
+                "semantic_goal": "create fib.py",
+                "reason_summary": "written",
+            }
+        )
+
+
+def test_planner_prose_in_scope_does_not_roll_back_the_task(tmp_path: Path) -> None:
+    """Reproduces the 18-minute loop: prose scope made every created file a "violation"."""
+    source = tmp_path / "source"
+    source.mkdir()
+    init_repo(source)
+    runtime = Runtime(
+        source, tmp_path / "runtime", provider=RewriteForever(), control=RuntimeControl()
+    )
+    runtime.start("create fib.py", success_criteria=["file exists: fib.py"])
+    state = runtime.state
+    assert state is not None
+    # the planner's mistake: prose in the scope, and the task's own file not listed
+    state.plan = state.plan[:1]
+    state.plan[0].intended_scope = ["file creation", "script naming"]
+    finished = runtime.run()
+
+    assert finished.status == "complete", finished.status
+    # the Runtime does not merge; the CLI/TUI does. The accepted file lives in the run worktree.
+    assert (Path(finished.worktree) / "fib.py").exists(), "created work must survive validation"
+    assert finished.accepted_steps >= 1
+
+
+def test_an_out_of_scope_modification_is_flagged_but_not_fatal(tmp_path: Path) -> None:
+    """Modifying an unscoped existing file is evidence for the evaluator, not a rollback."""
+    import subprocess
+
+    from gcae.tools import ToolRegistry
+    from gcae.validation import DeterministicValidator
+
+    source = tmp_path / "source"
+    source.mkdir()
+    init_repo(source)
+    (source / "parser.py").write_text("original\n")
+    subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(source), "commit", "-qm", "parser"], check=True)
+
+    runtime = Runtime(
+        source, tmp_path / "runtime", provider=FakeProvider([]), control=RuntimeControl()
+    )
+    runtime.start("do the work", success_criteria=["file exists: README"])
+    assert runtime.state is not None and runtime.repo is not None
+    worktree = Path(runtime.state.worktree)
+    (worktree / "fib.py").write_text("print('new')\n")     # additive: never a violation
+    (worktree / "parser.py").write_text("changed\n")        # existing file, out of scope
+
+    validator = DeterministicValidator(
+        runtime.repo, ToolRegistry(str(worktree), 5), [], 10
+    )
+    result = validator.validate(["README"])
+    assert result.passed, "scope must not decide pass/fail"
+    assert result.new_files == ["fib.py"]
+    assert result.scope_violations == ["parser.py"], "existing out-of-scope edits stay visible"
+    assert any("scope warning" in warning for warning in result.warnings)
+
+
+class AlwaysWritesThenFails:
+    """Writes a file and completes the step; the configured validation command always fails."""
+
+    on_progress: Any = None
+
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+
+    def complete(self, prompt: str, schema: Any) -> Any:
+        self.prompts.append(prompt)
+        if "recovery advisor" in prompt:
+            return schema.model_validate(
+                {
+                    "root_cause": "the same validation command keeps failing identically",
+                    "corrective_instruction": "stop repeating it and ask the user",
+                    "strategy": "ask_user",
+                }
+            )
+        if not hasattr(self, "_toggle"):
+            self._toggle = False
+        self._toggle = not self._toggle
+        if self._toggle:
+            return schema.model_validate(
+                {
+                    "action": "execute_tool",
+                    "semantic_goal": "write",
+                    "reason_summary": "write the file",
+                    "tool": {
+                        "name": "write_file",
+                        "arguments": {"path": "fib.py", "content": "print('fib')\n"},
+                    },
+                }
+            )
+        return schema.model_validate(
+            {"action": "complete_semantic_step", "semantic_goal": "write", "reason_summary": "done"}
+        )
+
+
+def test_repeated_identical_failures_reach_the_ladder_before_the_budget(tmp_path: Path) -> None:
+    """Identical rejections must trigger the ladder in ~3 attempts, not 20 iterations."""
+    source = tmp_path / "source"
+    source.mkdir()
+    init_repo(source)
+    provider = AlwaysWritesThenFails()
+    runtime = Runtime(
+        source,
+        tmp_path / "runtime",
+        provider=provider,
+        control=RuntimeControl(),
+        validator_commands=["false"],  # deterministic, identical failure every time
+        max_steps=30,
+    )
+    events = collect(runtime)
+    runtime.start("do the work", success_criteria=["file exists: README"])
+    state = runtime.run()
+
+    assert state.status == "waiting_for_user", state.status
+    assert state.iteration < 12, f"the ladder must fire early, took {state.iteration} iterations"
+    repeated = [event for event in events if event.event_type == "repeated_failure"]
+    assert repeated, "the repeated-failure guard must announce itself"
+    assert repeated[0].payload["count"] == 3
+    assert "command 1 failed" in repeated[0].payload["signature"]
+
+
+def test_the_failure_streak_contract(tmp_path: Path) -> None:
+    """The guard counts identical rejections, resets on a different one, and can be cleared."""
+    source = tmp_path / "source"
+    source.mkdir()
+    init_repo(source)
+    runtime = Runtime(source, tmp_path / "runtime", provider=FakeProvider([]))
+
+    assert runtime._record_failure("same") is False
+    assert runtime._record_failure("same") is False
+    assert runtime._record_failure("same") is True
+    assert runtime._record_failure("different") is False, "a new failure starts over"
+    assert runtime._record_failure("different") is False
+    assert runtime._record_failure("different") is True
+    runtime._clear_failure_streak()
+    assert runtime._record_failure("different") is False
+
+
+def test_a_named_validation_failure_reaches_the_next_context(tmp_path: Path) -> None:
+    """The rejection reason must say what failed, so the next attempt is not blind."""
+    from gcae.evaluator import DeterministicEvaluator
+    from gcae.models import EvaluationInput, ToolResult, ValidationResult
+
+    validation = ValidationResult(
+        passed=False,
+        command_results=[ToolResult(tool="run_command", success=False, error="exit 1")],
+        diff_check_passed=False,
+        changed_files=["fib.py"],
+        scope_violations=["fib.py"],
+    )
+    evaluation = DeterministicEvaluator().evaluate(
+        EvaluationInput(objective="o", semantic_goal="g", validation=validation)
+    )
+    assert evaluation.decision == "rollback"
+    assert "command 1 failed" in evaluation.reason
+    assert "git diff --check" in evaluation.reason
+    assert "changed outside the intended scope: fib.py" in evaluation.reason
+    assert evaluation.reason != "deterministic validation failed"
 
 
 # ------------------------------------------------------------------ dashboard

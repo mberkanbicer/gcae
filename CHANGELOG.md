@@ -4,7 +4,37 @@ All notable changes to GCAE are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.2] — 2026-09-14
+## [Unreleased]
+
+### Fixed
+
+Three defects that turned a two-minute job into seventeen minutes of useless work, all found by
+tracing a real run's event log:
+
+- **Scope is evidence, not a gate.** A planner step whose `intended_scope` did not match the files
+  the task required (observed: prose such as `"file creation"` in the scope) failed deterministic
+  validation on every attempt, so each created file was rolled back and rewritten — 20 iterations,
+  zero accepted steps. Creating a new file is now never a scope violation, out-of-scope edits to
+  existing files are reported as a warning for the evaluator, non-path entries are ignored, and the
+  planner prompt asks for repository-relative paths.
+- **The candidate diff hid the agent's own work.** `git diff` skips untracked files and staged
+  changes, so the agent could not see the file it had just created, concluded it was missing or
+  incomplete, and rewrote it (observed: six rewrites of one complete 30-line script). The candidate
+  diff is now the working tree against the last checkpoint, untracked files included.
+- **A finished plan was diagnosed instead of verified.** The iteration-budget check ran before the
+  "plan finished?" check, so a run that completed its plan exactly at the budget paid a
+  self-diagnosis (63s) and a redundant re-planned step (177s) before verifying anyway. A finished
+  plan is now verified regardless of the budget.
+
+- **Rejection reasons name the failure.** The deterministic evaluator reported "deterministic
+  validation failed"; it now names the failing command, whitespace errors, out-of-scope files and
+  deletions, so the next attempt is not blind.
+
+- **A repeated identical failure reaches the ladder early.** Three rejections with the same
+  signature (an immutable failure memory, `repeated_failure` event) trigger the recovery ladder even
+  when unrelated read-only steps are accepted in between.
+
+
 
 ### Added
 

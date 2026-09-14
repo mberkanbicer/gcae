@@ -411,9 +411,14 @@ def _failed_run_with_accepted_work(tmp_path: Path):
         control=RuntimeControl(),
         max_steps=2,
     )
-    runtime.start("create the accepted file", success_criteria=["file exists: accepted.txt"])
+    # an impossible criterion is what makes this run fail: a finished plan that satisfies its
+    # criteria is verified and completes, so the failure has to be real, not a budget artefact
+    runtime.start(
+        "create the accepted file",
+        success_criteria=["file exists: accepted.txt", "file exists: never-created.txt"],
+    )
     result = runtime.run()
-    assert result.status.startswith("failed")
+    assert result.status.startswith("failed"), result.status
     assert result.accepted_steps == 1
     assert result.accepted_commit is not None
     return runtime

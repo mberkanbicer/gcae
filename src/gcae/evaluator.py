@@ -3,12 +3,35 @@ from __future__ import annotations
 import json
 from typing import Protocol
 
-from .models import Evaluation, EvaluationInput
+from .models import Evaluation, EvaluationInput, ValidationResult
 from .providers import Provider
 
 
 class Evaluator(Protocol):
     def evaluate(self, payload: EvaluationInput) -> Evaluation: ...
+
+
+def _failure_reason(validation: ValidationResult) -> str:
+    """Name what actually failed: "validation failed" alone teaches the next attempt nothing."""
+    reasons: list[str] = []
+    failed_commands = [
+        f"command {index + 1} failed"
+        for index, result in enumerate(validation.command_results)
+        if not result.success
+    ]
+    reasons.extend(failed_commands)
+    if not validation.diff_check_passed:
+        reasons.append("git diff --check reported whitespace errors")
+    if validation.scope_violations:
+        reasons.append(
+            "changed outside the intended scope: " + ", ".join(validation.scope_violations)
+        )
+    if validation.deleted_files:
+        reasons.append("deleted files: " + ", ".join(validation.deleted_files))
+    if not reasons:
+        reasons.extend(validation.details)
+    detail = "; ".join(reasons[:3]) or "no specific check reported a failure"
+    return f"deterministic validation failed: {detail}"
 
 
 class DeterministicEvaluator:
@@ -19,7 +42,7 @@ class DeterministicEvaluator:
         if not validation.passed:
             return Evaluation(
                 decision="rollback",
-                reason="deterministic validation failed",
+                reason=_failure_reason(validation),
                 progress_score=0.0,
             )
         return Evaluation(

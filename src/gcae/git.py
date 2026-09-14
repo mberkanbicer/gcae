@@ -388,13 +388,25 @@ class GitRepository:
         return self._run("status", "--porcelain", cwd=self._require_worktree())
 
     def diff(self) -> str:
-        return self._run("diff", "--no-ext-diff", cwd=self._require_worktree())
+        """Candidate diff: the working tree against the last checkpoint, untracked files included.
+
+        A bare ``git diff`` hides two kinds of change the agent must see: untracked files
+        (observed: a complete 30-line script rewritten six times because the agent could not see
+        the file it had just created) and staged changes. Both made the agent reason about a
+        repository that did not match reality.
+        """
+        worktree = self._require_worktree()
+        if not any(code == "??" for code, _ in self.status_entries()):
+            return self._run("diff", "HEAD", "--no-ext-diff", cwd=worktree)
+        return "\n".join(item["diff"] for item in self.diff_by_file())
 
     def diff_stat(self) -> str:
-        return self._run("diff", "--stat", cwd=self._require_worktree())
+        return self._run("diff", "HEAD", "--stat", cwd=self._require_worktree())
 
     def diff_check(self) -> bool:
-        return self._run("diff", "--check", cwd=self._require_worktree(), check=False) == ""
+        return (
+            self._run("diff", "HEAD", "--check", cwd=self._require_worktree(), check=False) == ""
+        )
 
     def clean_generated_artifacts(self) -> None:
         worktree = self._require_worktree()
@@ -523,7 +535,8 @@ class GitRepository:
                     check=False,
                 )
             else:
-                text = self._run("diff", "--no-ext-diff", "--", path, cwd=worktree)
+                # HEAD keeps staged changes visible in the candidate view
+                text = self._run("diff", "HEAD", "--no-ext-diff", "--", path, cwd=worktree)
             truncated = len(text) > limit
             result.append(
                 {

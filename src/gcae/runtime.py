@@ -240,6 +240,11 @@ class Runtime:
         self._recoveries = 0
         self._recovery_extensions = 0
         self._decision_error: str | None = None
+        # repeated identical rejections are stagnation even when unrelated steps are accepted
+        # in between (observed: 20 iterations rewriting the same file after the same rollback)
+        self._last_failure_signature = ""
+        self._same_failure_count = 0
+        self.repeated_failure_limit = 3
         self.validator_commands = list(validator_commands or [])
         self.max_steps = max_steps
         self.command_timeout = command_timeout
@@ -476,6 +481,17 @@ class Runtime:
         assert self.state is not None and self.repo is not None and self.memory is not None
         iterations = 0
         while True:
+            if self._pump_control():
+                return self.state
+            self.state.iteration += 1
+            plan = self._current_plan_step()
+            if plan is None:
+                # A finished plan is verified even when the iteration budget is exhausted:
+                # the work is done, so diagnosing an "exhausted budget" here burned a
+                # self-diagnosis and a redundant re-planned step before verifying anyway.
+                if self._verify_and_route("final verification failed"):
+                    return self.state
+                continue
             if iterations >= self._step_budget():
                 budget_message = (
                     f"step budget exhausted after {iterations} iterations "
@@ -490,14 +506,6 @@ class Runtime:
                     return self._fail(budget_message)
                 return self.state
             iterations += 1
-            if self._pump_control():
-                return self.state
-            self.state.iteration += 1
-            plan = self._current_plan_step()
-            if plan is None:
-                if self._verify_and_route("final verification failed"):
-                    return self.state
-                continue
 
             self.state.current_step_id = plan.id
             if plan.status == "pending":
@@ -767,10 +775,26 @@ class Runtime:
             # worthwhile and the plan advanced. Only rejected attempts and replans
             # signal stagnation (see _handle_stagnation).
             self.stagnation.record(True)
+            if validation.changed_files or self.repo.worktree_merge_in_progress():
+                self._clear_failure_streak()
             self._persist()
             return False
 
         self._remember("failure", evaluation.reason, immutable=True)
+        if self._record_failure(evaluation.reason):
+            self._event(
+                "repeated_failure",
+                RunPhase.ROLLBACK,
+                step_id=plan.id,
+                payload={
+                    "signature": evaluation.reason,
+                    "count": self._same_failure_count,
+                },
+            )
+            if self._handle_stagnation(
+                f"the same failure repeated {self._same_failure_count} times: {evaluation.reason}"
+            ) is not None:
+                return True
         if self._conflict_resolution:
             # the merge is in progress: rolling back would lose the conflict context
             self._fail_conflict_resolution([plan.goal])
@@ -780,6 +804,26 @@ class Runtime:
             if self._handle_stagnation(evaluation.reason) is not None:
                 return True
         return False
+
+    def _record_failure(self, reason: str) -> bool:
+        """True when the same failure has now repeated ``repeated_failure_limit`` times.
+
+        Consecutive identical rejections are stagnation by another name: the run is spending
+        iterations without changing the outcome. Counting the signature catches that even when
+        an unrelated step is accepted in between, which would otherwise keep resetting the
+        stagnation window.
+        """
+        signature = reason.strip()
+        if signature and signature == self._last_failure_signature:
+            self._same_failure_count += 1
+        else:
+            self._last_failure_signature = signature
+            self._same_failure_count = 1
+        return self._same_failure_count >= self.repeated_failure_limit
+
+    def _clear_failure_streak(self) -> None:
+        self._last_failure_signature = ""
+        self._same_failure_count = 0
 
     def _escalate(self, reason: str) -> None:
         self._escalated = True

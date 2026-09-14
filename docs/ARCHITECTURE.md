@@ -71,6 +71,22 @@ by `max_steps`. Repeated identical tool calls within a step force evaluation of 
 candidate (accepted when valid, rolled back by the evaluator otherwise) instead of destroying work
 that may already be correct.
 
+## What counts as evidence
+
+Deterministic validation decides pass/fail on exactly three things: configured commands, `git diff
+--check`, and unresolved merge conflicts. Everything else it collects — scope, dependency manifests,
+file counts, deletions — is *evidence*: it is reported to the evaluator, shown in the dashboard and
+kept in the event log, but it never fails a step by itself.
+
+That distinction is deliberate. A plan's `intended_scope` is a guess, and treating a guess as a hard
+gate makes a run impossible whenever the plan is wrong (observed: a planner writing prose into the
+scope field rolled back every attempt to create the file the task asked for). The evaluator and the
+final verification gate are what decide whether work is good, and both see the evidence.
+
+The candidate diff the agent works from is the working tree **against the last checkpoint**, so
+untracked and staged changes are visible: an agent that cannot see the file it just wrote rewrites it
+forever (observed: six rewrites of one complete script).
+
 ## Replanning and safeguards
 
 Replanning discards speculative changes, keeps accepted commits and knowledge, and preserves

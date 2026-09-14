@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 import time
+from collections.abc import Callable
 from typing import Any, TypeVar
 
 import httpx
@@ -21,6 +23,7 @@ PROGRESS_SECONDS = 0.4
 PROGRESS_CHARACTERS = 512
 
 T = TypeVar("T", bound=BaseModel)
+_R = TypeVar("_R")
 
 
 class _StreamUnavailable(RuntimeError):
@@ -44,6 +47,8 @@ class OpenAICompatibleProvider:
         json_mode: bool = True,
         stream: bool = True,
         stall_timeout: float = 45.0,
+        retries: int = 3,
+        retry_backoff: float = 2.0,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
@@ -59,6 +64,10 @@ class OpenAICompatibleProvider:
         # detectable event (no bytes for stall_timeout seconds) instead of an indefinite wait
         self.stream = stream
         self.stall_timeout = stall_timeout
+        # transient failures (rate limits, 5xx, dropped connections) are retried with
+        # exponential backoff before they are allowed to become a run failure
+        self.retries = max(0, retries)
+        self.retry_backoff = max(0.0, retry_backoff)
         self.on_progress: ProgressListener | None = None
         self._progress_state = (0.0, -1)  # last report time, last reported character count
 
@@ -140,6 +149,44 @@ class OpenAICompatibleProvider:
 
     # ---------------------------------------------------------------- transport
 
+    def _transient(self, exc: BaseException) -> tuple[bool, float]:
+        """Is this worth retrying, and after how long?"""
+        if isinstance(exc, httpx.HTTPStatusError):
+            status = exc.response.status_code
+            if status == 429 or 500 <= status < 600:
+                retry_after = exc.response.headers.get("retry-after", "")
+                try:
+                    return True, max(0.0, float(retry_after))
+                except ValueError:
+                    return True, 0.0
+            return False, 0.0
+        if isinstance(exc, (httpx.TimeoutException, httpx.TransportError)):
+            return True, 0.0
+        return False, 0.0
+
+    def _with_retries(self, attempt_call: Callable[[], _R]) -> _R:
+        """Run one request, retrying transient failures with backoff and jitter."""
+        last: BaseException | None = None
+        for index in range(self.retries + 1):
+            try:
+                return attempt_call()
+            except Exception as exc:  # noqa: BLE001 - classified immediately below
+                retryable, retry_after = self._transient(exc)
+                if not retryable or index >= self.retries:
+                    raise
+                last = exc
+                delay = retry_after or min(30.0, self.retry_backoff * (2**index))
+                delay += random.uniform(0, min(1.0, delay / 4 or 0.5))
+                logger.warning(
+                    "provider request failed (%s: %s); retry %d/%d in %.1fs",
+                    type(exc).__name__, str(exc)[:120], index + 1, self.retries, delay,
+                )
+                if self.on_progress is not None:
+                    self._report([], [], time.monotonic(), waiting=True)
+                time.sleep(delay)
+        raise ProviderOutputError(f"provider request failed after retries: {last}")
+
+
     def _send(
         self,
         messages: list[dict[str, str]],
@@ -151,23 +198,29 @@ class OpenAICompatibleProvider:
         payload = self._payload(messages, json_mode=json_mode, max_tokens=max_tokens)
         url = f"{self.base_url}/chat/completions"
         if stream:
-            return self._streamed(url, payload)
+            return self._with_retries(lambda: self._streamed(url, payload))
         # read=stall_timeout: a silent endpoint fails in seconds with a truthful reason
         # instead of holding the run for the whole request budget
         timeout = httpx.Timeout(
             self.timeout, connect=min(15.0, self.timeout), read=max(1.0, self.stall_timeout)
         )
         try:
-            response = self.client.post(
-                url, headers=self._headers(), json=payload, timeout=timeout
+            response = self._with_retries(
+                lambda: self._post(url, payload, timeout)
             )
-            response.raise_for_status()
             return response.json()
         except httpx.TimeoutException as exc:
             raise ProviderOutputError(
                 f"provider request stalled: no data for {self.stall_timeout:.0f}s "
                 f"(model={self.model}) — the endpoint accepted the request and produced nothing"
             ) from exc
+
+    def _post(self, url: str, payload: dict[str, Any], timeout: httpx.Timeout) -> httpx.Response:
+        response = self.client.post(
+            url, headers=self._headers(), json=payload, timeout=timeout
+        )
+        response.raise_for_status()
+        return response
 
     def _streamed(self, url: str, payload: dict[str, Any]) -> dict[str, Any]:
         """Stream a completion, reporting progress, and rebuild a buffered-style body.
@@ -238,6 +291,8 @@ class OpenAICompatibleProvider:
                 f"(model={self.model}) — the endpoint accepted the request and produced nothing"
             ) from exc
         except httpx.HTTPStatusError as exc:
+            if self._transient(exc)[0]:
+                raise  # rate limit / server error: retry the stream, do not downgrade it
             raise _StreamUnavailable(f"HTTP {exc.response.status_code}") from exc
         except httpx.HTTPError as exc:
             raise _StreamUnavailable(str(exc)) from exc

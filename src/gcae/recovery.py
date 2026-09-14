@@ -110,6 +110,9 @@ def build_recovery_prompt(trace: str) -> str:
         "corrective_instruction: one concrete action for the next attempt that differs from "
         "everything the trace shows was already tried. It becomes the next step's goal, so "
         "write it as an instruction, not as advice.\n"
+        "success_criteria: only when the run has none and the planner failed, up to three "
+        "checkable criteria in the exact forms 'file exists: path', "
+        "'file contains: path :: text', 'command succeeds: command'.\n"
         f"Diagnosis JSON schema: {schema}\n"
         f"Trace:\n{trace}"
     )

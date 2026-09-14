@@ -32,6 +32,10 @@ class ProviderConfig(BaseModel):
     # Seconds without any streamed data before the call is declared stalled and handed to the
     # recovery ladder.
     stall_timeout: float = 45.0
+    # Transient provider failures (rate limits, server errors, dropped connections) are retried
+    # with exponential backoff before they can fail a step.
+    retries: int = 3
+    retry_backoff: float = 2.0
 
 
 class ModelOverride(BaseModel):

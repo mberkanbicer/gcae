@@ -45,6 +45,14 @@ endless loop, and a diagnosis that cannot be parsed leaves the caller's ladder i
 A resumed run is a new user intervention, so it may ask again instead of dying. Answering an
 instruction (`i` in the dashboard, `gcae resume` in the CLI) re-plans from the accepted state.
 
+## Degraded mode
+
+The runtime's own bookkeeping is not allowed to kill a run. A failure to write `state.json`, append
+to `events.jsonl`, or record memory is reported (`runtime_degraded` event, an entry in
+`state.degradations`, a WARNING, and a `degraded:` line in the CLI summary) and the run continues.
+Correctness is never degraded by this: validation, evaluation and verification all still have to
+pass, and the repository always holds the accepted commits.
+
 ## Recovery triggers
 
 Recovery is not only for stagnation. The same advisor reads the trace when a run is about to end

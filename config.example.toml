@@ -37,6 +37,10 @@ timeout = 60
 # a stall instead of looking like a frozen run. Falls back to a buffered request automatically.
 stream = true
 stall_timeout = 45.0
+# Transient provider failures (rate limits, server errors, dropped connections) are retried with
+# exponential backoff before they can fail a step. A Retry-After header is honoured.
+retries = 3
+retry_backoff = 2.0
 # Token budget for reconstructed context and the provider's maximum output tokens.
 context_limit = 8192
 # response_format=json_object. Reasoning models (e.g. many :free OpenRouter models) can

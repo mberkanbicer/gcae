@@ -109,6 +109,34 @@ A provider that stops producing data is a *detected failure*: `[provider] stall_
 read, the error names the silence and the characters already received, and it enters the recovery
 ladder like any other fatal condition. Nothing in the loop waits unboundedly.
 
+## Failure taxonomy
+
+Self-recovery is the runtime's *default* response to failure, not a feature of the stagnation
+path. Every condition that can stop a run is classified, and all but the last one are handled
+without the user:
+
+| Condition | Response |
+| --- | --- |
+| tool errors, failed validation commands, scope warnings | evidence for the evaluator; a step is rejected and replanned, the run continues |
+| rejected step, non-productive attempts, step budget exhausted | recovery ladder: change hypothesis → escalate → **diagnose** → ask → fail |
+| unusable provider output, stall, evaluator output, unexpected exception | same ladder: the advisor reads the trace |
+| transient network failure (429, 5xx, dropped connection) | retried with exponential backoff and `Retry-After` support before it is even a failure |
+| planner outage (with user criteria) | deterministic planner takes over, `planner_fallback` event |
+| planner outage (no criteria) | the advisor may supply the criteria and a first step (`success_criteria_adopted`) |
+| merge conflict | handed to the agent inside the run worktree; re-verified; branch kept if it cannot be resolved |
+| memory, event log or state file failure | **degraded mode**: the run continues, the loss is recorded (`runtime_degraded`, `state.degradations`, CLI summary) |
+| recovery itself failing | contained: recorded as a failure memory, the caller's ladder continues |
+| user asked and nothing changed, or the advisor says stop | run fails, accepted checkpoints are still delivered |
+
+Two rules make the ladder trustworthy: it is **bounded** (`runtime.recovery_attempts`, and each
+successful correction buys `runtime.recovery_budget` iterations, never unlimited), and it never
+replaces evidence — a correction is an ordinary semantic step that still has to pass validation,
+evaluation and the final verification gate.
+
+Degraded mode is deliberately narrow: it covers bookkeeping (state, memory, events), never
+correctness. To make that safe, recovery tolerates all three: a diagnosis works from whatever
+subsystem is still alive.
+
 ## Self-recovery
 
 When a run is about to give up, the loop leaves the model-driven path and asks the recovery advisor

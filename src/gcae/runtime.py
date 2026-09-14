@@ -258,6 +258,7 @@ class Runtime:
         self._last_failure_signature = ""
         self._same_failure_count = 0
         self.repeated_failure_limit = 3
+        self._degrade_notified: dict[str, bool] = {}
         self.validator_commands = list(validator_commands or [])
         self.max_steps = max_steps
         self.command_timeout = command_timeout
@@ -356,19 +357,40 @@ class Runtime:
             with self._progress("planner", getattr(self.planner, "provider", None)):
                 initial_plan = self.planner.plan(self.state)
         except ProviderOutputError as exc:
-            if not self.state.success_criteria:
-                self.state.status = "failed: planner output"
-                self.state.phase = RunPhase.FAILED
-                self._remember("failure", f"planner failure: {exc}", immutable=True)
-                self._persist()
-                raise RuntimeError(
-                    f"planner failed: {exc} — re-run with a checkable --criterion "
-                    '(e.g. --criterion "file exists: README.md") to start without the planner'
-                ) from exc
-            # User criteria define done; a planner outage must not waste the whole run.
-            initial_plan = Planner().plan(self.state)
-            self._planner_notice = str(exc)
-            logger.warning("planner unavailable, using the deterministic plan: %s", exc)
+            self._remember("failure", f"planner failure: {exc}", immutable=True)
+            if self.state.success_criteria:
+                # user criteria define done; a planner outage must not waste the whole run
+                initial_plan = Planner().plan(self.state)
+                self._planner_notice = str(exc)
+                logger.warning("planner unavailable, using the deterministic plan: %s", exc)
+            else:
+                # no criteria and no plan: the recovery advisor may supply both, which keeps a
+                # planner outage recoverable instead of a dead end
+                self._event(
+                    "recovery_started",
+                    RunPhase.ANALYZE,
+                    payload={"trigger": f"planner output: {exc}", "attempt": 1},
+                )
+                outcome = self._recover(f"planner output: {exc}", None)
+                if outcome is RecoveryAction.CONTINUE and self.state.success_criteria:
+                    initial_plan = Planner().plan(self.state)
+                    self._planner_notice = (
+                        f"planner failed ({exc}); the recovery advisor supplied the criteria"
+                    )
+                    logger.warning("planner failed; recovery supplied criteria and a step")
+                elif outcome is RecoveryAction.ASK_USER:
+                    raise RuntimeError(
+                        f"planner failed and the run needs your input: "
+                        f"{self.state.pending_question}"
+                    ) from exc
+                else:
+                    self.state.status = "failed: planner output"
+                    self.state.phase = RunPhase.FAILED
+                    self._persist()
+                    raise RuntimeError(
+                        f"planner failed: {exc} — re-run with a checkable --criterion "
+                        '(e.g. --criterion "file exists: README.md") to start without the planner'
+                    ) from exc
         self.state.objective = initial_plan.objective or request
         self.state.assumptions = list(initial_plan.assumptions)
         for criterion in initial_plan.success_criteria:
@@ -926,6 +948,20 @@ class Runtime:
             self.state.phase,
             payload={"trigger": trigger, "attempt": self._recoveries},
         )
+        try:
+            return self._diagnose(trigger, plan)
+        except Exception as exc:  # noqa: BLE001 - a broken rescue must not kill the patient
+            self._degrade("recovery", exc)
+            self._remember(
+                "failure",
+                f"recovery itself failed: {type(exc).__name__}: {exc}",
+                immutable=True,
+            )
+            return RecoveryAction.UNAVAILABLE
+
+    def _diagnose(self, trigger: str, plan: PlanStep | None) -> RecoveryAction:
+        """The advisor call, separated so every failure inside it is contained."""
+        assert self.state is not None and self.memory is not None
         provider = self._recovery_provider()
         model = str(getattr(provider, "model", provider.__class__.__name__))
         logger.warning("recovery %d: diagnosing %s", self._recoveries, trigger)
@@ -965,6 +1001,19 @@ class Runtime:
             "recovery %d: %s -> %s", self._recoveries, diagnosis.root_cause,
             diagnosis.corrective_instruction,
         )
+        if diagnosis.success_criteria and not self.state.success_criteria:
+            # the planner failed to state what "done" means: the advisor's criteria are the
+            # only checkable definition available, so the run can still be verified
+            self.state.success_criteria = list(diagnosis.success_criteria)
+            self._event(
+                "success_criteria_adopted",
+                self.state.phase,
+                payload={"criteria": list(diagnosis.success_criteria), "source": "recovery"},
+            )
+            self._remember(
+                "decision",
+                "criteria adopted from recovery: " + "; ".join(diagnosis.success_criteria),
+            )
         if diagnosis.strategy == "ask_user":
             question = (
                 f"recovery could not fix the run: {diagnosis.root_cause}. "
@@ -1247,7 +1296,20 @@ class Runtime:
         except GitError:
             discarded = []
         logger.warning("rollback to %s", target[:12])
-        self.repo.rollback(target)
+        try:
+            self.repo.rollback(target)
+        except GitError as exc:
+            # the trusted state could not be restored: record it and let the caller's ladder
+            # decide. The accepted commits are still on the branch, so no work is lost.
+            self._remember("failure", f"rollback failed: {exc}", immutable=True)
+            self._event(
+                "rollback_failed",
+                RunPhase.ROLLBACK,
+                step_id=self.state.current_step_id,
+                payload={"target": target, "error": str(exc)},
+            )
+            self._persist()
+            raise
         self._event(
             "rollback_completed",
             RunPhase.ROLLBACK,
@@ -1332,23 +1394,57 @@ class Runtime:
         path = directory / f"{self.state.iteration:04d}-{safe_step}.diff"
         path.write_text(self.repo.diff(), encoding="utf-8")
 
+    def _degrade(self, what: str, exc: BaseException) -> None:
+        """Record that a non-essential subsystem failed, without ending the run.
+
+        State, memory and events are how the runtime explains itself; losing one of them is
+        serious and is reported (a ``runtime_degraded`` event, a bounded list in ``state.json``,
+        the CLI summary and a WARNING), but it is never a reason to abort work that the
+        repository still holds. Recovery keeps working because it tolerates all three.
+        """
+        message = f"{what} failed: {type(exc).__name__}: {exc}"
+        logger.warning("run degraded — %s", message)
+        state = self.state
+        if state is None:
+            return
+        if message not in state.degradations and len(state.degradations) < 10:
+            state.degradations.append(message)
+        if self._degrade_notified.get(what):
+            return
+        self._degrade_notified[what] = True
+        try:
+            self._event(
+                "runtime_degraded", state.phase, payload={"component": what, "error": message}
+            )
+        except Exception:  # noqa: BLE001 - the reporting path is already degraded
+            logger.debug("could not record the degradation event", exc_info=True)
+
     def _persist(self) -> None:
-        assert self.state is not None
+        if self.state is None:
+            return
         self.state.updated_at = now_utc()
-        StateStore(self._run_dir() / "state.json").save(self.state)
+        try:
+            StateStore(self._run_dir() / "state.json").save(self.state)
+        except Exception as exc:  # noqa: BLE001 - an unwritable state file is not fatal
+            self._degrade("state file", exc)
 
     def _remember(self, kind: str, content: str, immutable: bool = False) -> None:
-        assert self.state is not None and self.memory is not None
-        self.memory.add(
-            MemoryRecord(
-                kind=kind,
-                content=content,
-                run_id=self.state.run_id,
-                step_id=self.state.current_step_id,
-                commit_sha=self.state.accepted_commit,
-                immutable=immutable,
+        if self.state is None or self.memory is None:
+            return
+        try:
+            self.memory.add(
+                MemoryRecord(
+                    kind=kind,
+                    content=content,
+                    run_id=self.state.run_id,
+                    step_id=self.state.current_step_id,
+                    commit_sha=self.state.accepted_commit,
+                    immutable=immutable,
+                )
             )
-        )
+        except Exception as exc:  # noqa: BLE001 - knowledge is lost, the run is not
+            self._degrade("memory store", exc)
+            return
         self._emit_memory_counts()
 
     def resolve_merge_conflicts(self) -> list[str]:
@@ -1537,7 +1633,8 @@ class Runtime:
         step_id: str | None = None,
         payload: dict[str, object] | None = None,
     ) -> None:
-        assert self.state is not None and self.events is not None
+        if self.state is None or self.events is None:
+            return
         event = Event(
             run_id=self.state.run_id,
             event_type=event_type,
@@ -1545,8 +1642,13 @@ class Runtime:
             step_id=step_id,
             payload=payload or {},
         )
-        self.events.append(event)
         self._trace.append(event)
+        try:
+            self.events.append(event)
+        except Exception as exc:  # noqa: BLE001 - a full disk must not kill the run
+            # bookkeeping is useful, not essential: the run continues and reports that its
+            # own record is incomplete instead of dying because a log could not be written
+            self._degrade("event log", exc)
         for callback in list(self._subscribers):
             try:
                 callback(event)

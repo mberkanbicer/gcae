@@ -482,3 +482,69 @@ def test_incomplete_json_error_names_the_truncation() -> None:
     assert "incomplete JSON" in message
     assert "finish_reason=length" in message
     assert "2048 completion tokens" in message
+
+
+def test_transient_rate_limits_are_retried_with_backoff() -> None:
+    """A 429 is not a run failure: it is a wait, then a retry."""
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        if len(calls) <= 2:
+            return httpx.Response(429, headers={"retry-after": "0"}, json={"error": "slow down"})
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                '{"action":"finish_candidate","semantic_goal":"done",'
+                                '"reason_summary":"after retries"}'
+                            )
+                        }
+                    }
+                ]
+            },
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    provider = OpenAICompatibleProvider(
+        "http://local/v1", "model", client=client, retries=3, retry_backoff=0.01
+    )
+    decision = provider.complete("prompt", Decision)
+    assert decision.reason_summary == "after retries"
+    assert len(calls) == 3, f"expected two retries, saw {len(calls)} attempts"
+
+
+def test_persistent_rate_limits_fail_after_the_retry_budget() -> None:
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        return httpx.Response(429, json={"error": "slow down"})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    provider = OpenAICompatibleProvider(
+        "http://local/v1", "model", client=client, retries=2, retry_backoff=0.01
+    )
+    with pytest.raises(ProviderOutputError):
+        provider.complete("prompt", Decision)
+    assert len(calls) == 3, "two retries then give up: the run's ladder takes over from there"
+
+
+def test_a_client_error_is_not_retried() -> None:
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        return httpx.Response(400, json={"error": {"message": "bad request"}})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    provider = OpenAICompatibleProvider(
+        "http://local/v1", "model", client=client, retries=3, retry_backoff=0.01
+    )
+    with pytest.raises(ProviderOutputError):
+        provider.complete("prompt", Decision)
+    # one streaming attempt, then one buffered fallback: a bad request is not worth backing off
+    assert len(calls) == 2, f"a 400 must not be retried, saw {len(calls)} attempts"

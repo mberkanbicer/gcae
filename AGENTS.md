@@ -27,32 +27,38 @@ and runs. It runs headless or with an interactive Textual TUI.
    asking the user to run git. The only git a user may still choose to run is inspecting history;
    no workflow may require it. A repository GCAE cannot safely touch (mid-merge/rebase) is
    refused with an explanation instead of being modified.
-4. **A blocked run diagnoses itself, then asks.** Stagnation, unusable provider output and an
+4. **Every failure is diagnosed before it can end a run.** Self-recovery is the default response:
+   stagnation, unusable provider/evaluator output, stalls, exhausted budgets, planner outages,
+   unexpected exceptions and transient network errors all reach the advisor (with bounded retries
+   and backoff first, and degraded mode for bookkeeping failures). Only an already-asked run, an
+   advisor decision to stop, or an unusable diagnosis fails a run. See 
+   (failure taxonomy) for the complete mapping.
+5. **A blocked run asks after diagnosing.** Stagnation, unusable provider output and an
    exhausted step budget first trigger `recovery.py`: the advisor reads the run's own trace
    (`build_trace` over state, filtered events, validation evidence, failure memories) and returns a
    structured `Diagnosis`. `replan` queues the correction and grants bounded extra iterations;
    otherwise the run pauses (`waiting_for_user`) with a question, keeping the plan and every accepted
    commit. A run only fails when the user was asked or recovery was exhausted, and its accepted work
    is still delivered.
-5. **Verified work reaches the user.** A completed run merges its branch into the source
+6. **Verified work reaches the user.** A completed run merges its branch into the source
    branch (`[runtime] auto_merge`, default on) with the pre-merge and merge commits recorded in
    `state.json`, so the work is visible in the checkout and `gcae undo` reverses it. A run that
    cannot be merged (dirty checkout, branch moved, nothing to merge) reports why and leaves the
    branch intact for `gcae merge`.
-6. **Only acceptance creates commits.** An accepted step commits `gcae: <goal>`; a passing final
+7. **Only acceptance creates commits.** An accepted step commits `gcae: <goal>`; a passing final
    verification with a dirty worktree commits `gcae: verified final state`; rejection does
    `reset --hard accepted_commit` plus cleanup inside the worktree only.
-7. **The model never runs Git checkpoint commands.** Checkpoint management is runtime-owned and
+8. **The model never runs Git checkpoint commands.** Checkpoint management is runtime-owned and
    `git reset|clean|commit|worktree|...` stays blocked in the command tool.
-8. **The unit of progress is a semantic step**, not a tool call. Tools run freely inside a step;
+9. **The unit of progress is a semantic step**, not a tool call. Tools run freely inside a step;
    deterministic validation and evaluation happen only at `complete_semantic_step` or when
    `max_tool_calls_per_step` is exhausted.
-9. **Context is reconstructed per call** from persistent state. Never accumulate a growing
+10. **Context is reconstructed per call** from persistent state. Never accumulate a growing
    conversation, never summarize summaries. Pinned data (request, constraints, criteria, current
    goal, accepted commit, failure lessons) cannot be dropped by budgeting.
-10. **Structured decisions only.** Controller, planner and evaluator outputs are Pydantic models
+11. **Structured decisions only.** Controller, planner and evaluator outputs are Pydantic models
    with bounded repair; invalid output fails the run — it never falls back silently.
-11. **The TUI is first-class and must keep working headlessly.** The engine must not import
+12. **The TUI is first-class and must keep working headlessly.** The engine must not import
    Textual; the TUI subscribes to runtime events and drives a thread-safe `RuntimeControl`.
 
 ## Dependencies

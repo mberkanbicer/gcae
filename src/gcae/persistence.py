@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from .models import AgentState
 
 
@@ -20,4 +22,23 @@ class StateStore:
         temp.replace(self.path)
 
     def load(self) -> AgentState:
-        return AgentState.model_validate_json(self.path.read_text(encoding="utf-8"))
+        try:
+            text = self.path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            raise
+        except OSError as exc:
+            raise RuntimeError(f"run state is unreadable: {self.path} ({exc})") from exc
+        try:
+            return AgentState.model_validate_json(text)
+        except (ValidationError, ValueError) as exc:
+            # a half-written or edited state file: say exactly what is wrong and where the
+            # remaining trace lives, instead of failing with a JSON stack trace
+            events = self.path.with_name("events.jsonl")
+            hint = (
+                f" — the event log is intact: {events}"
+                if events.exists()
+                else " and no event log exists for this run"
+            )
+            raise RuntimeError(
+                f"run state is corrupt or incomplete: {self.path} ({exc}){hint}"
+            ) from exc

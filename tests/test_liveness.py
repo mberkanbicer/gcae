@@ -801,3 +801,231 @@ def test_unknown_provider_without_progress_support_is_fine(tmp_path: Path) -> No
     assert "provider_started" in kinds and "provider_finished" in kinds
     assert "provider_progress" not in kinds
     assert provider.on_progress is None
+
+
+# =============================================== universal recovery / resilience
+# Every failure must be diagnosed before it is allowed to end a run, and the runtime's own
+# bookkeeping (state, memory, events) must never be the reason a run dies.
+
+
+def _one_step_runtime(tmp_path: Path, provider: Any, **kwargs: Any) -> Runtime:
+    """A runtime whose single planned step writes a file, so a run has something to do."""
+    from gcae.models import InitialPlan, PlanStep
+    from gcae.planner import Planner
+
+    source = tmp_path / "source"
+    source.mkdir()
+    init_repo(source)
+
+    class SingleStep(Planner):
+        def plan(self, state: AgentState) -> InitialPlan:
+            return InitialPlan(
+                objective=state.objective,
+                success_criteria=list(state.success_criteria),
+                steps=[PlanStep(id="step-1", goal="create the file", intended_scope=["out.txt"])],
+            )
+
+    runtime = Runtime(
+        source,
+        tmp_path / "runtime",
+        provider=provider,
+        planner=SingleStep(),
+        control=RuntimeControl(),
+        **kwargs,
+    )
+    return runtime
+
+
+def test_a_broken_memory_store_does_not_kill_the_run(tmp_path: Path) -> None:
+    """Knowledge is lost, the run is not: memory failures degrade and are reported."""
+    import sqlite3
+
+    provider = FakeProvider(
+        [
+            {
+                "action": "execute_tool",
+                "semantic_goal": "create",
+                "reason_summary": "create it",
+                "tool": {
+                    "name": "create_file",
+                    "arguments": {"path": "out.txt", "content": "ok\n"},
+                },
+            },
+            {
+                "action": "complete_semantic_step",
+                "semantic_goal": "create",
+                "reason_summary": "done",
+            },
+        ]
+    )
+    runtime = _one_step_runtime(tmp_path, provider)
+    events = collect(runtime)
+    runtime.start("create out.txt", success_criteria=["file exists: out.txt"])
+    assert runtime.memory is not None
+
+    def explode(*args: Any, **kwargs: Any) -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    runtime.memory.add = explode  # type: ignore[method-assign]
+    state = runtime.run()
+
+    assert state.status == "complete", state.status
+    assert any("memory store failed" in item for item in state.degradations)
+    degraded = [e for e in events if e.event_type == "runtime_degraded"]
+    assert degraded and degraded[0].payload["component"] == "memory store"
+
+
+def test_an_unwritable_state_file_does_not_kill_the_run(tmp_path: Path) -> None:
+    """A state file that cannot be written is reported, not fatal."""
+    provider = FakeProvider(
+        [
+            {
+                "action": "execute_tool",
+                "semantic_goal": "create",
+                "reason_summary": "create it",
+                "tool": {
+                    "name": "create_file",
+                    "arguments": {"path": "out.txt", "content": "ok\n"},
+                },
+            },
+            {
+                "action": "complete_semantic_step",
+                "semantic_goal": "create",
+                "reason_summary": "done",
+            },
+        ]
+    )
+    runtime = _one_step_runtime(tmp_path, provider)
+    runtime.start("create out.txt", success_criteria=["file exists: out.txt"])
+    import gcae.persistence as persistence
+
+    def explode(self: Any, state: Any) -> None:
+        raise OSError("No space left on device")
+
+    original = persistence.StateStore.save
+    persistence.StateStore.save = explode  # type: ignore[method-assign]
+    try:
+        result = runtime.run()
+    finally:
+        persistence.StateStore.save = original  # type: ignore[method-assign]
+
+    assert result.status == "complete", result.status
+    assert any("state file failed" in item for item in result.degradations)
+
+
+def test_a_failing_recovery_does_not_kill_the_run(tmp_path: Path) -> None:
+    """The rescue path itself must be fail-soft, whatever breaks inside it."""
+
+    class BrokenAdvisor:
+        on_progress: Any = None
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def complete(self, prompt: str, schema: Any) -> Any:
+            self.calls += 1
+            if "recovery advisor" in prompt:
+                raise RuntimeError("the advisor exploded")
+            if self.calls <= 3:
+                return schema.model_validate(
+                    {"action": "replan", "semantic_goal": "s", "reason_summary": "stuck"}
+                )
+            return schema.model_validate(
+                {"action": "finish_candidate", "semantic_goal": "s", "reason_summary": "done"}
+            )
+
+    runtime = Runtime(
+        source_repo=_fresh_repo(tmp_path),
+        runtime_dir=tmp_path / "runtime",
+        provider=BrokenAdvisor(),
+        control=RuntimeControl(),
+        recovery_attempts=1,
+    )
+    events: list[Event] = []
+    runtime.subscribe(events.append)
+    runtime.start("do the work", success_criteria=["file exists: README"])
+    state = runtime.run()
+
+    # the ladder continues past the broken advisor: escalation is unavailable, so it asks
+    assert state.status == "waiting_for_user", state.status
+    assert any(e.event_type in {"runtime_degraded", "recovery_failed"} for e in events)
+    assert state.pending_question
+
+
+def _fresh_repo(tmp_path: Path) -> Path:
+    source = tmp_path / f"repo-{len(list(tmp_path.glob('repo-*')))}"
+    source.mkdir()
+    init_repo(source)
+    return source
+
+
+def test_corrupt_state_reports_what_is_wrong(tmp_path: Path) -> None:
+    from gcae.persistence import StateStore
+
+    path = tmp_path / "runs" / "abc" / "state.json"
+    path.parent.mkdir(parents=True)
+    path.write_text('{"run_id": "abc", "status": ')      # half-written file
+    (path.parent / "events.jsonl").write_text("{}\n")
+
+    with pytest.raises(RuntimeError) as caught:
+        StateStore(path).load()
+    message = str(caught.value)
+    assert "corrupt or incomplete" in message
+    assert "events.jsonl" in message, "the error must point at the surviving trace"
+
+
+def test_advisor_criteria_rescue_a_failed_planner(tmp_path: Path) -> None:
+    """A planner outage must still be diagnosable: the advisor may define done."""
+
+    class PlannerFailsAdvisorHelps:
+        on_progress: Any = None
+
+        def complete(self, prompt: str, schema: Any) -> Any:
+            if "recovery advisor" in prompt:
+                return schema.model_validate(
+                    {
+                        "root_cause": "the planner call failed twice",
+                        "corrective_instruction": "create out.txt so the run can be verified",
+                        "strategy": "replan",
+                        "success_criteria": ["file exists: out.txt"],
+                    }
+                )
+            if "controller" not in prompt and "planner" in prompt:
+                raise ProviderOutputError("planner is down")
+            return schema.model_validate(
+                {
+                    "action": "execute_tool",
+                    "semantic_goal": "create",
+                    "reason_summary": "create it",
+                    "tool": {
+                        "name": "create_file",
+                        "arguments": {"path": "out.txt", "content": "ok\n"},
+                    },
+                }
+            )
+
+    class NoPlanner:
+        def plan(self, state: Any) -> Any:
+            raise ProviderOutputError("planner is down")
+
+        def replan(self, state: Any, reason: str) -> list[Any]:
+            del state, reason
+            return []
+
+    source = _fresh_repo(tmp_path)
+    runtime = Runtime(
+        source,
+        tmp_path / "runtime",
+        provider=PlannerFailsAdvisorHelps(),
+        planner=NoPlanner(),
+        control=RuntimeControl(),
+    )
+    events: list[Event] = []
+    runtime.subscribe(events.append)
+    runtime.start("create out.txt")          # no criteria at all
+
+    assert runtime.state is not None
+    assert runtime.state.success_criteria == ["file exists: out.txt"], (
+        "the advisor's criteria must be adopted when the run has none"
+    )
+    assert any(e.event_type == "success_criteria_adopted" for e in events)

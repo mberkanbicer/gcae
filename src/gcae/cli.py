@@ -130,6 +130,8 @@ def _provider(provider_config: ProviderConfig) -> Provider:
             json_mode=provider_config.json_mode,
             stream=provider_config.stream,
             stall_timeout=provider_config.stall_timeout,
+            retries=provider_config.retries,
+            retry_backoff=provider_config.retry_backoff,
         )
     if kind == "fake":
         return FakeProvider(
@@ -441,6 +443,8 @@ def _inspect_run(run_id: str, runtime_dir: Path, as_json: bool) -> None:
         )
     if state.pending_question:
         print(f"pending question: {state.pending_question}")
+    if state.degradations:
+        print("degraded: " + "; ".join(state.degradations))
     if state.recovery is not None:
         print(
             f"recovery #{state.recovery.attempt} ({state.recovery.trigger}) "
@@ -591,8 +595,16 @@ def main(argv: list[str] | None = None) -> None:
         else:
             runtime.resume(args.run_id)
         result = runtime.run()
-    except (OSError, RuntimeError, ValueError) as exc:
-        print(f"gcae: error: {exc}", file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001 - a CLI must never dump a traceback on the user
+        if isinstance(exc, (OSError, RuntimeError, ValueError)):
+            print(f"gcae: error: {exc}", file=sys.stderr)
+        else:
+            print(f"gcae: unexpected error: {type(exc).__name__}: {exc}", file=sys.stderr)
+            print(
+                "gcae: the run directory (state.json, events.jsonl) and any accepted commits are "
+                "intact; 'gcae list' shows what exists and 'gcae resume' continues a run",
+                file=sys.stderr,
+            )
         raise SystemExit(1) from exc
     merge_options = {
         "auto_merge": config.runtime.auto_merge,

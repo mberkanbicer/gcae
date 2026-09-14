@@ -4,6 +4,36 @@ All notable changes to GCAE are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.5] — 2026-09-14
+
+### Added
+
+- **Self-recovery is now the default answer to every failure.** The ladder already covered
+  stagnation, unusable provider/evaluator output, stalls, exhausted budgets and unexpected
+  exceptions; it now also covers a **planner outage with no criteria** (the advisor may supply the
+  criteria and the first step, recorded as `success_criteria_adopted`) and **transient network
+  failures**, which are retried with exponential backoff, `Retry-After` support and jitter
+  (`[provider] retries`, `retry_backoff`) before they are allowed to become a failure.
+
+### Fixed
+
+- **A failing recovery no longer kills the run it is rescuing.** Everything inside the advisor path
+  is contained: an exception there is recorded as a failure memory and the caller's ladder
+  continues, instead of propagating out of `run()`.
+- **Bookkeeping failures can no longer end a run.** Writing `state.json`, appending to
+  `events.jsonl` or recording memory now degrades instead of raising: the loss is recorded
+  (`runtime_degraded` event, a bounded `degradations` list in `state.json`, a WARNING and a
+  `degraded:` line in the CLI summary) and the work continues. Correctness gates are untouched —
+  validation, evaluation and verification still have to pass.
+- **A failed rollback is a recovery trigger, not a crash.** It is recorded (`rollback_failed`
+  event, failure memory) and the ladder decides; the accepted commits are still on the branch, so
+  nothing is lost.
+- **A corrupt or half-written `state.json` explains itself** (`run state is corrupt or incomplete:
+  … — the event log is intact: …`) instead of surfacing a JSON stack trace.
+- **The CLI never dumps a traceback.** Unexpected errors print the type, the message, and the fact
+  that the run directory and accepted commits are intact, with `gcae list` / `gcae resume` as the
+  next step.
+
 ## [0.1.4] — 2026-09-14
 
 ### Fixed

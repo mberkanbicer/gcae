@@ -31,6 +31,8 @@ context_limit = 8192                # token budget for reconstructed context
 json_mode = true                    # response_format=json_object; false for reasoning models
 stream = true                       # stream completions: visible progress + stall detection
 stall_timeout = 45.0                # seconds with no data before a call is declared stalled
+retries = 3                         # retries for 429/5xx/timeouts/dropped connections
+retry_backoff = 2.0                 # base seconds, exponential; Retry-After wins
 
 [provider.generation]
 temperature = 0.0
@@ -86,6 +88,10 @@ commands = ["pytest -q"]            # run before every semantic evaluation
   buffered request gets the same stall budget, and an endpoint that refuses streaming falls back to a
   buffered request automatically — a timeout never does, because a silent endpoint would be silent
   again.
+- `retries` and `retry_backoff` cover transient provider failures: 429 and 5xx responses,
+  timeouts and dropped connections are retried with exponential backoff plus jitter, honouring a
+  `Retry-After` header. Client errors (400/404/422) are not retried — they are the caller's
+  problem, and the run's recovery ladder handles them.
 - `recovery_attempts` and `recovery_budget` bound self-recovery: each diagnosis may queue a corrective
   step and buy extra iterations, and the run asks the user only when those attempts are spent.
 - `context_limit` is a token budget; the runtime estimates tokens conservatively

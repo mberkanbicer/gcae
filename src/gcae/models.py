@@ -194,6 +194,8 @@ class Diagnosis(BaseModel):
     corrective_instruction: str
     strategy: Literal["replan", "ask_user", "stop"] = "replan"
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    # optional: when the planner could not produce criteria, the advisor may propose them
+    success_criteria: list[str] = Field(default_factory=list)
 
 
 class RecoveryRecord(BaseModel):
@@ -255,6 +257,9 @@ class AgentState(BaseModel):
     latest_validation: ValidationResult | None = None
     last_verification: VerificationReport | None = None
     recovery: RecoveryRecord | None = None
+    # non-essential subsystems that failed during the run (state file, memory, event log):
+    # recorded so the result is never silently incomplete
+    degradations: list[str] = Field(default_factory=list)
     merge: MergeRecord | None = None
     created_at: datetime = Field(default_factory=now_utc)
     updated_at: datetime = Field(default_factory=now_utc)

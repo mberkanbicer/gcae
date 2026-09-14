@@ -70,6 +70,7 @@ documents: none — the run produced no files
 | Every git operation is the loop's job | Base commit, commit identity, run branch, worktree, merge, conflict resolution and cleanup are automatic. The model is never allowed to run `git`. |
 | Your working tree is never the workshop | The agent edits an isolated worktree under the state directory, one worktree per run. |
 | A slow model is never a frozen screen | Model calls stream and report progress: elapsed time, first-token latency, content and reasoning character counts, plus a heartbeat every 10s while the model deliberates. A call that produces nothing for `stall_timeout` fails honestly instead of hanging the run. |
+| Self-recovery is the default | Every failure that could end a run — stagnation, unusable model output, a stall, an exhausted budget, a planner outage, a transient network error, even an unexpected exception — is diagnosed from the run's own trace before it is allowed to stop anything. Bounded, and never a substitute for evidence. |
 | A blocked run fixes itself first | Before asking you, a failing run (stagnation, unusable model output, exhausted budget) reads its own trace — events, validation evidence, failure memories — and diagnoses the root cause, then retries with the correction. Bounded, and always outranked by the verification gate. |
 
 ## The execution loop

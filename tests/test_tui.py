@@ -729,6 +729,13 @@ def test_instruction_revives_a_run_that_stalled_waiting_for_the_user(tmp_path: P
             await wait_for(
                 pilot, lambda: runtime.state is not None and runtime.state.status == "complete"
             )
+            # the merge runs in the worker after the loop finishes: wait for the record,
+            # then for the file, instead of racing the worker thread
+            await wait_for(
+                pilot,
+                lambda: runtime.state is not None and runtime.state.merge is not None,
+            )
+            await wait_for(pilot, lambda: (source / "answer.txt").exists())
             assert (source / "answer.txt").read_text() == "ok"
 
     asyncio.run(scenario())

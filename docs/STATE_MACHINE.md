@@ -56,6 +56,7 @@ because:
 | `provider output: …` | repeated unusable provider output may be a prompting/schema problem, not a dead end |
 | `evaluator output: …` | same, for the evaluation call |
 | `stagnation: …` | repeated non-productive attempts |
+| `unexpected error: <Type>: <message>` | an exception inside the loop is a run failure, not a process death: it is recorded as an immutable failure memory, becomes a recovery trigger, and only then ends the run |
 
 The advisor never *replaces* deterministic evidence: a recovery step is a normal semantic step, so it
 is validated, evaluated and checkpointed like any other, and the run only completes through the

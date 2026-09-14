@@ -97,7 +97,7 @@ PLAN → SEMANTIC STEP → EXECUTE → OBSERVE → VALIDATE → EVALUATE → ACC
 - **VERIFY** — every success criterion is checked again on the final tree before the run may
   complete.
 - **RECOVER** — if the run is about to give up (stagnation, unusable provider output, exhausted
-  budget), the recovery advisor reads the run's own trace and returns a `Diagnosis`: root cause,
+  budget, or an unexpected exception), the recovery advisor reads the run's own trace and returns a `Diagnosis`: root cause,
   one corrective instruction, and a strategy. `replan` queues the correction as the next step and
   grants bounded extra iterations; `ask_user` and `stop` end the run honestly.
 

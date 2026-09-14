@@ -4,9 +4,7 @@ All notable changes to GCAE are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-## [Unreleased]
+## [0.1.1] — 2026-09-14
 
 ### Added
 
@@ -20,7 +18,9 @@ All notable changes to GCAE are documented here. The format follows
   diagnosis that cannot be parsed leaves the old ladder intact. New `[models.recovery]` role
   (defaults to the controller's model, i.e. the escalated one after escalation), new
   `recovery_started` / `recovery_completed` / `recovery_failed` events in the dashboard timeline,
-  and `gcae inspect` prints the last diagnosis.
+  and `gcae inspect` prints the last diagnosis. An unexpected exception inside the loop is
+  handled the same way instead of escaping the process: it is recorded as an immutable failure
+  memory, handed to the advisor, and only then allowed to end the run.
 
 - **Stagnation ladder** — an exhausted approach now stores a "change hypothesis" memory, escalates to
   the configured stronger model, and then asks the user (`waiting_for_user`) instead of stopping the

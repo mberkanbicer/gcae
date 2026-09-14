@@ -428,12 +428,36 @@ class Runtime:
     # ------------------------------------------------------------------ main loop
 
     def run(self) -> AgentState:
+        """Drive the run to a terminal state.
+
+        An unexpected exception is a *run* failure, not a process death: it is recorded,
+        handed to the recovery advisor like every other fatal condition, and only then
+        allowed to end the run. Accepted checkpoints are never touched.
+        """
         if self.state is None:
             raise RuntimeError("call start or resume before run")
         if self.state.status == "complete":
             return self.state
         assert self.repo is not None and self.memory is not None
 
+        while True:
+            try:
+                return self._run_loop()
+            except Exception as exc:  # noqa: BLE001 - crashes are handled, not swallowed
+                logger.exception("unexpected error in run %s", self.state.run_id)
+                reason = f"{type(exc).__name__}: {exc}"
+                self._remember("failure", f"unexpected error: {reason}", immutable=True)
+                outcome = self._recover(
+                    f"unexpected error: {reason}", self._current_plan_step()
+                )
+                if outcome is RecoveryAction.CONTINUE:
+                    continue
+                if outcome is RecoveryAction.UNAVAILABLE:
+                    return self._fail(f"unexpected {reason}")
+                return self.state
+
+    def _run_loop(self) -> AgentState:
+        assert self.state is not None and self.repo is not None and self.memory is not None
         iterations = 0
         while True:
             if iterations >= self._step_budget():

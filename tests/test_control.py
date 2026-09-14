@@ -537,6 +537,59 @@ def test_recovery_grants_budget_so_a_run_can_finish(tmp_path: Path) -> None:
     assert "step budget exhausted" in state.recovery.trigger
 
 
+class CrashingProvider:
+    """Raises an unexpected error once, then behaves like the recording provider."""
+
+    def __init__(self, outputs: list[dict[str, object]]) -> None:
+        self.outputs = list(outputs)
+        self.crashed = False
+        self.prompts: list[str] = []
+
+    def complete(self, prompt, schema):  # type: ignore[no-untyped-def]
+        self.prompts.append(prompt)
+        if not self.crashed:
+            self.crashed = True
+            raise RuntimeError("tool registry exploded")
+        try:
+            return schema.model_validate(self.outputs.pop(0))
+        except ValidationError as exc:
+            raise ProviderOutputError(str(exc)) from exc
+
+
+def test_an_unexpected_error_is_recovered_not_fatal(tmp_path: Path) -> None:
+    """An unexpected exception must not kill the process: the run diagnoses and continues."""
+    source = tmp_path / "source"
+    source.mkdir()
+    init_repo(source)
+    provider = CrashingProvider(
+        [_diagnosis("create answer.txt instead of inspecting"), *TRAJECTORY]
+    )
+    runtime = Runtime(source, tmp_path / "runtime", provider=provider, control=RuntimeControl())
+    runtime.start("do the work", success_criteria=["file exists: answer.txt"])
+    state = runtime.run()
+
+    assert state.status == "complete", state.status
+    assert state.recovery is not None
+    assert "unexpected error: RuntimeError" in state.recovery.trigger
+    failed = [record for record in runtime.memory.all(state.run_id) if record.kind == "failure"]  # type: ignore[union-attr]
+    assert any("tool registry exploded" in record.content for record in failed)
+
+
+def test_an_unexpected_error_fails_honestly_when_recovery_cannot_help(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    init_repo(source)
+    provider = CrashingProvider([])  # crashes, and has nothing to diagnose with either
+    runtime = Runtime(
+        source, tmp_path / "runtime", provider=provider, control=RuntimeControl(),
+        recovery_attempts=0,
+    )
+    runtime.start("do the work", success_criteria=["file exists: README"])
+    state = runtime.run()
+
+    assert state.status.startswith("failed: unexpected RuntimeError")
+
+
 def test_recovery_is_absent_when_disabled(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source.mkdir()

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from typing import Any, Protocol, TypeVar, cast
 
 from pydantic import BaseModel, ValidationError
@@ -11,8 +12,31 @@ from .models import Decision
 T = TypeVar("T", bound=BaseModel)
 
 
+@dataclass(frozen=True)
+class StreamProgress:
+    """Incremental progress from a streaming provider.
+
+    ``waiting`` is a heartbeat: the stream is open but no new bytes arrived since the last
+    report, which is how a hang becomes visible instead of looking like a frozen UI.
+    """
+
+    characters: int
+    reasoning_characters: int = 0
+    elapsed_ms: int = 0
+    waiting: bool = False
+    preview: str = ""
+
+
+ProgressListener = Callable[[StreamProgress], None]
+
+
 class Provider(Protocol):
     def complete(self, prompt: str, schema: type[T]) -> T: ...
+
+    # Providers that can report progress expose ``on_progress``; the runtime attaches a
+    # listener around each call and clears it afterwards. Optional on purpose: a provider
+    # that cannot stream stays valid.
+    on_progress: ProgressListener | None
 
 
 class ProviderOutputError(RuntimeError):
@@ -21,6 +45,10 @@ class ProviderOutputError(RuntimeError):
 
 class FakeProvider:
     """Deterministic provider used by tests and offline demonstrations."""
+
+    # declared for the Provider protocol; the fake produces everything at once, so it has
+    # nothing to stream and never calls it.
+    on_progress: ProgressListener | None = None
 
     def __init__(self, outputs: Iterable[dict[str, Any] | str], repair_limit: int = 1) -> None:
         self._outputs = iter(outputs)

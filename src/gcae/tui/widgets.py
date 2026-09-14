@@ -16,7 +16,7 @@ from textual.widgets import Static
 
 from ..models import AgentState
 from . import formatters
-from .formatters import STYLES, duration, elide, short_id
+from .formatters import STYLES, duration, elide, short_id, thousands
 from .state import UiState
 
 LABEL_WIDTH = 12
@@ -314,7 +314,7 @@ class ObjectivePanel(Panel):
         if goal:
             label = "NOW" if ui.goal_is_active else "NEXT"
             style = f"bold {STYLES['accent']}" if ui.goal_is_active else STYLES["value"]
-            for index, chunk in enumerate(_wrap(goal, width - LABEL_WIDTH, 2)):
+            for index, chunk in enumerate(_wrap(goal, width - LABEL_WIDTH, 3)):
                 lines.append(_row(label if index == 0 else "", Text(chunk, style=style)))
         if (
             state is not None
@@ -354,16 +354,23 @@ class PlanPanel(Panel):
         active = next(
             (index for index, step in enumerate(steps) if step.get("status") == "active"), 0
         )
-        visible, hidden_before, hidden_after = _window(steps, active, max(2, self.max_rows))
+        goal_width = max(10, width - 4)
+        # A long active goal is the one thing the user must be able to read, so it wraps onto
+        # continuation rows and the neighbouring steps yield to it instead of being pushed out.
+        active_rows = _wrap(str(steps[active].get("goal") or ""), goal_width, 3)
+        neighbours = max(1, self.max_rows - len(active_rows) + 1)
+        visible, hidden_before, hidden_after = _window(steps, active, neighbours)
         lines: list[Text] = []
         if hidden_before:
             lines.append(Text(f"… {hidden_before} completed", style=STYLES["muted"]))
-        goal_width = max(10, width - 4)
-        for _, step in visible:
+        for index, step in visible:
             marker, style = formatters.plan_marker(str(step.get("status")))
-            row = Text(f"{marker} ", style=STYLES[style])
-            row.append(elide(str(step.get("goal") or ""), goal_width), style=STYLES[style])
-            lines.append(row)
+            goal = str(step.get("goal") or "")
+            wrapped = active_rows if index == active else _wrap(goal, goal_width, 1)
+            for row_index, chunk in enumerate(wrapped):
+                row = Text(f"{marker} " if row_index == 0 else "  ", style=STYLES[style])
+                row.append(chunk, style=STYLES[style])
+                lines.append(row)
         if hidden_after:
             lines.append(Text(f"… {hidden_after} pending", style=STYLES["muted"]))
         self.render_block(meta, lines)
@@ -375,6 +382,30 @@ class ActivityPanel(Panel):
     def __init__(self) -> None:
         super().__init__("active", id="activity")
 
+    @staticmethod
+    def _stream_row(ui: UiState, width: int) -> Text | None:
+        """One line of real progress while a model call streams, or None when idle."""
+        stream = ui.stream
+        if not stream or ui.agent_done:
+            return None
+        characters = int(stream.get("characters") or 0)
+        reasoning = int(stream.get("reasoning_characters") or 0)
+        seconds = (stream.get("elapsed_ms") or 0) / 1000
+        if stream.get("waiting") or not characters:
+            detail = f"no output yet · {seconds:.0f}s"
+            if reasoning:
+                detail = f"reasoning {thousands(reasoning)} chars · {seconds:.0f}s"
+            return _row("stream", Text(detail, style=STYLES["muted"]))
+        detail = f"{thousands(characters)} chars · {seconds:.0f}s"
+        if reasoning:
+            detail = f"{thousands(reasoning)} reasoning · {detail}"
+        preview = " ".join(str(stream.get("preview") or "").split())
+        text = Text(detail, style=STYLES["accent"])
+        if preview:
+            room = max(8, width - LABEL_WIDTH - len(detail) - 3)
+            text.append("  " + elide("…" + preview, room), style=STYLES["value"])
+        return _row("stream", text)
+
     def render_state(self, state: AgentState | None, ui: UiState) -> None:
         width = self.content_width
         action = ui.action
@@ -385,7 +416,8 @@ class ActivityPanel(Panel):
                 meta = f"{action.label} · {elapsed}"
             elif action.state == "waiting":
                 # a model call is in flight: show which role is thinking and for how long
-                meta = f"{ui.role.lower() or 'model'} · {elapsed}"
+                role = ui.provider_role or ui.role.lower() or "model"
+                meta = f"{role} · {elapsed}"
             elif action.duration_ms is not None:
                 meta = f"{action.label} · {action.duration_ms / 1000:.1f}s"
             else:
@@ -409,8 +441,11 @@ class ActivityPanel(Panel):
             return
         goal = ui.current_goal or (state.objective if state is not None else "")
         if goal:
-            for chunk in _wrap(goal, width - LABEL_WIDTH, 2):
+            for chunk in _wrap(goal, width - LABEL_WIDTH, 3):
                 lines.append(_row("goal", chunk))
+        stream = self._stream_row(ui, width)
+        if stream is not None:
+            lines.append(stream)
         if action is not None and action.state != "waiting":
             label = action.label.upper() if len(action.label) <= 10 else "TOOL"
             for index, argument in enumerate(action.lines[:3]):

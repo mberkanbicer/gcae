@@ -25,6 +25,13 @@ class ProviderConfig(BaseModel):
     # response_format=json_object. Disable for reasoning models that deliberate until the
     # output budget is exhausted and never emit content.
     json_mode: bool = True
+    # Stream the completion: the dashboard and the event log see tokens as they arrive, and
+    # a hang becomes a detected stall instead of an indefinite wait. Falls back to a buffered
+    # request automatically when the endpoint refuses streaming.
+    stream: bool = True
+    # Seconds without any streamed data before the call is declared stalled and handed to the
+    # recovery ladder.
+    stall_timeout: float = 45.0
 
 
 class ModelOverride(BaseModel):

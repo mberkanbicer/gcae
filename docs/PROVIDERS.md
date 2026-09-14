@@ -10,6 +10,28 @@ Configurable per provider: `base_url`, `model`, `api_key` or `api_key_env`, `tim
 when a key is configured. Native tool calling is not used: the model returns structured JSON that
 the runtime validates and executes.
 
+## Streaming, liveness and stalls
+
+With `[provider] stream = true` (default) completions are requested as a server-sent event stream,
+and the runtime turns each update into events so a slow model is visible instead of looking frozen:
+
+| Event | Meaning |
+| --- | --- |
+| `provider_started` | a role's call began (role + model) |
+| `provider_first_token` | first content arrived, with the connection latency |
+| `provider_progress` | incremental size (content and reasoning characters) plus a preview tail, rate limited |
+| `provider_waiting` | heartbeat: the call is running and produced nothing for 10s |
+| `provider_finished` | wall-clock time and the final character counts |
+
+Nothing arrives for `[provider] stall_timeout` seconds (default 45, applied per read) → the call fails
+with `provider request stalled: no data for Ns …` and the run hands that to the recovery ladder
+instead of waiting forever. Measured against a socket that accepts and never answers: 3s to detection
+with `stall_timeout = 3`.
+
+Streaming is fail-soft. An endpoint that answers a streaming request with a buffered body, or refuses
+it outright (HTTP 4xx), is retried automatically without streaming; a *timeout* is not retried that
+way, because a silent endpoint would simply be silent again.
+
 ## Reasoning models and structured output
 
 Reasoning models (OpenRouter returns `message.reasoning` separately) can spend their whole output

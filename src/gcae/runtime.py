@@ -8,7 +8,9 @@ import time
 import uuid
 from collections import deque
 from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
+from typing import Any
 
 from .context import ContextBuilder, estimate_tokens
 from .controller import Controller
@@ -36,7 +38,13 @@ from .models import (
 )
 from .persistence import StateStore
 from .planner import Planner, PlannerLike, next_step
-from .providers import DecisionProvider, FakeProvider, Provider, ProviderOutputError
+from .providers import (
+    DecisionProvider,
+    FakeProvider,
+    Provider,
+    ProviderOutputError,
+    StreamProgress,
+)
 from .recovery import RecoveryAction, RecoveryAdvisor, build_trace
 from .safeguards import RepetitionGuard, StagnationDetector
 from .state_machine import StateMachine
@@ -45,6 +53,10 @@ from .validation import DeterministicValidator
 from .verifier import FinalVerifier
 
 logger = logging.getLogger("gcae")
+
+# How often a provider call reports itself while it has produced nothing. Keeps the event log
+# and the dashboard moving during a long deliberation instead of showing a frozen screen.
+PROVIDER_HEARTBEAT_SECONDS = 10.0
 
 EventSubscriber = Callable[[Event], None]
 
@@ -319,8 +331,12 @@ class Runtime:
             accepted_commit=base,
             latest_user_instruction=request,
         )
+        # persist before the planner runs: the run must be discoverable (`gcae list`) and
+        # resumable even if the model call is slow, stalls, or the process dies while it waits
+        self._persist()
         try:
-            initial_plan = self.planner.plan(self.state)
+            with self._progress("planner", getattr(self.planner, "provider", None)):
+                initial_plan = self.planner.plan(self.state)
         except ProviderOutputError as exc:
             if not self.state.success_criteria:
                 self.state.status = "failed: planner output"
@@ -625,9 +641,11 @@ class Runtime:
             payload=dict(self.last_context_info),
         )
         try:
-            decision = Controller(
-                DecisionProvider(self.provider_for("controller")), tools.names()
-            ).decide(context.text)
+            controller_provider = self.provider_for("controller")
+            with self._progress("controller", controller_provider):
+                decision = Controller(
+                    DecisionProvider(controller_provider), tools.names()
+                ).decide(context.text)
         except ProviderOutputError as exc:
             # not fatal yet: run() lets the recovery advisor read the trace first
             logger.error("provider failure: %s", exc)
@@ -676,7 +694,8 @@ class Runtime:
         )
         self._transition(RunPhase.EVALUATE)
         try:
-            evaluation = self.evaluator.evaluate(payload)
+            with self._progress("evaluator", getattr(self.evaluator, "provider", None)):
+                evaluation = self.evaluator.evaluate(payload)
         except ProviderOutputError as exc:
             logger.error("evaluator failure: %s", exc)
             self._remember("failure", f"evaluator failure: {exc}", immutable=True)
@@ -809,6 +828,20 @@ class Runtime:
             logger.warning("run %s is waiting for the user: %s", self.state.run_id, reason)
             return self.state
         return self._fail(f"execution stagnated after asking: {reason}")
+
+    # ------------------------------------------------------------------ liveness
+
+    def _progress(self, role: str, provider: object | None) -> AbstractContextManager[None]:
+        """Report a provider call as events, so a slow model never looks frozen.
+
+        Providers that can stream expose ``on_progress``; the listener turns their updates
+        into ``provider_started`` / ``provider_first_token`` / ``provider_progress`` /
+        ``provider_waiting`` events, rate limited here so a fast stream cannot flood the
+        log or the dashboard.
+        """
+        if provider is None or not hasattr(provider, "on_progress"):
+            return nullcontext()
+        return _ProgressReporter(self, role, provider)
 
     # ------------------------------------------------------------------ recovery
 
@@ -996,7 +1029,8 @@ class Runtime:
             return False
         self._transition(RunPhase.VERIFY)
         self._event("verification_started", RunPhase.VERIFY)
-        report = self.verifier.verify(self.state, diff=self.repo.diff())
+        with self._progress("verifier", getattr(self.verifier, "judge", None)):
+            report = self.verifier.verify(self.state, diff=self.repo.diff())
         # criterion commands may generate caches; never let them reach the checkpoint
         self.repo.clean_generated_artifacts()
         self.repo.clean_ignored_artifacts()
@@ -1444,3 +1478,103 @@ class Runtime:
         if self.state.phase != phase:
             self.machine.transition(self.state, phase)
             self._event(f"phase:{phase.value}", phase)
+
+
+class _ProgressReporter:
+    """Context manager attaching (and detaching) one provider progress listener."""
+
+    def __init__(self, runtime: Runtime, role: str, provider: object) -> None:
+        self.runtime = runtime
+        self.role = role
+        self.provider: Any = provider
+        self.last_emit = 0.0
+        self.last_characters = -1
+        self.last_heartbeat = 0.0
+        self.announced = False
+        self.model = ""
+        self.started = 0.0
+        self.progress = StreamProgress(characters=0)
+        self._stop = threading.Event()
+        self._beats: threading.Thread | None = None
+
+    def __enter__(self) -> None:
+        self.model = str(getattr(self.provider, "model", self.provider.__class__.__name__))
+        self.started = time.monotonic()
+        self._beats = threading.Thread(
+            target=self._beat, name=f"gcae-heartbeat-{self.role}", daemon=True
+        )
+        self._beats.start()
+        self.runtime._event(
+            "provider_started",
+            self.runtime.state.phase if self.runtime.state else None,
+            payload={"role": self.role, "model": self.model},
+        )
+        self.provider.on_progress = self._report
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.provider.on_progress = None
+        self._stop.set()
+        if self._beats is not None:
+            self._beats.join(timeout=1.0)
+        self.runtime._event(
+            "provider_finished",
+            self.runtime.state.phase if self.runtime.state else None,
+            payload={
+                "role": self.role,
+                "model": self.model,
+                "elapsed_ms": int((time.monotonic() - self.started) * 1000),
+                "characters": self.progress.characters,
+                "reasoning_characters": self.progress.reasoning_characters,
+            },
+        )
+
+    def _beat(self) -> None:
+        """Emit a heartbeat while the call is silent, whatever the provider can report."""
+        interval = max(0.05, PROVIDER_HEARTBEAT_SECONDS)
+        while not self._stop.wait(interval):
+            runtime = self.runtime
+            if runtime.state is None:
+                continue
+            runtime._event(
+                "provider_waiting",
+                runtime.state.phase,
+                payload={
+                    "role": self.role,
+                    "characters": self.progress.characters,
+                    "reasoning_characters": self.progress.reasoning_characters,
+                    "elapsed_ms": int((time.monotonic() - self.started) * 1000),
+                },
+            )
+
+    def _report(self, progress: StreamProgress) -> None:
+        runtime = self.runtime
+        if runtime.state is None:
+            return
+        self.progress = progress
+        now = time.monotonic()
+        payload = {
+            "role": self.role,
+            "characters": progress.characters,
+            "reasoning_characters": progress.reasoning_characters,
+            "elapsed_ms": progress.elapsed_ms,
+        }
+        if progress.waiting:
+            # a heartbeat: the stream is open but nothing arrived. Keeps the log and the
+            # dashboard moving during a long deliberation instead of showing a dead screen.
+            if now - self.last_heartbeat < 10.0:
+                return
+            self.last_heartbeat = now
+            runtime._event("provider_waiting", runtime.state.phase, payload=payload)
+            return
+        if not self.announced:
+            self.announced = True
+            runtime._event("provider_first_token", runtime.state.phase, payload=payload)
+        if now - self.last_emit < 0.4 and progress.characters - self.last_characters < 2048:
+            return
+        self.last_emit = now
+        self.last_characters = progress.characters
+        runtime._event(
+            "provider_progress",
+            runtime.state.phase,
+            payload={**payload, "preview": progress.preview},
+        )

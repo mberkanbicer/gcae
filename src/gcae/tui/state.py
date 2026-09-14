@@ -72,6 +72,10 @@ class UiState:
     verification: dict[str, Any] | None = None
     context: dict[str, Any] = field(default_factory=dict)
     memory: dict[str, int] = field(default_factory=dict)
+    # live streamed-model progress: characters, reasoning characters, elapsed, preview
+    stream: dict[str, Any] | None = None
+    # which role the current provider call belongs to (controller, planner, evaluator…)
+    provider_role: str = ""
     rollback: dict[str, Any] | None = None
     rollback_at: datetime | None = None
     rollbacks: int = 0
@@ -351,6 +355,35 @@ class UiState:
 
     def _on_model_escalated(self, event: Event, payload: dict[str, Any]) -> set[str]:
         return {"status"}
+
+    def _on_provider_started(self, event: Event, payload: dict[str, Any]) -> set[str]:
+        self.provider_role = str(payload.get("role") or "")
+        self.action = ActionView(
+            label=str(payload.get("role") or "model"),
+            lines=[str(payload.get("model") or "")],
+            state="waiting",
+            started_at=event.timestamp,
+        )
+        self.stream = None
+        return {"activity", "metrics"}
+
+    def _on_provider_first_token(self, event: Event, payload: dict[str, Any]) -> set[str]:
+        self.stream = dict(payload)
+        if self.action is not None:
+            self.action.state = "running"
+        return {"activity", "metrics"}
+
+    def _on_provider_progress(self, event: Event, payload: dict[str, Any]) -> set[str]:
+        self.stream = dict(payload)
+        if self.action is not None:
+            self.action.state = "running"
+        return {"activity", "metrics"}
+
+    def _on_provider_waiting(self, event: Event, payload: dict[str, Any]) -> set[str]:
+        self.stream = {**dict(payload), "waiting": True}
+        if self.action is not None:
+            self.action.state = "waiting"
+        return {"activity", "metrics"}
 
     def _on_recovery_started(self, event: Event, payload: dict[str, Any]) -> set[str]:
         self.action = ActionView(

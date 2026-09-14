@@ -7,12 +7,13 @@ options. `config.example.toml` is the copy-ready template.
 [runtime]
 state_dir = "~/.local/state/gcae"   # memory.db, runs/, worktrees/
 worktree_dir = "~/.local/state/gcae/worktrees"  # optional override
-| `resolve_merge_conflicts` | `true` | Hand a conflicting merge to the agent: resolve it in the run worktree, re-verify, retry the merge |
-| `merge_accepted_on_failure` | `true` | Merge the checkpoints a failed/stopped run accepted (labelled unverified) |
-| `cleanup_after_merge` | `true` | Remove GCAE's worktree once its branch is merged; the branch is kept so `gcae undo` still works |
-| `auto_merge` | `true` | Merge the verified run branch into the source branch on completion (`--no-merge` overrides) |
-| `auto_bootstrap` | `true` | Create the base commit a run needs when the repository has none or is dirty; `false` restores refusal |
-| `json_mode` | `true` | Send `response_format=json_object`; disable for reasoning models that deliberate until the output budget is gone |
+auto_bootstrap = true               # create the base commit a run needs (unborn or dirty repo)
+auto_merge = true                   # merge the verified branch on completion (--no-merge overrides)
+resolve_merge_conflicts = true      # hand a conflicting merge to the agent, re-verify, retry
+merge_accepted_on_failure = true    # merge the checkpoints a failed/stopped run accepted
+cleanup_after_merge = true          # remove GCAE's worktree once merged (the branch is kept)
+recovery_attempts = 2               # self-diagnoses per run before the run must ask the user
+recovery_budget = 5                 # extra iterations granted by each successful correction
 max_steps = 20                      # outer loop bound per run
 command_timeout = 30                # seconds per command tool call
 max_tool_calls_per_step = 8         # forces step evaluation
@@ -25,8 +26,11 @@ kind = "http"                       # fake | http | openrouter (alias of http)
 base_url = "https://openrouter.ai/api/v1"
 model = "openai/gpt-4o-mini"
 api_key_env = "OPENROUTER_API_KEY"  # or api_key = "..."
-timeout = 60
+timeout = 60                        # per-request budget
 context_limit = 8192                # token budget for reconstructed context
+json_mode = true                    # response_format=json_object; false for reasoning models
+stream = true                       # stream completions: visible progress + stall detection
+stall_timeout = 45.0                # seconds with no data before a call is declared stalled
 
 [provider.generation]
 temperature = 0.0
@@ -39,6 +43,8 @@ model = "qwen3:32b"
 [models.evaluator]
 model = "qwen3:32b"
 [models.escalation]
+model = "anthropic/claude-sonnet-4"
+[models.recovery]
 model = "anthropic/claude-sonnet-4"
 
 [planner]
@@ -71,7 +77,17 @@ commands = ["pytest -q"]            # run before every semantic evaluation
   criteria closed instead of guessing.
 - `models.<role>` overrides create a dedicated provider for that role without changing the base
   provider. `models.escalation` is used for controller decisions after two consecutive rejected
-  steps, and is only created when configured. `models.verifier` is used by hybrid verification.
+  steps; `models.recovery` answers the self-diagnosis that reads a failing run's trace (it defaults
+  to the controller's model, which is the escalated one after escalation); `models.verifier` is used
+  by hybrid verification. Each role is only created when configured.
+- `stream` and `stall_timeout` decide how a model call behaves while it runs: streamed completions
+  report progress (and reasoning characters) as events, and a call that produces nothing for
+  `stall_timeout` seconds fails with `provider request stalled: …` instead of holding the run. A
+  buffered request gets the same stall budget, and an endpoint that refuses streaming falls back to a
+  buffered request automatically — a timeout never does, because a silent endpoint would be silent
+  again.
+- `recovery_attempts` and `recovery_budget` bound self-recovery: each diagnosis may queue a corrective
+  step and buy extra iterations, and the run asks the user only when those attempts are spent.
 - `context_limit` is a token budget; the runtime estimates tokens conservatively
   (`(characters + 3) // 4`). Pinned information may exceed the budget rather than be dropped.
 - `validation.commands` are executed with the isolated worktree as cwd and count as validation

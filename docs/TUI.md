@@ -47,6 +47,11 @@ Differences from a plain log viewer:
 - **Curated events.** Routine tool successes are not timeline entries; the full stream is one
   keystroke away (`l`). Tool failures, rollbacks, replans, checkpoints, validation results, user
   instructions and terminal states always appear.
+- **A slow model is never a frozen screen.** Every model call is bracketed by `provider_started` /
+  `provider_finished` events (the ACTIVE panel shows elapsed time and, for the streamed call, the
+  role), a silent call emits a `provider_waiting` heartbeat every 10s, and a streaming one reports
+  content and reasoning character counts with a preview tail as tokens arrive. The timeline shows
+  `streaming controller · 36k chars reasoning · 2.0k chars · 24s` instead of nothing at all.
 - **A stalled run asks, it does not die.** When an approach is exhausted the status bar shows
   `WAITING`, the request/question appears in the metrics strip, and `i` (or `r`) applies your
   instruction and continues the same run with its accepted checkpoints intact.

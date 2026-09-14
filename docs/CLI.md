@@ -104,6 +104,10 @@ gcae undo  ~/src/project 3cdf087083c2
 A run that cannot make progress ends in `waiting_for_user` and the summary prints the question
 plus the exact command to answer it (`gcae resume <repo> <run-id>`).
 
+A headless run is observable while it works: the same events are appended to
+`runs/<run-id>/events.jsonl`, so `tail -f` shows `provider_waiting` heartbeats and
+`provider_progress` counts while a slow model deliberates.
+
 Exit codes: `0` only when a run finished (`status == "complete"`); `1` for a handled error
 (bad config, refused repository, refused merge) and for a run that ended `failed`, `stopped`
 or `waiting_for_user`, so scripted callers can rely on the exit status; `2` argparse usage

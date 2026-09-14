@@ -149,8 +149,10 @@ class EventLog:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        # the run thread and the provider heartbeat thread both append: keep lines intact
+        self._lock = threading.Lock()
 
     def append(self, event: object) -> None:
         data = event.model_dump(mode="json") if hasattr(event, "model_dump") else event
-        with self.path.open("a", encoding="utf-8") as handle:
+        with self._lock, self.path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(data, sort_keys=True) + "\n")

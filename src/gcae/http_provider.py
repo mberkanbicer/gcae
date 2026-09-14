@@ -1,15 +1,30 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import time
 from typing import Any, TypeVar
 
 import httpx
 from pydantic import BaseModel, ValidationError
 
-from .providers import ProviderOutputError
+from .providers import ProgressListener, ProviderOutputError, StreamProgress
+
+logger = logging.getLogger("gcae")
+
+# how often a streaming call reports itself while no bytes arrive (hang visibility)
+HEARTBEAT_SECONDS = 5.0
+# how often incremental progress is reported at most (the runtime throttles events again)
+PROGRESS_SECONDS = 0.4
+# characters of new content that force a report regardless of the timer
+PROGRESS_CHARACTERS = 512
 
 T = TypeVar("T", bound=BaseModel)
+
+
+class _StreamUnavailable(RuntimeError):
+    """The endpoint refused or dropped a streaming request; retry it without streaming."""
 
 
 class OpenAICompatibleProvider:
@@ -27,6 +42,8 @@ class OpenAICompatibleProvider:
         client: httpx.Client | None = None,
         repair_limit: int = 2,
         json_mode: bool = True,
+        stream: bool = True,
+        stall_timeout: float = 45.0,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
@@ -38,20 +55,31 @@ class OpenAICompatibleProvider:
         self._owns_client = client is None
         self.repair_limit = repair_limit
         self.json_mode = json_mode
+        # streaming makes a slow model visible token by token, and turns a hang into a
+        # detectable event (no bytes for stall_timeout seconds) instead of an indefinite wait
+        self.stream = stream
+        self.stall_timeout = stall_timeout
+        self.on_progress: ProgressListener | None = None
+        self._progress_state = (0.0, -1)  # last report time, last reported character count
 
     def complete(self, prompt: str, schema: type[T]) -> T:
         messages = [{"role": "user", "content": prompt}]
         json_mode = self.json_mode
         budget = self._initial_budget()
+        use_stream = self.stream
         for attempt in range(self.repair_limit + 1):
             try:
-                response = self.client.post(
-                    f"{self.base_url}/chat/completions",
-                    headers=self._headers(),
-                    json=self._payload(messages, json_mode=json_mode, max_tokens=budget),
+                body = self._send(
+                    messages, json_mode=json_mode, max_tokens=budget, stream=use_stream
                 )
-                response.raise_for_status()
-                body = response.json()
+            except _StreamUnavailable as exc:
+                # the endpoint refused streaming (or dropped it): repeat this attempt
+                # without it rather than failing a call that would otherwise work
+                if not use_stream:  # pragma: no cover - defensive
+                    raise ProviderOutputError(f"provider request failed: {exc}") from exc
+                logger.info("streaming unavailable (%s); retrying without it", exc)
+                use_stream = False
+                continue
             except (httpx.HTTPError, ValueError) as exc:
                 raise ProviderOutputError(f"provider request failed: {exc}") from exc
             if isinstance(body, dict) and body.get("error") and not body.get("choices"):
@@ -109,6 +137,202 @@ class OpenAICompatibleProvider:
                     ]
                 continue
         raise ProviderOutputError("provider repair loop exhausted")
+
+    # ---------------------------------------------------------------- transport
+
+    def _send(
+        self,
+        messages: list[dict[str, str]],
+        json_mode: bool,
+        max_tokens: int | None,
+        stream: bool,
+    ) -> Any:
+        """One request. Returns the same body shape for streamed and buffered replies."""
+        payload = self._payload(messages, json_mode=json_mode, max_tokens=max_tokens)
+        url = f"{self.base_url}/chat/completions"
+        if stream:
+            return self._streamed(url, payload)
+        # read=stall_timeout: a silent endpoint fails in seconds with a truthful reason
+        # instead of holding the run for the whole request budget
+        timeout = httpx.Timeout(
+            self.timeout, connect=min(15.0, self.timeout), read=max(1.0, self.stall_timeout)
+        )
+        try:
+            response = self.client.post(
+                url, headers=self._headers(), json=payload, timeout=timeout
+            )
+            response.raise_for_status()
+            return response.json()
+        except httpx.TimeoutException as exc:
+            raise ProviderOutputError(
+                f"provider request stalled: no data for {self.stall_timeout:.0f}s "
+                f"(model={self.model}) — the endpoint accepted the request and produced nothing"
+            ) from exc
+
+    def _streamed(self, url: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Stream a completion, reporting progress, and rebuild a buffered-style body.
+
+        Nothing arrives for ``stall_timeout`` seconds: the call is aborted with an explicit
+        error instead of leaving the run waiting forever (the runtime then hands it to the
+        recovery ladder). Progress is reported to ``on_progress`` when a listener is set.
+        """
+        request = {**payload, "stream": True}
+        text: list[str] = []
+        reasoning: list[str] = []
+        finish: str | None = None
+        usage: dict[str, Any] = {}
+        started = time.monotonic()
+        last_data = started
+        read_timeout = max(1.0, self.stall_timeout)
+        timeout = httpx.Timeout(
+            max(self.timeout, read_timeout),
+            connect=min(15.0, max(self.timeout, read_timeout)),
+            read=read_timeout,
+        )
+        try:
+            with self.client.stream(
+                "POST", url, headers=self._headers(), json=request, timeout=timeout
+            ) as response:
+                response.raise_for_status()
+                content_type = response.headers.get("content-type", "")
+                if "text/event-stream" not in content_type:
+                    # the endpoint ignored stream=true and answered with a buffered body; take
+                    # it as it is instead of reporting an empty stream
+                    logger.info("endpoint answered %r to a streaming request", content_type)
+                    body = response.json()
+                    if not isinstance(body, dict):
+                        raise ProviderOutputError("provider response was not an object")
+                    return body
+                self._report(text, reasoning, started, waiting=True)
+                lines = response.iter_lines()
+                while True:
+                    try:
+                        line = next(lines)
+                    except StopIteration:
+                        break
+                    except httpx.TimeoutException as exc:
+                        # no bytes for the whole stall budget: report it instead of waiting
+                        # forever. The run hands this to the recovery ladder, which can ask
+                        # the user or retry with another model.
+                        idle = time.monotonic() - last_data
+                        raise ProviderOutputError(
+                            f"provider stream stalled: no data for {idle:.0f}s "
+                            f"({len(''.join(text))} characters received, model={self.model})"
+                            " — the endpoint stopped producing output"
+                        ) from exc
+                    last_data = time.monotonic()
+                    if not line:
+                        continue
+                    if line.startswith("data:"):
+                        data = line[5:].strip()
+                        if data == "[DONE]":
+                            break
+                        self._consume_chunk(data, text, reasoning, usage)
+                        finish = self._chunk_finish(data) or finish
+                        self._report(text, reasoning, started)
+        except httpx.TimeoutException as exc:
+            # the endpoint accepted the connection and stayed silent: report the stall now
+            # instead of repeating it as a buffered request
+            raise ProviderOutputError(
+                f"provider request stalled: no data for {self.stall_timeout:.0f}s "
+                f"(model={self.model}) — the endpoint accepted the request and produced nothing"
+            ) from exc
+        except httpx.HTTPStatusError as exc:
+            raise _StreamUnavailable(f"HTTP {exc.response.status_code}") from exc
+        except httpx.HTTPError as exc:
+            raise _StreamUnavailable(str(exc)) from exc
+        self._report(text, reasoning, started, force=True)
+        content = "".join(text)
+        return {
+            "choices": [
+                {
+                    "finish_reason": finish,
+                    "message": {
+                        "content": content,
+                        "reasoning": "".join(reasoning),
+                    },
+                }
+            ],
+            "usage": usage,
+        }
+
+    @staticmethod
+    def _consume_chunk(
+        data: str,
+        text: list[str],
+        reasoning: list[str],
+        usage: dict[str, Any],
+    ) -> None:
+        try:
+            chunk = json.loads(data)
+        except json.JSONDecodeError:
+            return  # a single malformed SSE frame must not kill a stream that may recover
+        if not isinstance(chunk, dict):
+            return
+        if chunk.get("error"):
+            raise ProviderOutputError(f"provider error: {json.dumps(chunk['error'])[:200]}")
+        if isinstance(chunk.get("usage"), dict):
+            usage.update(chunk["usage"])
+        choices = chunk.get("choices") or []
+        if not choices:
+            return
+        delta = choices[0].get("delta") or choices[0].get("message") or {}
+        piece = delta.get("content")
+        if isinstance(piece, str) and piece:
+            text.append(piece)
+        elif isinstance(piece, list):
+            text.append(
+                "".join(
+                    part["text"]
+                    for part in piece
+                    if isinstance(part, dict) and isinstance(part.get("text"), str)
+                )
+            )
+        thought = delta.get("reasoning") or delta.get("reasoning_content")
+        if isinstance(thought, str) and thought:
+            reasoning.append(thought)
+
+    @staticmethod
+    def _chunk_finish(data: str) -> str | None:
+        try:
+            choices = json.loads(data).get("choices") or []
+        except (json.JSONDecodeError, AttributeError):
+            return None
+        if not choices:
+            return None
+        finish = choices[0].get("finish_reason")
+        return finish if isinstance(finish, str) else None
+
+    def _report(
+        self,
+        text: list[str],
+        reasoning: list[str],
+        started: float,
+        waiting: bool = False,
+        force: bool = False,
+    ) -> None:
+        """Call the progress listener, bounded in rate and never able to break the call."""
+        listener = self.on_progress
+        if listener is None:
+            return
+        now = time.monotonic()
+        characters = len("".join(text))
+        last_report, last_characters = self._progress_state
+        if not force and not waiting and now - last_report < PROGRESS_SECONDS:
+            if characters - last_characters < PROGRESS_CHARACTERS:
+                return
+        self._progress_state = (now, characters)
+        update = StreamProgress(
+            characters=characters,
+            reasoning_characters=sum(len(part) for part in reasoning),
+            elapsed_ms=int((now - started) * 1000),
+            waiting=waiting,
+            preview=" ".join("".join(text).split())[-160:],
+        )
+        try:
+            listener(update)
+        except Exception:  # noqa: BLE001 - a listener must never break the model call
+            logger.exception("provider progress listener failed")
 
     def _payload(
         self,

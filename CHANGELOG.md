@@ -4,6 +4,32 @@ All notable changes to GCAE are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2] — 2026-09-14
+
+### Added
+
+- **Live model visibility.** Completions now stream (`[provider] stream`, default on) and every model
+  call is bracketed by events: `provider_started`, `provider_first_token`, rate-limited
+  `provider_progress` (content and reasoning character counts plus a preview tail), 10-second
+  `provider_waiting` heartbeats and `provider_finished` with the wall-clock time. The dashboard's
+  ACTIVE panel shows the live counts and preview, the timeline moves during a long deliberation, and a
+  headless run logs the same events. Endpoints that refuse streaming, or answer with a buffered body,
+  are handled automatically.
+
+- **Hang detection.** `[provider] stall_timeout` (default 45s) bounds each read; a silent endpoint now
+  fails with `provider request stalled: no data for Ns …` and enters the recovery ladder instead of
+  holding the run. Verified against a real black-hole socket: 3s to detection with `stall_timeout = 3`
+  (previously 63s, and indefinitely before this change).
+
+- **Runs are discoverable while the planner thinks.** `state.json` is written before the first
+  model call, so a run that is still planning appears in `gcae list`, can be resumed, and is not
+  orphaned if the process is interrupted during planning.
+
+- **Readable long steps.** The plan panel wraps the active step across up to three rows (neighbours
+  yield to it), the objective and current-goal rows gained the same room, and the ACTIVE panel has an
+  extra row for the live stream line — so a long step goal is legible instead of being elided to one
+  line.
+
 ## [0.1.1] — 2026-09-14
 
 ### Added

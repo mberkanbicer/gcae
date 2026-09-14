@@ -128,6 +128,8 @@ def _provider(provider_config: ProviderConfig) -> Provider:
             context_limit=provider_config.context_limit,
             generation=provider_config.generation.model_dump(),
             json_mode=provider_config.json_mode,
+            stream=provider_config.stream,
+            stall_timeout=provider_config.stall_timeout,
         )
     if kind == "fake":
         return FakeProvider(

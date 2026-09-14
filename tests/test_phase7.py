@@ -6,7 +6,7 @@ import pytest
 from gcae.controller import Controller
 from gcae.http_provider import OpenAICompatibleProvider
 from gcae.models import Decision
-from gcae.providers import DecisionProvider, ProviderOutputError
+from gcae.providers import DecisionProvider, ProviderOutputError, StreamProgress
 
 
 def test_openai_compatible_provider() -> None:
@@ -89,6 +89,188 @@ def test_openai_compatible_provider_reports_connection_errors() -> None:
     provider = OpenAICompatibleProvider("http://localhost:11434/v1", "model", client=client)
     with pytest.raises(ProviderOutputError, match="connection refused"):
         provider.complete("prompt", Decision)
+
+
+class _Sse(httpx.SyncByteStream):
+    """Minimal SSE byte stream, optionally stalling after the first frame."""
+
+    def __init__(
+        self, frames: list[str], stall_after: int | None = None, done: bool = True
+    ) -> None:
+        self.frames = frames
+        frames = [*frames, "[DONE]"] if done else list(frames)
+        self.payload = "".join(f"data: {frame}\n\n" for frame in frames).encode()
+        self.offset = 0
+        self.stall_after = stall_after
+        self.delivered = 0
+
+    def __iter__(self):  # type: ignore[no-untyped-def]
+        return self
+
+    def __next__(self) -> bytes:
+        if self.stall_after is not None and self.delivered >= self.stall_after:
+            raise httpx.ReadTimeout("no data")
+        if self.offset >= len(self.payload):
+            raise StopIteration
+        self.delivered += 1
+        chunk = self.payload[self.offset : self.offset + 256]
+        self.offset += 256
+        return chunk
+
+    def close(self) -> None:
+        return None
+
+
+def _sse_response(
+    frames: list[str], stall_after: int | None = None, done: bool = True
+) -> httpx.Response:
+    return httpx.Response(
+        200,
+        headers={"content-type": "text/event-stream"},
+        stream=_Sse(frames, stall_after, done),
+    )
+
+
+def _delta(text: str, reasoning: str = "") -> str:
+    payload: dict[str, object] = {"choices": [{"delta": {"content": text}}]}
+    if reasoning:
+        payload["choices"] = [{"delta": {"reasoning": reasoning}}]  # type: ignore[list-item]
+    return json.dumps(payload)
+
+
+def test_streaming_provider_assembles_content_and_reports_progress() -> None:
+    head = '{"action":"finish_candidate",'
+    tail = '"semantic_goal":"done","reason_summary":"streamed"}'
+    frames = [
+        json.dumps({"choices": [{"delta": {"reasoning": "thinking hard "}}]}),
+        _delta(head),
+        _delta(tail),
+        json.dumps({"choices": [{"delta": {}, "finish_reason": "stop"}]}),
+    ]
+    seen: list[object] = []
+
+    def listener(update: object) -> None:
+        seen.append(update)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content)["stream"] is True
+        return _sse_response(frames)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    provider = OpenAICompatibleProvider("http://local/v1", "model", client=client)
+    provider.on_progress = listener
+    decision = provider.complete("prompt", Decision)
+
+    assert decision.action.value == "finish_candidate"
+    assert decision.reason_summary == "streamed"
+    updates = [item for item in seen if isinstance(item, StreamProgress)]
+    assert len(updates) >= 2, "a stream must report progress while it arrives"
+    assert updates[0].waiting is True, "the open connection is reported before the first token"
+    # the final (forced) report carries the finished size, so the dashboard can show it
+    assert updates[-1].characters == len(head) + len(tail)
+    assert updates[-1].reasoning_characters > 0
+    assert provider.on_progress is listener  # the runtime clears it, not the provider
+
+
+def test_streaming_falls_back_when_the_endpoint_refuses_streaming() -> None:
+    calls: list[bool] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        streamed = json.loads(request.content).get("stream") is True
+        calls.append(streamed)
+        if streamed:
+            return httpx.Response(400, json={"error": {"message": "stream unsupported"}})
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                '{"action":"finish_candidate","semantic_goal":"done",'
+                                '"reason_summary":"buffered"}'
+                            )
+                        }
+                    }
+                ]
+            },
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    provider = OpenAICompatibleProvider("http://local/v1", "model", client=client)
+    decision = provider.complete("prompt", Decision)
+
+    assert decision.reason_summary == "buffered"
+    assert calls == [True, False], "one streaming attempt, then a buffered one"
+
+
+def test_streaming_handles_an_endpoint_that_ignores_stream_true() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                '{"action":"finish_candidate","semantic_goal":"done",'
+                                '"reason_summary":"ignored the flag"}'
+                            )
+                        }
+                    }
+                ]
+            },
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    provider = OpenAICompatibleProvider("http://local/v1", "model", client=client)
+    decision = provider.complete("prompt", Decision)
+    assert decision.reason_summary == "ignored the flag"
+
+
+def test_a_stalled_stream_is_detected_and_heartbeats_are_reported() -> None:
+    seen: list[object] = []
+
+    def listener(update: object) -> None:
+        seen.append(update)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # the first frame arrives whole, then the endpoint goes silent forever
+        return _sse_response([_delta("partial")], stall_after=1, done=False)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    provider = OpenAICompatibleProvider(
+        "http://local/v1", "model", client=client, stall_timeout=0.05
+    )
+    provider.on_progress = listener
+    with pytest.raises(ProviderOutputError) as caught:
+        provider.complete("prompt", Decision)
+
+    message = str(caught.value)
+    assert "stalled" in message
+    # what already arrived is reported, not swallowed: the message names it, and the caller
+    # can decide to retry or hand the run to the recovery ladder
+    assert "7 characters received" in message
+    updates = [item for item in seen if isinstance(item, StreamProgress)]
+    assert any(item.waiting for item in updates), "a hang must be visible while it happens"
+
+
+def test_malformed_stream_frames_do_not_kill_a_recovering_stream() -> None:
+    frames = [
+        "not json at all",
+        _delta('{"action":"finish_candidate","semantic_goal":"done",'),
+        "{}",
+        _delta('"reason_summary":"ok"}'),
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _sse_response(frames)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    provider = OpenAICompatibleProvider("http://local/v1", "model", client=client)
+    decision = provider.complete("prompt", Decision)
+    assert decision.reason_summary == "ok"
 
 
 class RecordingProvider:

@@ -24,7 +24,7 @@ model.
 | `git.py` | worktree, checkpoint, rollback, merge, undo |
 | `safeguards.py` | repetition guard, stagnation window, hygiene check |
 | `recovery.py` | self-recovery: trace assembly from the run's own record, advisor prompt, `Diagnosis` |
-| `providers.py`, `http_provider.py` | structured-output providers |
+| `providers.py`, `http_provider.py` | structured-output providers, streaming progress, stall detection |
 | `cli.py` | run/resume/list/inspect/merge/undo, headless and TUI modes |
 | `tui/` | Textual dashboard: presentation reducer, widgets, viewers, dialogs (see `docs/TUI.md`) |
 
@@ -77,6 +77,21 @@ Replanning discards speculative changes, keeps accepted commits and knowledge, a
 completed steps. Identical tool calls are blocked after `repetition_limit`; repeated
 non-progressing iterations trip `stagnation_window`; two consecutive rejected steps escalate
 controller decisions to `models.escalation` when configured.
+
+## Liveness
+
+The loop is synchronous, so a model call could otherwise look like a dead process. Two mechanisms
+keep it observable:
+
+1. **Progress events** — every provider call runs inside `Runtime._progress(role, provider)`, which
+   emits `provider_started`, forwards streamed updates as rate-limited `provider_progress` events and
+   closes with `provider_finished` (elapsed + characters).
+2. **Heartbeats** — a daemon thread emits `provider_waiting` every `PROVIDER_HEARTBEAT_SECONDS` while
+   the call is silent, for any provider, streaming or not.
+
+A provider that stops producing data is a *detected failure*: `[provider] stall_timeout` bounds each
+read, the error names the silence and the characters already received, and it enters the recovery
+ladder like any other fatal condition. Nothing in the loop waits unboundedly.
 
 ## Self-recovery
 

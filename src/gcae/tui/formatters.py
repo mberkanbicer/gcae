@@ -131,6 +131,15 @@ def human_tokens(count: int) -> str:
     return f"{count / 1000:.1f}k"
 
 
+def thousands(value: int) -> str:
+    """Compact counter: 940, 1.2k, 36k — enough precision, no jitter."""
+    if value < 1000:
+        return str(value)
+    if value < 10_000:
+        return f"{value / 1000:.1f}k"
+    return f"{value // 1000}k"
+
+
 def elide(text: str, width: int) -> str:
     if width <= 1:
         return text[:1]
@@ -324,6 +333,22 @@ def timeline_entry(
         missing = payload.get("missing_requirements") or []
         detail = elide(", ".join(str(item) for item in missing[:2]), 70) or "hygiene failed"
         return ("×", f"verification failed · {detail}", "error")
+    if event_type == "provider_started":
+        return ("◌", f"{payload.get('role')} request · {payload.get('model')}", "muted")
+    if event_type == "provider_first_token":
+        seconds = (payload.get("elapsed_ms") or 0) / 1000
+        return ("▸", f"first tokens · {seconds:.1f}s", "accent")
+    if event_type == "provider_progress":
+        characters = int(payload.get("characters") or 0)
+        reasoning = int(payload.get("reasoning_characters") or 0)
+        seconds = (payload.get("elapsed_ms") or 0) / 1000
+        detail = f"{thousands(characters)} chars"
+        if reasoning:
+            detail = f"{thousands(reasoning)} chars reasoning · {detail}"
+        return ("▸", f"streaming {payload.get('role')} · {detail} · {seconds:.0f}s", "muted")
+    if event_type == "provider_waiting":
+        seconds = (payload.get("elapsed_ms") or 0) / 1000
+        return ("…", f"waiting for {payload.get('role')} · {seconds:.0f}s, no output yet", "muted")
     if event_type == "recovery_started":
         trigger = elide(str(payload.get("trigger", "")), 60)
         return ("⟲", f"self-diagnosis #{payload.get('attempt')} · {trigger}", "warning")

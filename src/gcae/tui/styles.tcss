@@ -74,7 +74,7 @@ Screen {
 #objective {
     height: auto;
     min-height: 4;
-    max-height: 5;
+    max-height: 7;
     padding: 0 1;
 }
 
@@ -88,7 +88,7 @@ Screen {
 #activity {
     height: auto;
     min-height: 4;
-    max-height: 6;
+    max-height: 8;
     padding: 0 1;
 }
 
@@ -111,7 +111,7 @@ Screen {
 #main.stacked #checkpoint {
     height: auto;
     min-height: 4;
-    max-height: 8;
+    max-height: 10;
 }
 
 #main.stacked #plan,

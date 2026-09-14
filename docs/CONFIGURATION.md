@@ -17,6 +17,10 @@ auto_merge = true                   # merge the verified branch on completion (-
 resolve_merge_conflicts = true      # hand a conflicting merge to the agent, re-verify, retry
 merge_accepted_on_failure = true    # merge the checkpoints a failed/stopped run accepted
 cleanup_after_merge = true          # remove GCAE's worktree once merged (the branch is kept)
+command_idle_timeout = 20.0            # no output while running -> stalled command
+command_startup_timeout = 10.0         # no output at all -> command never really started
+strategy_retry_limit = 2               # identical failures before a blind repeat is refused
+require_execution_evidence = true      # code changed + runnable check declared => a command must run
 recovery_attempts = 2               # self-diagnoses per run before the run must ask the user
 recovery_budget = 5                 # extra iterations granted by each successful correction
 max_steps = 20                      # outer loop bound per run
@@ -97,6 +101,10 @@ commands = ["pytest -q"]            # run before every semantic evaluation
   timeouts and dropped connections are retried with exponential backoff plus jitter, honouring a
   `Retry-After` header. Client errors (400/404/422) are not retried — they are the caller's
   problem, and the run's recovery ladder handles them.
+- `command_idle_timeout`, `command_startup_timeout` and `strategy_retry_limit` shape how execution
+  failures are detected and how quickly a blind repeat is refused; `require_execution_evidence`
+  decides whether an acceptance without a single executed command is allowed when the run declares a
+  runnable check.
 - `recovery_attempts` and `recovery_budget` bound self-recovery: each diagnosis may queue a corrective
   step and buy extra iterations, and the run asks the user only when those attempts are spent.
 - `context_limit` is a token budget; the runtime estimates tokens conservatively

@@ -662,6 +662,17 @@ def _conflicting_repo(tmp_path: Path) -> tuple[Path, str, str]:
                     },
                 },
                 {
+                    # the run declares a command criterion, so the runtime requires the
+                    # command to actually run before the step can be accepted
+                    "action": "execute_tool",
+                    "semantic_goal": "change",
+                    "reason_summary": "check the file exists",
+                    "tool": {
+                        "name": "run_command",
+                        "arguments": {"command": "test -f app.py", "mode": "batch"},
+                    },
+                },
+                {
                     "action": "complete_semantic_step",
                     "semantic_goal": "change",
                     "reason_summary": "done",

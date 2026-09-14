@@ -18,6 +18,21 @@ available to the model.
 Every result carries `success`, `output`, `error`, `exit_code`, `duration_ms`, `changed_files` and,
 when the output was externalized, `artifact`.
 
+## Execution modes
+
+`run_command` chooses how the process runs, because the same command needs different treatment
+depending on the program:
+
+| Mode | When | What it does |
+| --- | --- | --- |
+| `batch` (default) | ordinary commands (`pytest -q`) | stdin is closed, so a program that reads stdin gets end-of-file instead of hanging; startup, idle and wall timeouts are enforced |
+| `scripted_input` | a program asking questions whose answers can be invented (`{"stdin": ["3", "9", "7"]}`) | answers are written up front; running out of answers is reported as evidence (`interactive input required`), never as a request to the user |
+| `interactive_pty` | a program that checks `isatty()`, uses `getpass`, or needs a terminal; `{"interactive": true}` when it may ask for something only the user has | a real pseudoterminal for stdin/stdout/stderr; the process can stay alive while the user answers |
+
+`run_command` also accepts `purpose` (a human sentence for the UI) and `timeout`. Commands run with
+`PYTHONUNBUFFERED=1` in their own process group, and a timeout terminates the whole group
+(SIGTERM, then SIGKILL), so no orphan is left behind.
+
 ## Boundaries
 
 All filesystem operations resolve inside the active worktree; path traversal, symlink escapes and

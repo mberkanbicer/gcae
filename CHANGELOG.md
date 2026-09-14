@@ -4,6 +4,51 @@ All notable changes to GCAE are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-09-14
+
+### Added
+
+- **Interactive programs are a first-class execution case.** `run_command` now runs commands in one
+  of three modes: `batch` (stdin closed, so a program that reads stdin gets end-of-file instead of
+  hanging), `scripted_input` (answers supplied up front, e.g. guesses for a game), and
+  `interactive_pty` (a real pseudoterminal for programs that check `isatty()`, use `getpass`, or need
+  a terminal). Children run unbuffered, in their own process group, and a prompt is *seen* while the
+  program waits — the old behaviour (a bare `subprocess.run` with one timeout) reported
+  "command timed out" for a program that was simply asking a question.
+- **Typed failure evidence.** Every command result is classified (`interactive_input_required`,
+  `command_timeout`, `code_error`, `test_failure`, `dependency_missing`, `file_not_found`,
+  `permission_error`, `invalid_argument`, …) with a lesson and the evidence, stored as immutable
+  memory and injected into the next controller prompt together with a directive naming the change to
+  make. Partial output, mode, exit code, timeout kind and termination reason are captured instead of
+  a bare "timeout".
+- **Timeouts are separated**: startup (no output at all), idle (no progress while running), wall
+  clock, and "waiting for input" — which is not a failure at all. Timed-out commands are terminated
+  by process group (SIGTERM, then SIGKILL) and their partial output is kept.
+- **Strategy ledger.** An approach (tool + arguments) that fails the same way twice on an unchanged
+  candidate is refused *without executing*, with the lesson, so the next attempt must change the
+  method. A retry after a real change (different arguments or a different candidate tree) is allowed.
+- **Evidence gate.** When a step changed code and the run declares a runnable check (configured
+  validation commands, a `command succeeds:` criterion, or a step requirement naming a command), the
+  acceptance is refused until a command has actually run. The candidate is kept and the step returns
+  to EXECUTE with the requirement recorded. `[runtime] require_execution_evidence = false` disables
+  it, and file-artifact tasks are never blocked (the advice is recorded instead).
+- **`waiting_for_user` for live processes.** A process waiting for a value only the user has pauses
+  the run with `pending_input` persisted (command, prompt, mode, sensitivity), the process stays
+  alive, and the TUI offers `i` to send the answer. `gcae input <repo> <run-id> <value>` does the
+  same from the CLI. Sensitive prompts are never written to the event log and the terminal echo is
+  redacted from the captured output.
+- **`blocked` state** for a run with no safe autonomous path left: the reason, the last trusted
+  checkpoint and what would unblock it are recorded; the CLI prints them and the TUI shows a banner.
+- TUI: execution mode, queued answers and `INPUT REQUIRED` in ACTIVE; timeline entries for
+  `failure_classified`, `interactive_detected`, `strategy_ineffective`,
+  `execution_evidence_required`, `interactive_input_required`, `user_input_supplied` and `run_blocked`.
+
+### Changed
+
+- `tests/test_phase8.py`'s conflict fixtures now actually run the `command succeeds:` criterion they
+  declare — the evidence gate made the previous "write a file and call it verified" trajectory
+  impossible, which is the point of the gate.
+
 ## [0.2.1] — 2026-09-14
 
 ### Fixed

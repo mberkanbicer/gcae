@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import re
 import sqlite3
@@ -10,12 +11,14 @@ import uuid
 from collections import deque
 from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
+from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any
 
 from .context import ContextBuilder, estimate_tokens
 from .controller import Controller
 from .evaluator import DeterministicEvaluator, Evaluator
+from .execution import FailureKind, classify_failure, strategy_signature
 from .git import GitError, GitRepository, NothingToMerge
 from .memory import EventLog, MemoryStore
 from .models import (
@@ -25,14 +28,17 @@ from .models import (
     Evaluation,
     EvaluationInput,
     Event,
+    FailureSignal,
     MemoryCandidate,
     MemoryRecord,
     MergeRecord,
     Observation,
+    PendingInput,
     PlanStep,
     RecoveryRecord,
     RunPhase,
     SemanticStep,
+    ToolCall,
     ToolResult,
     ValidationResult,
     WorkingMemory,
@@ -156,6 +162,21 @@ def merge_verified_run(
     state.merge = record
     persist()
     return record
+
+
+#: fallback used when a Runtime is built without an explicit strategy retry limit
+strategy_retry_limit = 2
+
+
+@dataclass
+class StrategyRecord:
+    """What one approach has already produced, so a blind repeat can be recognised."""
+
+    attempts: int = 0
+    streak: int = 0
+    error: str = ""
+    lesson: str = ""
+    tree: str = ""
 
 
 class UnresumableStateError(RuntimeError):
@@ -303,6 +324,10 @@ class Runtime:
         resolve_merge_conflicts: bool = True,
         recovery_attempts: int = 2,
         recovery_budget: int = 5,
+        command_idle_timeout: float = 20.0,
+        command_startup_timeout: float = 10.0,
+        strategy_retry_limit: int = 2,
+        require_execution_evidence: bool = True,
     ) -> None:
         self.source_repo = Path(source_repo).resolve()
         self.runtime_dir = Path(runtime_dir).expanduser().resolve()
@@ -343,6 +368,17 @@ class Runtime:
         self.repeated_failure_limit = 3
         self._degrade_notified: dict[str, bool] = {}
         self._failed_over: set[str] = set()
+        #: what each approach has already achieved, keyed by its fingerprint
+        self.command_idle_timeout = command_idle_timeout
+        self.command_startup_timeout = command_startup_timeout
+        self.require_execution_evidence = require_execution_evidence
+        self._strategies: dict[str, StrategyRecord] = {}
+        self._strategy_limit = strategy_retry_limit
+        #: the command currently executing (used when it turns out to want input)
+        self._pending_command = ""
+        self._pending_sensitive = False
+        #: the registry that owns a process left alive waiting for the user
+        self._live_tools: ToolRegistry | None = None
         self._run_lock: RunLock | None = None
         self.validator_commands = list(validator_commands or [])
         self.max_steps = max_steps
@@ -542,10 +578,106 @@ class Runtime:
             self.state.phase = RunPhase.PLAN
             self.state.pending_question = None
             self.state.step_tool_calls = 0
+            self.state.step_commands = 0
             self._persist()
         self._publish_repository_notices()
         self._event("run_resumed", self.state.phase, payload={"run_id": run_id})
         return self.state
+
+    def submit_process_input(self, text: str) -> AgentState:
+        """Answer a live process that is waiting for input only the user can provide.
+
+        The value is never written to the event log: the prompt and the command are recorded,
+        the answer is not (it may be a token).  When the process survived, the answer goes
+        straight to its stdin and the run continues with the real result; when it did not
+        survive a restart, the answer is kept as an instruction so the next attempt can pass
+        it as scripted input.
+        """
+        assert self.state is not None
+        pending = self.state.pending_input
+        if pending is None:
+            raise RuntimeError("no process is waiting for input")
+        recorded = (
+            f"process input for {pending.command!r} ({pending.prompt!r}): <redacted>"
+            if pending.sensitive
+            else f"process input for {pending.command!r} ({pending.prompt!r}): {text!r}"
+        )
+        self._remember("user_instruction", recorded, immutable=True)
+        self.state.latest_user_instruction = recorded
+        self.state.latest_observations.append(f"user supplied input for: {pending.command}")
+        self.state.latest_observations = self.state.latest_observations[-20:]
+        handle = self._live_tools.pending_process if self._live_tools is not None else None
+        if handle is not None and handle.poll() is None:
+            assert self._live_tools is not None
+            result = self._live_tools.answer_pending(text)
+            self.state.pending_input = None
+            self.state.pending_question = None
+            if result is not None:
+                if pending.sensitive:
+                    # a PTY echoes what was typed: the answer must not enter the run's record
+                    result.output = result.output.replace(text, "<redacted>")
+                    if result.error:
+                        result.error = result.error.replace(text, "<redacted>")
+                plan = self._current_plan_step()
+                signature = self._strategy_key(
+                    ToolCall(name="run_command", arguments={"command": pending.command}), plan
+                ) if plan is not None else ""
+                self._save_tool_result(result, plan.id if plan else "user-input")
+                self._observe(result, "user answered the process prompt")
+                if plan is not None:
+                    self._record_execution_evidence(
+                        result, ToolCall(name="run_command", arguments={}), plan, signature
+                    )
+                self.state.step_tool_calls += 1
+                if result.waiting_for_input:
+                    return self._await_user_input(result, plan or self._synthetic_step(pending))
+                self._event(
+                    "user_input_supplied",
+                    RunPhase.EXECUTE,
+                    step_id=plan.id if plan else None,
+                    payload={
+                        "command": pending.command,
+                        "prompt": pending.prompt,
+                        "exit_code": result.exit_code,
+                    },
+                )
+                self.state.status = "running"
+                self._persist()
+                return self.state
+        # the process is gone (a restart, or a run resumed in a new process): keep the answer
+        # as an instruction so the controller can pass it as scripted input
+        self.state.pending_input = None
+        self.state.pending_question = None
+        self.state.status = "running"
+        self._remember(
+            "decision",
+            f"the process for {pending.command!r} did not survive; rerun it with the supplied "
+            "answer as scripted input",
+        )
+        self._persist()
+        return self.state
+
+    def block(self, reason: str, unblock_hint: str) -> AgentState:
+        """Stop because no safe autonomous path remains — and say exactly why."""
+        assert self.state is not None
+        self.state.status = "blocked"
+        self.state.blocked_reason = reason
+        self.state.unblock_hint = unblock_hint
+        self.state.pending_question = None
+        self._remember("decision", f"blocked: {reason} — unblock by: {unblock_hint}")
+        self._event(
+            "run_blocked",
+            self.state.phase,
+            payload={"reason": reason, "unblock": unblock_hint},
+        )
+        self._persist()
+        logger.warning("run %s is blocked: %s", self.state.run_id, reason)
+        return self.state
+
+    @staticmethod
+    def _synthetic_step(pending: PendingInput) -> PlanStep:
+        """A plan step for a pending process when the plan no longer has one."""
+        return PlanStep(id="user-input", goal=pending.goal or "answer the running process")
 
     def inject_user_instruction(self, text: str) -> AgentState:
         """Record a user override, discard speculative work and replan."""
@@ -642,6 +774,7 @@ class Runtime:
             if plan.status == "pending":
                 plan.status = "active"
                 self.state.step_tool_calls = 0
+                self.state.step_commands = 0
                 self.repetition = RepetitionGuard(self.repetition_limit)
                 self.state.working_memory.pending_validations = list(
                     plan.validation_requirements
@@ -674,6 +807,7 @@ class Runtime:
                 validation_requirements=plan.validation_requirements,
             )
             tools = self._tools()
+            self._live_tools = tools
             decision = self._decide(step, plan, tools)
             if decision is None:
                 reason = self._decision_error or "provider returned no usable decision"
@@ -727,11 +861,22 @@ class Runtime:
                     return self.state
                 continue
 
-            result = tools.execute(decision.tool)
+            signature = self._strategy_key(decision.tool, plan)
+            self._pending_command = str(decision.tool.arguments.get("command") or "")
+            self._pending_sensitive = False
+            if self._strategy_should_refuse(signature):
+                result = self._refuse_repeat(decision.tool, signature, plan)
+            else:
+                result = tools.execute(decision.tool)
             self._save_tool_result(result, plan.id)
             self._observe(result, decision.reason_summary)
+            self._record_execution_evidence(result, decision.tool, plan, signature)
             self.state.step_tool_calls += 1
             self._persist()
+
+            if result.waiting_for_input:
+                # a live process is asking for something only the user has: stop cleanly and ask
+                return self._await_user_input(result, plan)
 
             if self.state.step_tool_calls >= self.max_tool_calls_per_step:
                 self._event(
@@ -767,6 +912,7 @@ class Runtime:
             working=self.state.working_memory,
             step_tool_calls=self.state.step_tool_calls,
             max_tool_calls=self.max_tool_calls_per_step,
+            evidence=self._execution_evidence(),
         )
         self.last_context_info = {
             "characters": len(context.text),
@@ -872,6 +1018,10 @@ class Runtime:
         if evaluation.decision == "continue":
             self._transition(RunPhase.EXECUTE)
             self._persist()
+            return False
+        evidence_gap = self._missing_execution_evidence(plan, validation)
+        if evaluation.decision == "accept" and evidence_gap:
+            self._require_execution_evidence(plan, evidence_gap)
             return False
         if evaluation.decision == "accept":
             if validation.changed_files or self.repo.worktree_merge_in_progress():
@@ -1173,6 +1323,14 @@ class Runtime:
                 f"Suggested next step: {diagnosis.corrective_instruction} "
                 "Tell me how to proceed, or stop the run."
             )
+            external = re.search(
+                r"(?i)credential|password|token|api[-_ ]?key|secret|permission|authority|"
+                r"approval|access|account|human|physically|manual",
+                f"{diagnosis.root_cause} {diagnosis.corrective_instruction}",
+            )
+            if external:
+                self.block(question, diagnosis.corrective_instruction)
+                return RecoveryAction.ASK_USER
             self.state.pending_question = question
             self.state.status = "waiting_for_user"
             self._event("user_question", payload={"question": question, "reason": trigger})
@@ -1397,13 +1555,389 @@ class Runtime:
             self.command_timeout,
             artifact_dir=self._run_dir() / "artifacts",
             test_commands=self.validator_commands,
+            idle_timeout=self.command_idle_timeout,
+            startup_timeout=self.command_startup_timeout,
         )
+
+    def _strategy_key(self, tool: ToolCall, plan: PlanStep) -> str:
+        """Fingerprint of the *method*: the tool and its arguments, nothing else.
+
+        The step's wording is deliberately excluded: after a replan the same command is still
+        the same approach, and repeating it on unchanged code is still a blind repeat.  What
+        makes a retry legitimate is a change in the arguments, the tool, or the tree.
+        """
+        del plan  # the goal is context, not method
+        arguments = json.dumps(tool.arguments, sort_keys=True, default=str)
+        return strategy_signature(f"{tool.name} {arguments}", "")
+
+    def _tree_hash(self) -> str:
+        """The candidate tree the failure happened on, so a fix can be told from a repeat."""
+        assert self.repo is not None
+        try:
+            return hashlib.sha1(self.repo.diff().encode()).hexdigest()[:12]
+        except (GitError, OSError):  # pragma: no cover - diff is best effort
+            return ""
+
+    def _strategy_should_refuse(self, signature: str) -> bool:
+        """Refuse only a *blind* repeat: same approach, same failure, unchanged candidate.
+
+        A retry after changing the code, the arguments, or the input mode has a different
+        fingerprint or a different tree and is therefore allowed; repeating the same command
+        against the same failing code is not.
+        """
+        record = self._strategies.get(signature)
+        if record is None or record.streak < self._strategy_limit:
+            return False
+        return bool(record.tree) and record.tree == self._tree_hash()
+
+    def _refuse_repeat(self, tool: ToolCall, signature: str, plan: PlanStep) -> ToolResult:
+        record = self._strategies[signature]
+        self._event(
+            "strategy_ineffective",
+            RunPhase.EXECUTE,
+            step_id=plan.id,
+            payload={
+                "tool": tool.name,
+                "attempts": record.attempts,
+                "lesson": record.lesson,
+                "signature": signature,
+            },
+        )
+        return ToolResult(
+            tool=tool.name,
+            success=False,
+            error=(
+                f"refused: this exact approach already failed {record.streak} times with the "
+                f"same result ({record.lesson}). The candidate is unchanged, so repeating it "
+                "cannot help — change the method (different arguments, different tool, or a "
+                "different execution mode) before trying again."
+            ),
+            mode="refused",
+        )
+
+    #: file kinds whose correctness cannot be inferred from their text
+    CODE_SUFFIXES = (
+        ".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".go", ".rs", ".rb", ".php",
+        ".c", ".h", ".cc", ".cpp", ".hpp", ".java", ".kt", ".cs", ".swift", ".sh", ".bash",
+        ".sql", ".pl", ".lua", ".r", ".jl",
+    )
+    #: criteria that can only be satisfied by actually running something
+    EXECUTION_CRITERIA = ("command succeeds:",)
+
+    def _missing_execution_evidence(self, plan: PlanStep, validation: ValidationResult) -> str:
+        """The reason a step cannot be accepted yet, or an empty string.
+
+        Writing code is not progress: when a step changed code and the run declares a way to
+        check it (configured validation commands, step requirements, or a ``command succeeds:``
+        criterion), at least one command must actually have run — otherwise the acceptance is
+        downgraded and the next attempt is told to produce evidence.
+        """
+        assert self.state is not None
+        if not self.require_execution_evidence:
+            return ""
+        changed_code = [
+            path
+            for path in list(validation.changed_files) + list(validation.new_files)
+            if path.endswith(self.CODE_SUFFIXES)
+        ]
+        if not changed_code:
+            return ""
+        # "Checkable by running something": a configured command, a command criterion, or a
+        # step requirement that names one.  A file assertion is deliberately not enough — a
+        # task that only asks for an artifact should not be forced to execute it — but the
+        # advice is still recorded (see below).
+        runnable_requirements = [
+            item
+            for item in plan.validation_requirements
+            if re.search(
+                r"(?i)\b(run|command|pytest|unittest|make|npm|cargo|go test|python|"
+                r"node|bash|sh |test\b)",
+                item,
+            )
+        ]
+        checkable = bool(
+            self.validator_commands
+            or runnable_requirements
+            or any(
+                criterion.startswith(self.EXECUTION_CRITERIA)
+                for criterion in self.state.success_criteria
+            )
+        )
+        if not checkable:
+            if validation.changed_files or validation.new_files:
+                self._event(
+                    "execution_evidence_advised",
+                    RunPhase.EVALUATE,
+                    step_id=plan.id,
+                    payload={
+                        "files": changed_code[:3],
+                        "note": "no command was run to check the code this step changed",
+                    },
+                )
+                self._remember(
+                    "decision",
+                    f"step {plan.id} changed {', '.join(changed_code[:2])} without running it; "
+                    "executing it would be stronger evidence",
+                )
+            return ""
+        if validation.command_results or self.state.step_commands > 0:
+            return ""
+        return (
+            "the step changed code ("
+            + ", ".join(changed_code[:3])
+            + ") but nothing was executed to check it"
+        )
+
+    def _require_execution_evidence(self, plan: PlanStep, reason: str) -> None:
+        """Downgrade an acceptance that arrived without evidence, and say what is missing."""
+        assert self.state is not None
+        lesson = (
+            f"no execution evidence for {plan.id}: {reason}. Run the code or its checks "
+            "before declaring the step done"
+        )
+        self._event(
+            "execution_evidence_required",
+            RunPhase.EVALUATE,
+            step_id=plan.id,
+            payload={"reason": reason, "goal": plan.goal},
+        )
+        self._remember("failure", lesson, immutable=True)
+        self.state.working_memory.blocker = reason
+        if (
+            "the step needs execution evidence before it can be accepted"
+            not in self.state.working_memory.hypotheses
+        ):
+            self.state.working_memory.hypotheses.append(
+                "the step needs execution evidence before it can be accepted"
+            )
+        self.state.working_memory.hypotheses = self.state.working_memory.hypotheses[-4:]
+        # keep the candidate: the work exists, what is missing is a command that checks it
+        self.state.step_tool_calls = 0
+        self._transition(RunPhase.EXECUTE)
+        self._persist()
+
+    def _record_execution_evidence(
+        self, result: ToolResult, tool: ToolCall, plan: PlanStep, signature: str
+    ) -> None:
+        """Turn an execution result into knowledge the next decision has to respect."""
+        assert self.state is not None
+        if not result.mode or result.mode == "refused":
+            return  # not a command: file tools carry their own, different evidence
+        self.state.step_commands += 1
+        kind = self._failure_kind(result)
+        if kind is FailureKind.NONE:
+            self._strategies.pop(signature, None)
+            self.state.working_memory.hypotheses = [
+                item
+                for item in self.state.working_memory.hypotheses
+                if "interactive" not in item.lower()
+            ]
+            return
+        lesson = self._failure_lesson(result, kind, tool)
+        error_signature = strategy_signature(result.error or result.output, "")
+        record = self._strategies.get(signature, StrategyRecord())
+        record.attempts += 1
+        record.streak = record.streak + 1 if error_signature == record.error else 1
+        record.error = error_signature
+        record.lesson = lesson
+        record.tree = self._tree_hash()
+        self._strategies[signature] = record
+
+        signal = FailureSignal(
+            kind=str(kind),
+            lesson=lesson,
+            signature=signature,
+            command=str(tool.arguments.get("command") or tool.name),
+            evidence=(result.error or result.output or "")[:400],
+        )
+        self.state.last_failure = signal
+        self._remember(
+            "failure",
+            f"{kind} · {lesson} · command: {signal.command} · evidence: {signal.evidence[:200]}",
+            immutable=True,
+        )
+        self._event(
+            "failure_classified",
+            RunPhase.EXECUTE,
+            step_id=plan.id,
+            payload={
+                "kind": str(kind),
+                "lesson": lesson,
+                "attempts": record.attempts,
+                "streak": record.streak,
+                "command": signal.command,
+                "mode": result.mode,
+                "timeout_kind": result.timeout_kind,
+                "interactive": result.interactive_detected,
+            },
+        )
+        if kind is FailureKind.INTERACTIVE_INPUT_REQUIRED:
+            self._record_interactive_hypothesis(result, plan, signal)
+
+    def _record_interactive_hypothesis(
+        self, result: ToolResult, plan: PlanStep, signal: FailureSignal
+    ) -> None:
+        assert self.state is not None
+        hypothesis = (
+            "the program is interactive: it reads stdin, so run it with scripted input "
+            "(mode='scripted_input') or a terminal (mode='interactive_pty')"
+        )
+        working = self.state.working_memory
+        if hypothesis not in working.hypotheses:
+            working.hypotheses.append(hypothesis)
+        working.hypotheses = working.hypotheses[-4:]
+        sensitive = bool(result.prompt) and bool(
+            re.search(r"(?i)password|passphrase|secret|token|api[-_ ]?key", result.prompt)
+        )
+        self._pending_sensitive = sensitive
+        self._event(
+            "interactive_detected",
+            RunPhase.EXECUTE,
+            step_id=plan.id,
+            payload={
+                "command": signal.command,
+                "prompt": result.prompt,
+                "mode": result.mode,
+                "sensitive": sensitive,
+            },
+        )
+
+    @staticmethod
+    def _failure_kind(result: ToolResult) -> FailureKind:
+        if result.success and not result.waiting_for_input:
+            return FailureKind.NONE
+        return classify_failure(
+            exit_code=result.exit_code,
+            stdout=result.output,
+            stderr=result.error or "",
+            timed_out=result.timed_out,
+            waiting_for_input=result.waiting_for_input,
+            interactive_detected=result.interactive_detected,
+        )
+
+    @staticmethod
+    def _failure_lesson(result: ToolResult, kind: FailureKind, tool: ToolCall) -> str:
+        """The shortest true statement about what to do differently."""
+        command = str(tool.arguments.get("command") or tool.name)
+        if kind is FailureKind.INTERACTIVE_INPUT_REQUIRED:
+            where = f" ({result.prompt!r})" if result.prompt else ""
+            return (
+                f"{command!r} asks for input{where}; rerun it with mode='scripted_input' and a "
+                "stdin list, or mode='interactive_pty'"
+            )
+        if kind is FailureKind.COMMAND_TIMEOUT:
+            detail = (
+                f" (partial output captured: {result.output.strip().splitlines()[-1][:80]!r})"
+                if result.output.strip()
+                else " (no output at all)"
+            )
+            return (
+                f"{command!r} made no progress within the {result.timeout_kind} timeout{detail}"
+            )
+        if kind is FailureKind.FILE_NOT_FOUND:
+            return f"{command!r} references a path that does not exist"
+        if kind is FailureKind.PERMISSION_ERROR:
+            return f"{command!r} was refused by the filesystem (permissions)"
+        if kind is FailureKind.DEPENDENCY_MISSING:
+            return f"{command!r} needs a module or binary that is not installed"
+        if kind is FailureKind.INVALID_ARGUMENT:
+            return f"{command!r} rejected its arguments"
+        if kind is FailureKind.TEST_FAILURE:
+            first = next(
+                (
+                    line.strip()
+                    for line in f"{result.error or ''}\n{result.output}".splitlines()
+                    if line.strip()
+                ),
+                "",
+            )
+            return f"{command!r} reported failing checks: {first[:160]}"
+        if kind is FailureKind.CODE_ERROR:
+            return f"{command!r} raised an error in the code it ran"
+        return f"{command!r} exited with {result.exit_code}"
+
+    def _await_user_input(self, result: ToolResult, plan: PlanStep) -> AgentState:
+        """A live process needs a value only the user has: ask, and keep the process alive."""
+        assert self.state is not None
+        prompt = result.prompt or "the running program is waiting for input"
+        self.state.pending_input = PendingInput(
+            command=self._pending_command,
+            prompt=prompt,
+            goal=plan.goal,
+            mode=result.mode,
+            sensitive=self._pending_sensitive,
+        )
+        self.state.status = "waiting_for_user"
+        self.state.pending_question = (
+            f"the running process is waiting for input: {prompt!r}. Send the answer to "
+            "continue — the process is still alive and will resume with it."
+        )
+        self._event(
+            "interactive_input_required",
+            RunPhase.EXECUTE,
+            step_id=plan.id,
+            payload={
+                "prompt": prompt,
+                "command": self._pending_command,
+                "mode": result.mode,
+                "sensitive": self._pending_sensitive,
+            },
+        )
+        self._persist()
+        logger.warning("run %s is waiting for process input", self.state.run_id)
+        return self.state
+
+    def _execution_evidence(self) -> list[str]:
+        """The last command outcomes, in the form the next decision has to reason about."""
+        assert self.state is not None
+        lines: list[str] = []
+        if self.state.last_failure is not None:
+            failure = self.state.last_failure
+            lines.append(
+                f"Last failure [{failure.kind}]: {failure.lesson} "
+                f"(command: {failure.command}; evidence: {failure.evidence[:200]})"
+            )
+            if failure.kind == str(FailureKind.INTERACTIVE_INPUT_REQUIRED):
+                lines.append(
+                    "Directive: the previous attempt failed because the program needs input. "
+                    "Do not repeat it as a batch command: pass mode='scripted_input' with a "
+                    "'stdin' list of answers, or mode='interactive_pty' when it needs a "
+                    "terminal."
+                )
+            elif failure.kind == str(FailureKind.COMMAND_TIMEOUT):
+                lines.append(
+                    "Directive: the previous attempt timed out. Decide from the captured output "
+                    "whether it was slow, deadlocked, or waiting for input, and change the "
+                    "approach instead of retrying it unchanged."
+                )
+        for item in self.state.latest_observations[-4:]:
+            lines.append(f"Recent result: {item}")
+        if self.state.pending_input is not None:
+            lines.append(
+                f"Blocked on user input: {self.state.pending_input.prompt!r} "
+                f"for {self.state.pending_input.command}"
+            )
+        return lines
 
     def _observe(self, result: ToolResult, reason: str) -> None:
         assert self.state is not None
+        summary = (result.output.strip() or result.error or reason)[:500]
+        if result.mode:
+            shape = f"[{result.mode}]"
+            if result.exit_code is not None:
+                shape += f" exit={result.exit_code}"
+            if result.timed_out:
+                shape += f" timeout={result.timeout_kind}"
+            if result.interactive_detected:
+                shape += " interactive"
+            if result.waiting_for_input:
+                shape += f" waiting-for-input prompt={result.prompt!r}"
+            if result.stdin_sent:
+                shape += f" stdin={result.stdin_sent} lines"
+            summary = f"{shape} {summary}".strip()
         observation = Observation(
             tool=result.tool,
-            summary=(result.output.strip() or result.error or reason)[:500],
+            summary=summary,
             artifact=result.artifact,
         )
         text = observation.summary
@@ -1661,6 +2195,7 @@ class Runtime:
         state.phase = RunPhase.PLAN
         state.current_step_id = step.id
         state.step_tool_calls = 0
+        state.step_commands = 0
         self.repetition = RepetitionGuard(self.repetition_limit)
         self._persist()
         previous_status, previous_phase = state.status, state.phase

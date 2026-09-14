@@ -22,7 +22,13 @@ from ..git import GitError, MergeConflict, NothingToMerge
 from ..models import Event
 from ..runtime import Runtime, RuntimeControl, cleanup_idle_worktree
 from . import formatters
-from .modals import ConfirmStopModal, HelpModal, InstructionModal, RequestModal
+from .modals import (
+    ConfirmStopModal,
+    HelpModal,
+    InstructionModal,
+    ProcessInputModal,
+    RequestModal,
+)
 from .screens import (
     ContextScreen,
     DiffScreen,
@@ -377,6 +383,10 @@ class GcaeApp(App[None]):
                 f"[i] New task  {merge_keys}[d] Diff  [l] Logs  [m] Memory  [c] Context  "
                 "[e] Evaluation  [t] Plan  [?] Help  [q] Quit"
             )
+        elif self.ui.pending_input is not None:
+            keys = "[i] Send input  [s] Stop  [l] Logs  [?] Help  [q] Quit"
+        elif self.ui.blocked is not None:
+            keys = "[i] Instruct  [d] Diff  [l] Logs  [m] Memory  [c] Context  [?] Help  [q] Quit"
         elif self.control.paused:
             keys = "[r] Resume  [d] Diff  [l] Logs  [m] Memory  [i] Instruct  [?] Help  [q] Quit"
         elif self.control.stopped:
@@ -634,10 +644,34 @@ class GcaeApp(App[None]):
                 return
 
     def action_instruction(self) -> None:
+        state = self.runtime.state
+        if state is not None and state.pending_input is not None:
+            pending = state.pending_input
+            self._prompt_for_process_input(pending.command, pending.prompt, pending.sensitive)
+            return
         if self.runtime.state is None or self.agent_done:
             self._prompt_for_request()
             return
         self.push_screen(InstructionModal(), self._submit_instruction)
+
+    def _prompt_for_process_input(self, command: str, prompt: str, sensitive: bool) -> None:
+        """Ask the user for the value a live process is waiting on."""
+
+        def handle(result: object) -> None:
+            if not isinstance(result, str) or not result:
+                return
+            try:
+                self.runtime.submit_process_input(result)
+            except RuntimeError as exc:
+                self.last_error = str(exc)
+                self._refresh_panels({"banner", "footer"})
+                return
+            self.ui.add_note("i", f"input sent to the running process · {command}", "accent")
+            self._refresh_panels({"activity", "status", "banner", "timeline", "footer"})
+
+        self.push_screen(
+            ProcessInputModal(command=command, prompt=prompt, sensitive=sensitive), handle
+        )
 
     def _prompt_for_request(self) -> None:
         self.push_screen(RequestModal(), self._submit_request)

@@ -19,6 +19,11 @@ max_steps = 20
 # Self-recovery: a run that is about to fail reads its own trace and tries a correction
 # before it asks the user. recovery_attempts bounds the self-diagnoses per run;
 # recovery_budget is how many extra iterations each successful correction buys.
+# Execution: how a command is watched, and when a repeat of a failed approach is refused
+command_idle_timeout = 20.0            # seconds without output before a running command is stalled
+command_startup_timeout = 10.0         # seconds without any output before it never started
+strategy_retry_limit = 2               # identical failures before a blind repeat is refused
+require_execution_evidence = true      # a step that changed code must run something before acceptance
 recovery_attempts = 2
 recovery_budget = 5
 command_timeout = 30

@@ -334,6 +334,98 @@ def script(runtime: Runtime, stop: threading.Event) -> None:
         state.plan[0].id,
     )
 
+    # the interactive obstacle: a command that asks for input, the lesson, the strategy change
+    emit(
+        "decision",
+        {
+            "action": "execute_tool",
+            "reason_summary": "smoke-test the parser as a batch command",
+            "expected_result": "the parser reports its chunk handling",
+            "tool": {
+                "name": "run_command",
+                "arguments": {"command": "python src/parser.py", "mode": "batch"},
+            },
+        },
+        RunPhase.EXECUTE,
+        "step-1",
+    )
+    emit(
+        "tool_result",
+        {
+            "tool": "run_command",
+            "success": False,
+            "mode": "batch",
+            "exit_code": 1,
+            "output": "Enter the file to parse: ",
+            "error": "EOFError: EOF when reading a line",
+            "interactive_detected": True,
+            "timeout_kind": "none",
+            "duration_ms": 120.0,
+        },
+        RunPhase.EXECUTE,
+        "step-1",
+    )
+    emit(
+        "failure_classified",
+        {
+            "kind": "interactive_input_required",
+            "lesson": (
+                "'python src/parser.py' asks for input; rerun it with mode='scripted_input' "
+                "and a stdin list, or mode='interactive_pty'"
+            ),
+            "attempts": 1,
+            "streak": 1,
+            "command": "python src/parser.py",
+            "mode": "batch",
+            "interactive": True,
+        },
+        RunPhase.EXECUTE,
+        "step-1",
+    )
+    emit(
+        "interactive_detected",
+        {
+            "command": "python src/parser.py",
+            "prompt": "Enter the file to parse: ",
+            "mode": "batch",
+            "sensitive": False,
+        },
+        RunPhase.EXECUTE,
+        "step-1",
+    )
+    emit(
+        "decision",
+        {
+            "action": "execute_tool",
+            "reason_summary": "rerun with scripted input",
+            "expected_result": "the parser reports its chunk handling",
+            "tool": {
+                "name": "run_command",
+                "arguments": {
+                    "command": "python src/parser.py",
+                    "mode": "scripted_input",
+                    "stdin": ["data.csv", "y"],
+                },
+            },
+        },
+        RunPhase.EXECUTE,
+        "step-1",
+    )
+    emit(
+        "tool_result",
+        {
+            "tool": "run_command",
+            "success": True,
+            "mode": "scripted_input",
+            "exit_code": 0,
+            "output": "parsed 42 rows",
+            "stdin_sent": 2,
+            "duration_ms": 210.0,
+        },
+        RunPhase.EXECUTE,
+        "step-1",
+    )
+
     # real acceptance: the fix (and its test) is committed as a checkpoint
     (worktree / "tests").mkdir(exist_ok=True)
     (worktree / "tests" / "test_parser.py").write_text(
@@ -400,6 +492,59 @@ def script(runtime: Runtime, stop: threading.Event) -> None:
         step_id,
     )
     emit("candidate_state", repo.candidate_snapshot(), RunPhase.CHECKPOINT, step_id)
+
+    # a live process waiting for a value only the user has
+    runtime._transition(RunPhase.EXECUTE)
+    emit(
+        "decision",
+        {
+            "action": "execute_tool",
+            "reason_summary": "the release step needs a deploy token",
+            "expected_result": "the deploy proceeds",
+            "tool": {
+                "name": "run_command",
+                "arguments": {
+                    "command": "python -c \"import os; print(os.environ['DEPLOY_TOKEN'])\"",
+                    "mode": "interactive_pty",
+                    "interactive": True,
+                },
+            },
+        },
+        RunPhase.EXECUTE,
+        state.plan[0].id if state.plan else "step-1",
+    )
+    runtime.state.pending_input = __import__("gcae.models", fromlist=["PendingInput"]).PendingInput(
+        command="python deploy.py",
+        prompt="Enter deploy token: ",
+        goal="deploy the release",
+        mode="interactive_pty",
+        sensitive=True,
+    )
+    runtime.state.status = "waiting_for_user"
+    runtime.state.pending_question = (
+        "the running process is waiting for input: 'Enter deploy token: '"
+    )
+    emit(
+        "interactive_input_required",
+        {
+            "prompt": "Enter deploy token: ",
+            "command": "python deploy.py",
+            "mode": "interactive_pty",
+            "sensitive": True,
+        },
+        RunPhase.EXECUTE,
+        state.plan[0].id if state.plan else "step-1",
+        pause=1.4,
+    )
+    runtime.state.pending_input = None
+    runtime.state.pending_question = None
+    runtime.state.status = "running"
+    emit(
+        "user_input_supplied",
+        {"command": "python deploy.py", "prompt": "Enter deploy token: ", "exit_code": 0},
+        RunPhase.EXECUTE,
+        state.plan[0].id if state.plan else "step-1",
+    )
 
     repo.clean_generated_artifacts()
     repo.clean_ignored_artifacts()

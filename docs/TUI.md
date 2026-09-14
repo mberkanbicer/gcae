@@ -108,6 +108,25 @@ Panel row budgets follow the space the layout actually gives them (`Panel.row_bu
 a taller terminal shows more plan steps and more checks instead of a blank band at the bottom of a
 box.
 
+## Interactive processes
+
+When a command is running, ACTIVE names its execution mode (`BATCH`, `SCRIPTED INPUT · 3 answers
+queued`, `INTERACTIVE PTY · may ask for input`). When a live process asks for something the runtime
+cannot know, the panel becomes a request instead of a countdown:
+
+```
+INPUT REQUIRED
+process     python deploy.py
+prompt      the process is waiting for: Enter deploy token:
+state       WAITING FOR USER · press i to send the answer
+```
+
+`i` opens the process-input dialog, the answer goes to the process stdin (or is recorded as an
+instruction when the process did not survive a restart), and a sensitive prompt is never written to
+the event log. The timeline carries the adaptive story: `obstacle · interactive_input_required · …`,
+`interactive input detected · <prompt>`, `strategy ineffective after N attempts`, `execution evidence
+required`, and `blocked · …` when no safe autonomous path remains.
+
 ## Trusted versus candidate
 
 The CHECKPOINT panel is the run's identity: it shows the trusted commit (a verified tree) and the

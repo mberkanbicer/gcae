@@ -79,6 +79,16 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument("run_id")
     add_runtime_flags(resume)
 
+    input_parser = subparsers.add_parser(
+        "input", help="send input to a process waiting for the user"
+    )
+    input_parser.add_argument("repository", type=Path)
+    input_parser.add_argument("run_id")
+    input_parser.add_argument("text", help="the value the running process is waiting for")
+    input_parser.add_argument("--config", type=Path)
+    input_parser.add_argument("--runtime-dir", type=Path)
+    input_parser.add_argument("--headless", action="store_true", help=argparse.SUPPRESS)
+
     listing = subparsers.add_parser("list", help="list known runs")
     listing.add_argument("--config", type=Path)
     listing.add_argument("--runtime-dir", type=Path)
@@ -446,6 +456,16 @@ def _inspect_run(run_id: str, runtime_dir: Path, as_json: bool) -> None:
         )
     if state.pending_question:
         print(f"pending question: {state.pending_question}")
+    if state.pending_input is not None:
+        print(
+            f"input required: {state.pending_input.prompt!r} "
+            f"(from {state.pending_input.command}); answer with: "
+            f"gcae input <repo> {state.run_id} <value>"
+        )
+    if state.blocked_reason:
+        print(f"blocked: {state.blocked_reason}")
+        if state.unblock_hint:
+            print(f"unblocks with: {state.unblock_hint}")
     if state.degradations:
         print("degraded: " + "; ".join(state.degradations))
     if state.recovery is not None:
@@ -468,6 +488,10 @@ def _build_runtime(args: argparse.Namespace, config: Config, runtime_dir: Path) 
         validator_commands=config.validation.commands,
         max_steps=config.runtime.max_steps,
         recovery_attempts=config.runtime.recovery_attempts,
+        command_idle_timeout=config.runtime.command_idle_timeout,
+        command_startup_timeout=config.runtime.command_startup_timeout,
+        strategy_retry_limit=config.runtime.strategy_retry_limit,
+        require_execution_evidence=config.runtime.require_execution_evidence,
         recovery_budget=config.runtime.recovery_budget,
         command_timeout=config.runtime.command_timeout,
         context_limit=config.provider.context_limit,
@@ -538,6 +562,13 @@ def main(argv: list[str] | None = None) -> None:
                 file=sys.stderr,
             )
         runtime_dir = (args.runtime_dir or config.state_dir).expanduser()
+        if args.command == "input":
+            runtime = _build_runtime(args, config, runtime_dir)
+            runtime.resume(args.run_id)
+            runtime.submit_process_input(args.text)
+            result = runtime.run()
+            print(_summary(result), file=sys.stderr)
+            raise SystemExit(0 if result.status == "complete" else 1)
         if args.command == "undo":
             _undo(args.repository, args.run_id, runtime_dir)
             return

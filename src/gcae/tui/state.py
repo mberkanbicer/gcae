@@ -90,6 +90,13 @@ class UiState:
     _candidate_announced: str | None = None
     #: the goal the run was last working on (the objective box keeps it after completion)
     last_goal: str = ""
+    #: how the current command runs and how many answers it was given
+    execution_mode: str = ""
+    stdin_lines: int = 0
+    interactive: bool = False
+    #: a live process waiting for the user, and why a run cannot continue
+    pending_input: dict[str, Any] | None = None
+    blocked: dict[str, Any] | None = None
     rollback: dict[str, Any] | None = None
     # bookkeeping losses (state/memory/events): visible for the rest of the run, not just an event
     degradations: list[str] = field(default_factory=list)
@@ -117,6 +124,10 @@ class UiState:
             self.verification = state.last_verification.model_dump(mode="json")
         if state.accepted_commit:
             self.checkpoint = {"commit": state.accepted_commit, "message": "", "kind": "resumed"}
+        if state.pending_input is not None:
+            self.pending_input = state.pending_input.model_dump(mode="json")
+        if state.blocked_reason:
+            self.blocked = {"reason": state.blocked_reason, "unblock": state.unblock_hint or ""}
         if state.status == "complete":
             self.agent_done = True
         active = next((step for step in self.plan if step["status"] == "active"), None)
@@ -259,6 +270,12 @@ class UiState:
 
     def _on_decision(self, event: Event, payload: dict[str, Any]) -> set[str]:
         tool = payload.get("tool")
+        if isinstance(tool, dict):
+            arguments = tool.get("arguments") or {}
+            self.execution_mode = str(arguments.get("mode") or "")
+            queued = arguments.get("stdin")
+            self.stdin_lines = len(queued) if isinstance(queued, list) else 0
+            self.interactive = bool(arguments.get("interactive"))
         expected = str(payload.get("expected_result") or "")
         reason = str(payload.get("reason_summary") or "")
         if isinstance(tool, dict) and tool.get("name"):
@@ -440,6 +457,34 @@ class UiState:
         if self.action is not None:
             self.action.state = "waiting"
         return {"activity", "metrics"}
+
+    def _on_interactive_input_required(self, event: Event, payload: dict[str, Any]) -> set[str]:
+        self.pending_input = dict(payload)
+        prompt = str(payload.get("prompt") or "the process is waiting for input")
+        self.action = ActionView(
+            label="input required",
+            lines=[prompt],
+            kind="runtime",
+            state="waiting",
+            started_at=event.timestamp,
+        )
+        return {"activity", "status", "banner", "timeline", "footer"}
+
+    def _on_user_input_supplied(self, event: Event, payload: dict[str, Any]) -> set[str]:
+        self.pending_input = None
+        return {"activity", "status", "banner", "timeline", "footer"}
+
+    def _on_run_blocked(self, event: Event, payload: dict[str, Any]) -> set[str]:
+        self.blocked = dict(payload)
+        self.action = ActionView(
+            label="blocked",
+            lines=[str(payload.get("reason") or "")],
+            kind="runtime",
+            state="waiting",
+            started_at=event.timestamp,
+            expected=str(payload.get("unblock") or ""),
+        )
+        return {"activity", "status", "banner", "timeline", "footer", "objective"}
 
     def _on_runtime_degraded(self, event: Event, payload: dict[str, Any]) -> set[str]:
         component = str(payload.get("component") or "runtime")

@@ -51,6 +51,7 @@ PLAN_MARKERS: dict[str, tuple[str, str]] = {
 RUN_BADGES: dict[str, tuple[str, str]] = {
     "running": ("RUNNING", "accent"),
     "waiting_for_user": ("WAITING", "warning"),
+    "blocked": ("BLOCKED", "warning"),
     "complete": ("COMPLETE", "success"),
     "stopped": ("STOPPED", "muted"),
 }
@@ -116,7 +117,7 @@ PHASE_STATE: dict[str, str] = {
 def run_state(status: str, phase: str | None, paused: bool) -> tuple[str, str]:
     """(label, style key) for the top status bar."""
     head = status.split(":", 1)[0].strip().lower()
-    if head in {"complete", "failed", "stopped", "waiting_for_user"}:
+    if head in {"complete", "failed", "stopped", "waiting_for_user", "blocked"}:
         return RUN_BADGES.get(head, (head.upper(), status_style(status)))
     if paused:
         return ("PAUSED", "warning")
@@ -405,6 +406,33 @@ def timeline_entry(
     if event_type == "model_failover":
         role = payload.get("role") or "model"
         return ("⇄", f"{role} failed over to {payload.get('model')}", "warning")
+    if event_type == "interactive_detected":
+        prompt = elide(str(payload.get("prompt") or ""), 60)
+        detail = f" · {prompt}" if prompt else ""
+        return ("!", f"interactive input detected{detail}", "warning")
+    if event_type == "failure_classified":
+        lesson = elide(str(payload.get("lesson") or ""), 90)
+        return ("×", f"obstacle · {payload.get('kind')} · {lesson}", "warning")
+    if event_type == "strategy_ineffective":
+        lesson = elide(str(payload.get("lesson") or ""), 80)
+        return (
+            "↻",
+            f"strategy ineffective after {payload.get('attempts')} attempts · {lesson}",
+            "warning",
+        )
+    if event_type == "execution_evidence_required":
+        return (
+            "!",
+            f"execution evidence required · {elide(str(payload.get('reason') or ''), 70)}",
+            "warning",
+        )
+    if event_type == "interactive_input_required":
+        prompt = elide(str(payload.get("prompt") or ""), 70)
+        return ("?", f"INPUT REQUIRED · {prompt}", "warning")
+    if event_type == "user_input_supplied":
+        return ("✓", "input supplied · the process continued", "accent")
+    if event_type == "run_blocked":
+        return ("■", f"blocked · {elide(str(payload.get('reason') or ''), 80)}", "warning")
     if event_type == "runtime_degraded":
         error = elide(str(payload.get("error", "")), 60)
         return ("△", f"degraded · {payload.get('component')} · {error}", "warning")

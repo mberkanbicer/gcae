@@ -93,6 +93,15 @@ class RuntimeConfig(BaseModel):
     # successful correction buys.
     recovery_attempts: int = 2
     recovery_budget: int = 5
+    #: seconds without output before a running command is treated as stalled
+    command_idle_timeout: float = 20.0
+    #: seconds without any output at all before a command is treated as never having started
+    command_startup_timeout: float = 10.0
+    #: how many times the same approach may fail the same way before a blind repeat is refused
+    strategy_retry_limit: int = 2
+    #: when a step changed code and the run declares checkable commands, at least one command
+    #: must actually have run before the step can be accepted
+    require_execution_evidence: bool = True
 
 
 class ValidationConfig(BaseModel):

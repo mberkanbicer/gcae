@@ -17,7 +17,13 @@ from gcae.providers import FakeProvider, StreamProgress
 from gcae.runtime import Runtime, RuntimeControl
 from gcae.tui import formatters
 from gcae.tui.app import GcaeApp
-from gcae.tui.modals import ConfirmStopModal, HelpModal, InstructionModal, RequestModal
+from gcae.tui.modals import (
+    ConfirmStopModal,
+    HelpModal,
+    InstructionModal,
+    ProcessInputModal,
+    RequestModal,
+)
 from gcae.tui.screens import (
     ContextScreen,
     DiffScreen,
@@ -2066,3 +2072,143 @@ def test_panel_boxes_never_move_while_a_model_streams(tmp_path: Path) -> None:
             assert not leaks, f"telemetry reached the main screen: {set(leaks)}"
 
     asyncio.run(scenario())
+
+
+# =============================================================== adaptive execution
+# The dashboard must show what the runtime learned: an obstacle, the mode it switched to,
+# and a process that needs the user.
+
+
+def test_an_interactive_obstacle_and_the_mode_change_are_visible() -> None:
+    ui = UiState()
+    ui.apply(
+        event(
+            "failure_classified",
+            {
+                "kind": "interactive_input_required",
+                "lesson": "'python game.py' asks for input; rerun it with scripted_input",
+                "command": "python game.py",
+                "interactive": True,
+                "attempts": 1,
+            },
+        )
+    )
+    ui.apply(
+        event(
+            "interactive_detected",
+            {"command": "python game.py", "prompt": "Enter your guess: ", "mode": "batch"},
+        )
+    )
+    ui.apply(
+        event(
+            "decision",
+            {
+                "action": "execute_tool",
+                "reason_summary": "rerun with answers",
+                "tool": {
+                    "name": "run_command",
+                    "arguments": {
+                        "command": "python game.py",
+                        "mode": "scripted_input",
+                        "stdin": ["5", "9", "7"],
+                    },
+                },
+            },
+            step_id="step-1",
+        )
+    )
+
+    timeline = [row.text for row in ui.timeline]
+    assert any("interactive_input_required" in text for text in timeline)
+    assert any("interactive input detected" in text for text in timeline)
+    assert ui.execution_mode == "scripted_input"
+    assert ui.stdin_lines == 3
+
+    formatted = formatters.timeline_entry(
+        "strategy_ineffective", {"attempts": 2, "lesson": "the same command keeps failing"}
+    )
+    assert formatted is not None and formatted[0] == "↻"
+    blocked = formatters.timeline_entry("run_blocked", {"reason": "needs a credential"})
+    assert blocked is not None and "blocked" in blocked[1]
+
+
+def test_the_active_panel_shows_the_execution_mode_and_queued_answers(tmp_path: Path) -> None:
+    ui = UiState()
+    ui.apply(
+        event(
+            "decision",
+            {
+                "action": "execute_tool",
+                "reason_summary": "rerun with answers",
+                "expected_result": "the game answers three guesses",
+                "tool": {
+                    "name": "run_command",
+                    "arguments": {
+                        "command": "python game.py",
+                        "mode": "scripted_input",
+                        "stdin": ["5", "9", "7"],
+                    },
+                },
+            },
+            step_id="step-1",
+        )
+    )
+    body = _rendered(
+        GcaeApp(make_runtime(tmp_path, start=False), auto_run=False), ActivityPanel, ui
+    )
+    assert "SCRIPTED INPUT" in body
+    assert "3 answers queued" in body
+
+
+def test_a_process_waiting_for_input_dominates_the_active_panel(tmp_path: Path) -> None:
+    ui = UiState()
+    ui.pending_input = {
+        "command": "python deploy.py",
+        "prompt": "Enter deploy token: ",
+        "goal": "deploy",
+        "mode": "interactive_pty",
+        "sensitive": True,
+    }
+    body = _rendered(
+        GcaeApp(make_runtime(tmp_path, start=False), auto_run=False), ActivityPanel, ui
+    )
+    assert "INPUT REQUIRED" in body
+    assert "python deploy.py" in body
+    assert "Enter deploy token" in body
+    assert "WAITING FOR USER" in body
+    assert "press i" in body
+
+
+def test_the_input_modal_sends_the_answer_to_the_runtime(tmp_path: Path) -> None:
+    """`i` on a waiting process opens the process-input dialog and submits its value."""
+    from gcae.models import PendingInput
+
+    runtime = make_runtime(tmp_path)
+    assert runtime.state is not None
+    runtime.state.pending_input = PendingInput(
+        command="python deploy.py",
+        prompt="Enter deploy token: ",
+        goal="deploy",
+        mode="interactive_pty",
+        sensitive=True,
+    )
+    runtime.state.status = "waiting_for_user"
+    submitted: list[str] = []
+    runtime.submit_process_input = lambda text: submitted.append(text) or runtime.state  # type: ignore[method-assign]
+
+    app = GcaeApp(runtime, auto_run=False)
+
+    async def scenario() -> None:
+        async with app.run_test(size=(130, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("i")
+            await pilot.pause()
+            assert isinstance(app.screen, ProcessInputModal)
+            for character in "secret-value":
+                await pilot.press("-" if character == "-" else character)
+            await pilot.press("enter")
+            await pilot.pause()
+
+    asyncio.run(scenario())
+    assert submitted == ["secret-value"], "the modal value must reach submit_process_input"
+    assert runtime.state.pending_input is not None, "the caller decides what happens next"

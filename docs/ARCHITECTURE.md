@@ -109,6 +109,52 @@ A provider that stops producing data is a *detected failure*: `[provider] stall_
 read, the error names the silence and the characters already received, and it enters the recovery
 ladder like any other fatal condition. Nothing in the loop waits unboundedly.
 
+## Adaptive execution
+
+The runtime does not merely execute a plan: it observes what happened, classifies it, and lets the
+classification change what happens next.
+
+```
+PLAN → CHOOSE STEP → EXECUTE → OBSERVE → CLASSIFY → ACCEPT / REPAIR / RETRY / ROLLBACK / REPLAN
+```
+
+Three mechanisms implement this, all in the runtime rather than in prompt wording:
+
+**Execution modes** (`execution.py`). A command runs as `batch` (stdin closed, so a program that
+reads stdin sees end-of-file instead of hanging), `scripted_input` (answers are written up front) or
+`interactive_pty` (a pseudoterminal, for programs that need a terminal). Children run unbuffered and
+in their own process group, so a prompt is *seen* while the program waits and a timeout can kill the
+whole group.
+
+**Failure classification** (`FailureKind`). Every command result is reduced to a class that decides
+the recovery policy: interactive input required, timeout, code error, test failure, missing
+dependency, missing file, permissions, argument error. The class, the lesson and the evidence are
+recorded as immutable memory and injected into the next controller prompt as
+"Execution evidence (what actually happened)", together with a directive that names the change to
+make (`Do not repeat it as a batch command: pass mode='scripted_input' …`).
+
+**Strategy ledger.** Each approach (tool + arguments) records how often it failed, with which error
+signature, and on which candidate tree. A repeat is refused — as a tool result, without executing —
+when the same approach already failed the same way twice *and* the candidate is unchanged. A retry
+after a real change (different arguments, different tree) is allowed. This is the runtime enforcing
+"change the method", not the prompt asking for it.
+
+**Evidence gate.** When a step changed code and the run declares a runnable check (configured
+validation commands, a `command succeeds:` criterion, or a step requirement naming a command), the
+acceptance is refused until at least one command has actually run. The candidate is kept, the step
+returns to EXECUTE with the requirement recorded, and a step that only asks for an artifact is not
+blocked — the advice is recorded instead. `[runtime] require_execution_evidence = false` turns the
+gate off.
+
+**Waiting for the user.** When a live process asks a question the runtime cannot answer, the run
+stops as `waiting_for_user` with `pending_input` persisted (command, prompt, mode, sensitivity), the
+process stays alive, and the TUI offers `i` to send the answer. A sensitive prompt (token, password)
+is never written to the event log, and the terminal echo is redacted from the captured output.
+
+**Blocked.** When no safe autonomous path remains — an external credential, permission or decision —
+the run stops as `blocked` with the reason, what was learned, the last trusted checkpoint and what
+would unblock it, instead of failing.
+
 ## Failure taxonomy
 
 Self-recovery is the runtime's *default* response to failure, not a feature of the stagnation
@@ -120,6 +166,12 @@ without the user:
 | tool errors, failed validation commands, scope warnings | evidence for the evaluator; a step is rejected and replanned, the run continues |
 | rejected step, non-productive attempts, step budget exhausted | recovery ladder: change hypothesis → escalate → **diagnose** → ask → fail |
 | unusable provider output, stall, evaluator output, unexpected exception | same ladder: the advisor reads the trace |
+| a command that needs stdin | discovered (EOF, prompt after a stall, or the controller's own flag) and classified `interactive_input_required`; the next attempt uses `scripted_input` or `interactive_pty` |
+| a command that genuinely hangs | idle/startup/wall timeout with partial output captured, the process group killed, the evidence recorded |
+| an acceptance without execution evidence | refused by the runtime when the run declares a runnable check; the candidate is kept and the step returns to EXECUTE |
+| the same approach failing the same way twice on unchanged code | refused without executing, with the lesson, and the strategy must change |
+| a process asking for a value only the user has | `waiting_for_user` + `interactive_input_required`, the process stays alive, the TUI sends the answer |
+| no safe autonomous path left | `blocked` with the reason and what would unblock it |
 | transient network failure (429, 5xx, dropped connection) | retried with exponential backoff and `Retry-After` support before it is even a failure |
 | a role's model is down or misconfigured | **failover**: the role moves to `models.escalation` once and the run continues on it (`model_failover`) |
 | planner outage (with user criteria) | deterministic planner takes over, `planner_fallback` event |

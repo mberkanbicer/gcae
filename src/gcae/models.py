@@ -78,6 +78,40 @@ class ToolResult(BaseModel):
     duration_ms: float | None = None
     artifact: str | None = None
     changed_files: list[str] = Field(default_factory=list)
+    # execution evidence: how the command ran and what it told us
+    mode: str = ""
+    cwd: str = ""
+    timed_out: bool = False
+    timeout_kind: str = ""
+    interactive_detected: bool = False
+    waiting_for_input: bool = False
+    prompt: str = ""
+    termination_reason: str = ""
+    stdin_sent: int = 0
+
+
+class FailureSignal(BaseModel):
+    """One classified failure, with the lesson the next attempt must respect."""
+
+    model_config = ConfigDict(extra="forbid")
+    kind: str
+    lesson: str
+    signature: str = ""
+    command: str = ""
+    evidence: str = ""
+    created_at: datetime = Field(default_factory=now_utc)
+
+
+class PendingInput(BaseModel):
+    """A live process waiting for an answer only the user can give."""
+
+    model_config = ConfigDict(extra="forbid")
+    command: str
+    prompt: str
+    goal: str = ""
+    mode: str = ""
+    sensitive: bool = False
+    created_at: datetime = Field(default_factory=now_utc)
 
 
 class Observation(BaseModel):
@@ -254,9 +288,18 @@ class AgentState(BaseModel):
     working_memory: WorkingMemory = Field(default_factory=WorkingMemory)
     pending_question: str | None = None
     step_tool_calls: int = 0
+    #: commands actually executed during the current step (evidence, not intent)
+    step_commands: int = 0
     latest_validation: ValidationResult | None = None
     last_verification: VerificationReport | None = None
     recovery: RecoveryRecord | None = None
+    #: the last classified execution failure, so the next decision can act on it
+    last_failure: FailureSignal | None = None
+    #: set while a process is alive and waiting for input only the user can provide
+    pending_input: PendingInput | None = None
+    #: why the run cannot continue autonomously, and what would unblock it
+    blocked_reason: str | None = None
+    unblock_hint: str | None = None
     # non-essential subsystems that failed during the run (state file, memory, event log):
     # recorded so the result is never silently incomplete
     degradations: list[str] = Field(default_factory=list)

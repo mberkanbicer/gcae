@@ -7,6 +7,13 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from .execution import (
+    CommandOutcome,
+    CommandRequest,
+    CommandRunner,
+    ExecutionMode,
+    RunningCommand,
+)
 from .models import ToolCall, ToolResult
 
 TOOL_DESCRIPTIONS: dict[str, str] = {
@@ -19,7 +26,11 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "create one new file and refuse overwrite; arguments {'path': str, 'content': str}"
     ),
     "run_command": (
-        "run a shell command in the worktree; arguments {'command': str, 'timeout'?: int}"
+        "run a shell command in the worktree; arguments {'command': str, 'timeout'?: int, "
+        "'mode'?: 'batch'|'scripted_input'|'interactive_pty', 'stdin'?: [str], "
+        "'interactive'?: bool, 'purpose'?: str}. Use mode='scripted_input' with 'stdin' for a "
+        "program that asks questions you can answer yourself, mode='interactive_pty' when it "
+        "needs a terminal, and 'interactive': true when it may ask for input you do not have"
     ),
     "run_tests": "run the configured project test commands; arguments {}",
 }
@@ -41,6 +52,8 @@ class ToolRegistry:
         artifact_dir: str | Path | None = None,
         test_commands: list[str] | None = None,
         max_output_chars: int = 8000,
+        idle_timeout: float = 20.0,
+        startup_timeout: float = 10.0,
     ) -> None:
         self.worktree = Path(worktree).resolve()
         self.command_timeout = command_timeout
@@ -48,6 +61,14 @@ class ToolRegistry:
         self.test_commands = list(test_commands or [])
         self.max_output_chars = max_output_chars
         self._artifact_counter = 0
+        self.runner = CommandRunner(
+            self.worktree,
+            default_timeout=float(command_timeout),
+            idle_timeout=idle_timeout,
+            startup_timeout=startup_timeout,
+        )
+        #: a process left alive because it is waiting for the user
+        self.pending_process: RunningCommand | None = None
         self._tools: dict[str, Callable[[dict[str, Any]], ToolResult]] = {
             "list_files": self.list_files,
             "read_file": self.read_file,
@@ -157,7 +178,14 @@ class ToolRegistry:
         return ToolResult(tool="apply_patch", success=True, output=result.stdout)
 
     def run_command(self, args: dict[str, Any]) -> ToolResult:
-        return self._shell(str(args["command"]), args.get("timeout"))
+        return self._shell(
+            str(args["command"]),
+            args.get("timeout"),
+            mode=str(args.get("mode") or ExecutionMode.BATCH),
+            stdin=args.get("stdin"),
+            interactive=bool(args.get("interactive")),
+            purpose=str(args.get("purpose") or ""),
+        )
 
     def run_tests(self, args: dict[str, Any]) -> ToolResult:
         del args
@@ -166,38 +194,103 @@ class ToolRegistry:
         outputs: list[str] = []
         success = True
         for command in self.test_commands:
-            result = self._shell(command, None)
+            result = self._shell(command, None, mode=ExecutionMode.BATCH)
             success = success and result.success
             outputs.append(f"$ {command}\n{result.output}{result.error or ''}".rstrip())
         return ToolResult(tool="run_tests", success=success, output="\n\n".join(outputs))
 
-    def _shell(self, command: str, timeout: Any) -> ToolResult:
+    @staticmethod
+    def _execution_mode(value: str) -> ExecutionMode:
+        try:
+            return ExecutionMode(value)
+        except ValueError as exc:
+            allowed = ", ".join(mode.value for mode in ExecutionMode)
+            raise ValueError(f"unknown execution mode {value!r}; use one of: {allowed}") from exc
+
+    @staticmethod
+    def _stdin_lines(value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [line for line in value.splitlines() if line != ""]
+        if isinstance(value, list):
+            return [str(line) for line in value]
+        raise ValueError("stdin must be a string or a list of strings")
+
+    def _shell(
+        self,
+        command: str,
+        timeout: Any,
+        *,
+        mode: str | ExecutionMode = ExecutionMode.BATCH,
+        stdin: Any = None,
+        interactive: bool = False,
+        purpose: str = "",
+    ) -> ToolResult:
         self._check_command(command)
-        limit = int(timeout) if timeout is not None else self.command_timeout
+        limit = float(timeout) if timeout is not None else float(self.command_timeout)
         if limit <= 0:
             raise ValueError("command timeout must be positive")
-        try:
-            result = subprocess.run(
-                command,
-                cwd=self.worktree,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=limit,
-                check=False,
+        execution_mode = mode if isinstance(mode, ExecutionMode) else self._execution_mode(mode)
+        lines = self._stdin_lines(stdin)
+        if lines and execution_mode is ExecutionMode.BATCH:
+            # answers given means the caller expects a conversation
+            execution_mode = ExecutionMode.SCRIPTED_INPUT
+        request = CommandRequest(
+            command=command,
+            mode=execution_mode,
+            stdin=lines,
+            timeout=limit,
+            idle_timeout=self.runner.idle_timeout,
+            startup_timeout=self.runner.startup_timeout,
+            interactive=interactive,
+            purpose=purpose,
+        )
+        outcome = self.runner.run(request)
+        if outcome.waiting_for_input and outcome.handle is not None:
+            self.pending_process = outcome.handle
+        elif outcome.handle is None:
+            self.pending_process = None
+        return self._to_result(outcome, tool="run_command")
+
+    def answer_pending(self, text: str) -> ToolResult | None:
+        """Send the user's answer to the live process and report how it went."""
+        handle = self.pending_process
+        if handle is None:
+            return None
+        handle.send(text)
+        outcome = self.runner.wait(handle)
+        self.pending_process = outcome.handle
+        result = self._to_result(outcome, tool="run_command")
+        result.prompt = outcome.prompt or result.prompt
+        return result
+
+    def _to_result(self, outcome: CommandOutcome, *, tool: str) -> ToolResult:
+        stdout = outcome.stdout.strip()
+        stderr = outcome.stderr.strip()
+        error: str | None = stderr or None
+        if outcome.timed_out and not error:
+            error = (
+                f"command {outcome.timeout_kind} timeout after "
+                f"{outcome.duration_ms / 1000:.1f}s: {outcome.command}"
             )
-        except subprocess.TimeoutExpired:
-            return ToolResult(
-                tool="run_command",
-                success=False,
-                error=f"command timed out after {limit}s: {command}",
-            )
+        if outcome.waiting_for_input:
+            error = None
         return ToolResult(
-            tool="run_command",
-            success=result.returncode == 0,
-            output=result.stdout,
-            error=result.stderr or None,
-            exit_code=result.returncode,
+            tool=tool,
+            success=outcome.success,
+            output=stdout,
+            error=error,
+            exit_code=outcome.exit_code,
+            mode=str(outcome.mode),
+            cwd=outcome.cwd,
+            timed_out=outcome.timed_out,
+            timeout_kind=str(outcome.timeout_kind),
+            interactive_detected=outcome.interactive_detected,
+            waiting_for_input=outcome.waiting_for_input,
+            prompt=outcome.prompt,
+            termination_reason=outcome.termination_reason,
+            stdin_sent=outcome.stdin_sent,
         )
 
     def _externalize(self, result: ToolResult) -> ToolResult:

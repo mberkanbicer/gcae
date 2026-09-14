@@ -35,6 +35,7 @@ class ContextBuilder:
         working: WorkingMemory | None = None,
         step_tool_calls: int = 0,
         max_tool_calls: int = 0,
+        evidence: Sequence[str] = (),
     ) -> Context:
         pinned = [
             record
@@ -106,6 +107,9 @@ class ContextBuilder:
                 ]
             )
         optional_lines.extend(f"Observation: {item}" for item in observations[-5:])
+        if evidence:
+            optional_lines.append("Execution evidence (what actually happened):")
+            optional_lines.extend(f"  {item}" for item in evidence[-8:])
         optional_lines.extend(
             f"Memory[{record.id}|{record.kind}]: {record.content}"
             for record in records

@@ -95,6 +95,29 @@ class RequestModal(InstructionModal):
         )
 
 
+class ProcessInputModal(InstructionModal):
+    """Answer a live process. The value is sent to its stdin and never written to the log."""
+
+    def __init__(self, command: str, prompt: str, sensitive: bool = False) -> None:
+        label = "sensitive input · not recorded" if sensitive else "sent to the process stdin"
+        super().__init__(
+            title="Process input required",
+            hint=f"{label} · Enter sends · Esc cancels",
+            placeholder=prompt or "type the answer the process is waiting for",
+        )
+        self.command = command
+        self.prompt = prompt
+
+    def compose_body(self) -> ComposeResult:
+        if self.command:
+            yield Static(Text(f"  {self.command}", style="dim"), id="dialog-body-text")
+        if self.prompt:
+            yield Static(Text(f"  {self.prompt}", style="bold"), id="dialog-body-text-prompt")
+        yield Static(Text(self.dialog_hint), id="dialog-hint")
+        yield Input(placeholder=self.placeholder, id="dialog-input", password=False)
+        yield Static("", id="dialog-ack")
+
+
 class ConfirmStopModal(DialogScreen):
     """Stopping is consequential: ask before discarding an active candidate."""
 

@@ -208,6 +208,51 @@ class BannerPanel(Panel):
                 )
                 lines.append(_row("recover", rescue))
                 lines.extend(_work_location_rows(state, ui))
+        elif state is not None and state.status == "blocked":
+            title = Text("RUN BLOCKED", style=f"bold {STYLES['warning']}")
+            for chunk in _wrap(
+                state.blocked_reason or "no safe autonomous path remains",
+                width - LABEL_WIDTH,
+                3,
+            ):
+                lines.append(_row("blocked", chunk))
+            if state.unblock_hint:
+                for chunk in _wrap(f"unblocks with: {state.unblock_hint}", width - LABEL_WIDTH, 2):
+                    lines.append(_row("unblock", Text(chunk, style=STYLES["accent"])))
+            if state.accepted_commit:
+                lines.append(
+                    _row(
+                        "trusted",
+                        Text(
+                            f"{short_id(state.accepted_commit)} · accepted work is safe on "
+                            f"{state.branch}",
+                            style=STYLES["success"],
+                        ),
+                    )
+                )
+            lines.append(
+                _row("next", Text("press i to send input or instructions", style=STYLES["muted"]))
+            )
+        elif ui.pending_input is not None:
+            title = Text("INPUT REQUIRED", style=f"bold {STYLES['warning']}")
+            prompt = str(ui.pending_input.get("prompt") or "")
+            for chunk in _wrap(prompt, width - LABEL_WIDTH, 2):
+                lines.append(_row("prompt", chunk))
+            lines.append(
+                _row(
+                    "process",
+                    elide(str(ui.pending_input.get("command") or ""), width - LABEL_WIDTH),
+                )
+            )
+            lines.append(
+                _row(
+                    "next",
+                    Text(
+                        "press i to send the answer (the process is still alive)",
+                        style=STYLES["muted"],
+                    ),
+                )
+            )
         elif state is not None and state.status == "complete":
             title = Text("RUN COMPLETE", style=f"bold {STYLES['success']}")
             verification = ui.verification or {}
@@ -444,6 +489,34 @@ class ActivityPanel(Panel):
         else:
             rows.append(_row("goal", Text("waiting for the first plan", style=STYLES["muted"])))
 
+        if ui.pending_input is not None:
+            # a live process is waiting for the user: say so instead of showing a timeout
+            prompt = str(ui.pending_input.get("prompt") or "input required")
+            rows.append(
+                Text("INPUT REQUIRED", style=f"bold {STYLES['warning']}")
+            )
+            rows.append(
+                _row(
+                    "process",
+                    Text(
+                        elide(str(ui.pending_input.get("command") or ""), width - LABEL_WIDTH)
+                    ),
+                )
+            )
+            for chunk in _wrap(f"the process is waiting for: {prompt}", width - LABEL_WIDTH, 2):
+                rows.append(_row("prompt", Text(chunk, style=STYLES["warning"])))
+            rows.append(
+                _row(
+                    "state",
+                    Text(
+                        "WAITING FOR USER · press i to send the answer",
+                        style=STYLES["accent"],
+                    ),
+                )
+            )
+            self.render_block("", rows[:budget])
+            return
+
         if action is not None and action.kind == "model":
             role = action.label or ui.provider_role or "model"
             what = "waiting" if action.state == "waiting" and not ui.stream else "generating"
@@ -479,6 +552,18 @@ class ActivityPanel(Panel):
                 )
         elif action is not None and action.state != "waiting":
             rows.append(_row("action", Text(elide(action.label, width - LABEL_WIDTH))))
+            if ui.execution_mode:
+                mode_detail = ui.execution_mode.replace("_", " ").upper()
+                if ui.stdin_lines:
+                    mode_detail += f" · {ui.stdin_lines} answers queued"
+                elif ui.interactive:
+                    mode_detail += " · may ask for input"
+                rows.append(
+                    _row(
+                        "mode",
+                        Text(elide(mode_detail, width - LABEL_WIDTH), style=STYLES["accent"]),
+                    )
+                )
             if action.target:
                 rows.append(
                     _row(

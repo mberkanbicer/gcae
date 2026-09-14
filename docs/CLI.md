@@ -62,6 +62,24 @@ warn that the built-in fake provider is about to be used instead of failing cryp
 - `inspect` prints objective, plan, verification per criterion, merge state and pending question;
   `--json` emits the persisted state verbatim.
 
+## Prune
+
+Run records accumulate under the state directory (`runs/<run-id>/` each: state, events, worktree
+history). `prune` deletes the oldest records, keeping the newest `--keep` (default 10):
+
+```
+gcae prune --dry-run          # list what would be deleted
+gcae prune --keep 20          # keep the 20 newest, delete the rest
+gcae prune --keep 0           # delete every run record
+```
+
+Pruning removes run records only — it never touches repositories or worktrees, and it never
+deletes a run whose repository lock is held: that is a live run in another process, however old its
+record is. Two further guards keep pruning from breaking anything: a record whose merge is still
+recorded is kept (it holds the pre-merge/merge commit pair that `gcae undo` reverses from) unless
+`--force` says otherwise, and unreadable records are reported and skipped, not silently kept or
+deleted.
+
 ## Merge / undo
 
 A completed run is merged into the branch you currently have checked out, so the work is visible in

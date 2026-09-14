@@ -105,6 +105,19 @@ def build_parser() -> argparse.ArgumentParser:
     undo.add_argument("--config", type=Path)
     undo.add_argument("--runtime-dir", type=Path)
 
+    prune = subparsers.add_parser("prune", help="delete the oldest run records")
+    prune.add_argument(
+        "--keep", type=int, default=10, help="keep this many newest runs (default: 10)"
+    )
+    prune.add_argument("--dry-run", action="store_true", help="list what would be deleted")
+    prune.add_argument(
+        "--force",
+        action="store_true",
+        help="also delete records whose merge is still recorded (their `gcae undo` is lost)",
+    )
+    prune.add_argument("--config", type=Path)
+    prune.add_argument("--runtime-dir", type=Path)
+
     merge = subparsers.add_parser(
         "merge", help="merge a completed run branch into the current branch"
     )
@@ -423,6 +436,60 @@ def _list_runs(runtime_dir: Path) -> None:
         )
 
 
+def _prune_runs(runtime_dir: Path, keep: int, dry_run: bool, force: bool = False) -> None:
+    """Delete the oldest run records beyond `keep`, never touching a run whose repository lock
+    is held — that is a live run in another process, however old its record is.
+
+    A recorded merge is the only piece of run data that git does not already have (the
+    pre-merge/merge commit pair), so `gcae undo` stops working without it; such records are
+    kept unless `force` says otherwise."""
+    import shutil
+
+    runs_dir = Path(runtime_dir).expanduser() / "runs"
+    if not runs_dir.is_dir():
+        print("no runs found")
+        return
+    states: list[tuple[AgentState, Path]] = []
+    for state_file in sorted(runs_dir.glob("*/state.json")):
+        try:
+            states.append((StateStore(state_file).load(), state_file.parent))
+        except (OSError, ValueError) as exc:
+            print(f"gcae: skipping {state_file}: {exc}", file=sys.stderr)
+    states.sort(key=lambda pair: pair[0].updated_at, reverse=True)
+    pruned = 0
+    for state, run_dir in states[keep:]:
+        if state.merge is not None and not force:
+            print(
+                f"gcae: keeping {state.run_id} (its merge is still recorded; pruning would "
+                "break `gcae undo` for it — pass --force to delete it anyway)",
+                file=sys.stderr,
+            )
+            continue
+        lock = RunLock(runtime_dir, Path(state.source_repo))
+        if lock.path.exists():
+            try:
+                lock.acquire()
+            except RuntimeError as exc:
+                print(
+                    f"gcae: keeping {state.run_id} (its repository is locked: {exc})",
+                    file=sys.stderr,
+                )
+                continue
+            lock.release()
+        stamp = state.updated_at.isoformat(timespec="seconds")
+        if dry_run:
+            print(f"would prune {state.run_id} ({state.status}, updated {stamp})")
+        else:
+            shutil.rmtree(run_dir)
+            print(f"pruned {state.run_id} ({state.status}, updated {stamp})")
+        pruned += 1
+    if pruned:
+        verb = "would be pruned" if dry_run else "pruned"
+        print(f"{pruned} run record(s) {verb}")
+    else:
+        print("nothing to prune")
+
+
 def _inspect_run(run_id: str, runtime_dir: Path, as_json: bool) -> None:
     state = StateStore(_state_path(runtime_dir, run_id)).load()
     if as_json:
@@ -562,6 +629,9 @@ def main(argv: list[str] | None = None) -> None:
                 file=sys.stderr,
             )
         runtime_dir = (args.runtime_dir or config.state_dir).expanduser()
+        if args.command == "prune":
+            _prune_runs(runtime_dir, args.keep, args.dry_run, args.force)
+            return
         if args.command == "input":
             runtime = _build_runtime(args, config, runtime_dir)
             runtime.resume(args.run_id)

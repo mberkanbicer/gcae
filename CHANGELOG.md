@@ -4,6 +4,17 @@ All notable changes to GCAE are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] — 2026-09-14
+
+### Added
+
+- **`gcae prune`** — run-data retention. Deletes the oldest run records beyond `--keep` (default
+  10), with `--dry-run` to list first. Never touches repositories or worktrees, never deletes a run
+  whose repository lock is held (a live run in another process), and skips unreadable records with a
+  report instead of deleting them. A record whose merge is still recorded is kept (that record is
+  the only place the pre-merge/merge commit pair lives, so `gcae undo` needs it) unless `--force`
+  says to delete it anyway.
+
 ## [0.3.0] — 2026-09-14
 
 ### Added

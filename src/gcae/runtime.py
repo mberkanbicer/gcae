@@ -259,6 +259,7 @@ class Runtime:
         self._same_failure_count = 0
         self.repeated_failure_limit = 3
         self._degrade_notified: dict[str, bool] = {}
+        self._failed_over: set[str] = set()
         self.validator_commands = list(validator_commands or [])
         self.max_steps = max_steps
         self.command_timeout = command_timeout
@@ -582,6 +583,8 @@ class Runtime:
             if decision is None:
                 reason = self._decision_error or "provider returned no usable decision"
                 self._decision_error = None
+                if self._failover("controller", reason):
+                    continue  # retry the same decision on the fallback model
                 outcome = self._recover(f"provider output: {reason}", plan)
                 if outcome is RecoveryAction.CONTINUE:
                     continue
@@ -742,6 +745,8 @@ class Runtime:
         except ProviderOutputError as exc:
             logger.error("evaluator failure: %s", exc)
             self._remember("failure", f"evaluator failure: {exc}", immutable=True)
+            if self._failover("evaluator", str(exc)):
+                return False
             outcome = self._recover(f"evaluator output: {exc}", plan)
             if outcome is RecoveryAction.CONTINUE:
                 return False
@@ -923,6 +928,48 @@ class Runtime:
         return _ProgressReporter(self, role, provider)
 
     # ------------------------------------------------------------------ recovery
+
+    def _failover(self, role: str, reason: str) -> bool:
+        """Move a broken role onto the configured fallback model before giving up on it.
+
+        A provider outage is the one failure the recovery advisor cannot reason its way out of:
+        the advisor would have to call the same broken endpoint. When ``models.escalation`` is
+        configured it becomes the fallback for the role that failed, once per role, and the
+        run continues on that model instead of ending.
+        """
+        fallback = self.role_providers.get("escalation")
+        if fallback is None or role in self._failed_over:
+            return False
+        target: object | None = None
+        if role == "controller":
+            self._escalated = True  # provider_for("controller") now returns the fallback
+            target = fallback
+        elif role == "planner":
+            # PlannerLike is a protocol; only a model-backed planner has a provider to swap
+            planner: Any = self.planner
+            target = getattr(planner, "provider", None)
+            if target is not None:
+                planner.provider = fallback
+        elif role == "evaluator":
+            target = getattr(self.evaluator, "provider", None)
+            if target is not None:
+                self.evaluator.provider = fallback  # type: ignore[attr-defined]
+        elif role == "verifier":
+            target = getattr(self.verifier, "judge", None)
+            if target is not None:
+                self.verifier.judge = fallback
+        if target is None:
+            return False
+        self._failed_over.add(role)
+        model = str(getattr(fallback, "model", fallback.__class__.__name__))
+        self._remember("failure", f"{role} provider failed, falling back to {model}: {reason}")
+        self._event(
+            "model_failover",
+            self.state.phase if self.state else None,
+            payload={"role": role, "model": model, "reason": reason},
+        )
+        logger.warning("%s failed (%s); continuing on %s", role, reason, model)
+        return True
 
     def _recovery_provider(self) -> Provider:
         """The advisor runs on [models.recovery], else on the controller's model (which is

@@ -28,6 +28,17 @@ with `provider request stalled: no data for Ns …` and the run hands that to th
 instead of waiting forever. Measured against a socket that accepts and never answers: 3s to detection
 with `stall_timeout = 3`.
 
+### Failover
+
+A provider outage is the one failure the recovery advisor cannot reason its way out of — the advisor
+would have to call the same broken endpoint. When `[models.escalation]` is configured it becomes the
+fallback: if the controller, planner, evaluator or verifier model fails (an invalid model id, a 4xx,
+a dead endpoint), that role is switched to the fallback once and the run continues. The switch is
+recorded as a `model_failover` event with the failing role and the new model.
+
+Verified live with a deliberately invalid controller model: `model_failover` → run completed in 11s
+instead of failing.
+
 Streaming is fail-soft. An endpoint that answers a streaming request with a buffered body, or refuses
 it outright (HTTP 4xx), is retried automatically without streaming; a *timeout* is not retried that
 way, because a silent endpoint would simply be silent again.

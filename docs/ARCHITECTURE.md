@@ -121,6 +121,7 @@ without the user:
 | rejected step, non-productive attempts, step budget exhausted | recovery ladder: change hypothesis → escalate → **diagnose** → ask → fail |
 | unusable provider output, stall, evaluator output, unexpected exception | same ladder: the advisor reads the trace |
 | transient network failure (429, 5xx, dropped connection) | retried with exponential backoff and `Retry-After` support before it is even a failure |
+| a role's model is down or misconfigured | **failover**: the role moves to `models.escalation` once and the run continues on it (`model_failover`) |
 | planner outage (with user criteria) | deterministic planner takes over, `planner_fallback` event |
 | planner outage (no criteria) | the advisor may supply the criteria and a first step (`success_criteria_adopted`) |
 | merge conflict | handed to the agent inside the run worktree; re-verified; branch kept if it cannot be resolved |

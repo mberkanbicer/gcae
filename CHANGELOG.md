@@ -4,6 +4,16 @@ All notable changes to GCAE are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.6] — 2026-09-14
+
+### Added
+
+- **Model failover.** A provider outage was the one failure recovery could not fix, because the
+  advisor would have to call the same broken endpoint. With `[models.escalation]` configured, a
+  failing controller, planner, evaluator or verifier role now moves to that fallback model once per
+  role and the run continues (`model_failover` event). If the fallback fails too, the ladder takes
+  over. Verified live: an invalid controller model id → failover → run completed in 11 seconds.
+
 ## [0.1.5] — 2026-09-14
 
 ### Added

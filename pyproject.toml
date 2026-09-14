@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "gcae"
-version = "0.1.5"
+version = "0.1.6"
 description = "Git-Checkpointed Adaptive Execution runtime"
 readme = "README.md"
 requires-python = ">=3.12"

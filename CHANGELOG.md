@@ -17,6 +17,10 @@ All notable changes to GCAE are documented here. The format follows
 
 ### Added
 
+- **The wiki is published** — 14 task-oriented pages under
+  <https://github.com/mberkanbicer/gcae/wiki>, generated from `wiki/` with `tools/publish_wiki.sh`,
+  and refreshed to describe 0.1.7 behaviour (self-recovery, streaming, retries, failover, the
+  repository lock, degraded mode, configuration discovery).
 - **Configuration discovery** for `gcae run` and `resume` (see *Fixed* below).
 - **One run per repository.** `run`, `resume`, `merge` and `undo` take a per-repository lock before
   touching the source branch; a second run on the same repository is refused with the id of the run

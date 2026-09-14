@@ -1,85 +1,89 @@
 # CLI Reference
 
-```text
-gcae run     <repository> [request] [--criterion TEXT]... [--constraint TEXT]...
-             [--merge|--no-merge] [--no-auto-bootstrap] [--tui|--headless]
-             [--config PATH] [--runtime-dir PATH]
-gcae resume  <repository> <run-id> [--tui|--headless]
-gcae list    [--config PATH] [--runtime-dir PATH]
-gcae inspect <run-id> [--json]
-gcae merge   <repository> <run-id>
-gcae undo    <repository> <run-id>
 ```
+gcae [-h] [--version] {run,resume,list,inspect,undo,merge} ...
+```
+
+## Configuration discovery
+
+Without `--config`, GCAE uses `$GCAE_CONFIG`, then `./config.toml`, then
+`~/.config/gcae/config.toml`, and prints the file it took (`gcae: config config.toml`). With none
+present the built-in defaults apply — including the *fake* provider, which is why `run` and `resume`
+say so instead of failing later.
 
 ## `gcae run`
 
-Starts a new run. The request is optional on a terminal: without it the dashboard asks for the task
-and the planner derives the success criteria. In headless mode a request is required.
+```
+gcae run <repository> [request] [--config FILE] [--runtime-dir DIR]
+         [--constraint TEXT]... [--criterion TEXT]...
+         [--headless | --tui] [--merge | --no-merge] [--no-auto-bootstrap]
+```
 
-| Flag | Effect |
+| Argument | Meaning |
 | --- | --- |
-| `--criterion TEXT` | a checkable success criterion; merged with planner-inferred ones |
-| `--constraint TEXT` | a hard constraint the agent must respect |
-| `--merge` / `--no-merge` | force or disable the merge of the verified branch |
-| `--no-auto-bootstrap` | refuse to create the base commit instead of creating it |
-| `--tui` / `--headless` | force the dashboard or the non-interactive path |
-| `--config PATH` | TOML configuration file |
-| `--runtime-dir PATH` | state directory (default `${XDG_STATE_HOME:-~/.local/state}/gcae`) |
+| `request` | the task in words; omit it in a terminal to be asked interactively |
+| `--criterion` | a checkable success criterion (repeatable) — see [Concepts](Concepts) |
+| `--constraint` | a hard constraint the work must respect (repeatable) |
+| `--headless` / `--tui` | force non-interactive output, or force the dashboard |
+| `--merge` / `--no-merge` | override the merge decision for this run |
+| `--no-auto-bootstrap` | refuse to create the base commit a run needs |
+| `--runtime-dir` | where runs, worktrees and memory live |
 
 ## `gcae resume`
 
-Continues a run from its persisted state: stopped, failed, or `waiting_for_user`. Speculative work
-is rolled back to the last accepted checkpoint first, so a resume never continues from a half-applied
-candidate. A worktree that was deleted is recreated from the run branch.
+```
+gcae resume <repository> <run-id> [--headless | --tui] [--merge | --no-merge]
+```
+
+Continues a run that stopped, failed or is `waiting_for_user`. The worktree is recreated from the run
+branch and the accepted commit is restored before the loop resumes.
 
 ## `gcae list`
 
-```
-run id         status             steps  updated              objective
-d1ae6b3af14d   complete               1  2026-09-13T22:08:13  fix quoted records
-```
+Runs from newest to oldest with id, status, accepted steps, update time and objective.
 
 ## `gcae inspect`
 
-Objective, plan, per-criterion verification, merge state and pending question. `--json` prints the
-persisted state verbatim, which is the ground truth for anything the dashboard shows.
+```
+gcae inspect <repository> <run-id> [--json]
+```
+
+Objective, plan and step status, verification per criterion, merge record, pending question, the
+recovery diagnosis (root cause and correction) and any `degraded:` subsystems. `--json` prints the
+persisted state verbatim.
 
 ## `gcae merge` / `gcae undo`
 
-`merge` applies the same guards as automatic merging: the run must be complete (or have accepted
-checkpoints), not already merged, and its branch must still point at the accepted commit; the
-repository must be clean. Conflicts are handed to the agent, which resolves them in the run worktree
-and re-verifies before the merge is retried.
+```
+gcae merge <repository> <run-id>          # bring accepted commits into the checkout
+gcae undo <repository> <run-id>           # reverse a recorded merge (the branch stays)
+```
 
-`undo` resets the source branch to the recorded pre-merge commit and refuses when the repository is
-dirty or HEAD moved after the merge.
+A merge that conflicts is handed to the agent to resolve and re-verify before it is applied.
 
 ## Exit codes
 
 | Code | Meaning |
 | --- | --- |
-| `0` | the run completed **and** its work reached your checkout |
-| `1` | handled error, a run that did not complete, or a merge that did not happen |
+| `0` | the run finished and verified (`status == "complete"`) |
+| `1` | a handled error (bad config, refused repository, refused merge) or a run that ended `failed`, `stopped` or `waiting_for_user` |
 | `2` | argparse usage error |
+
+Scripted callers can rely on the exit status; a run that ends `waiting_for_user` exits non-zero even
+though its accepted work is intact.
 
 ## Reading a summary
 
-```console
-run d1ae6b3af14d: complete
-accepted steps: 1, commit: d176e5f2effb87af4108bafb4ea0b5d699fecc59
-verification: 1/1 criteria passed
-worktree: ~/.local/state/gcae/worktrees/d1ae6b3af14d
-branch: gcae/d1ae6b3af14d merged into main (undo: gcae undo ~/csv-parser d1ae6b3af14d)
-files: parser.py
-documents: ~/csv-parser (in your working tree now)
+```
+gcae: config config.toml
+gcae: merged gcae/2f4ac1b0c3e9 into main (b21f0aa1 -> 5c01d9ab)
+gcae: undo with: gcae undo /repo 2f4ac1b0c3e9
 ```
 
 | Line | Meaning |
 | --- | --- |
-| `accepted steps` / `commit` | how many steps passed evaluation, and the trusted commit |
-| `verification` | how many success criteria passed on the final tree |
-| `worktree` | where the agent worked |
-| `branch` | merge state plus the exact undo command |
-| `files` | what the run produced |
-| `documents` | which folder holds it right now |
-| `question` | present only when the run is `waiting_for_user`, with the command to answer |
+| `gcae: config <file>` | which configuration was used |
+| `pending question:` | the run needs your decision; answer with `gcae resume` or `i` in the dashboard |
+| `degraded: …` | a subsystem failed and the run continued without it |
+| `gcae: error: …` | the failure reason; accepted commits are still on the branch |
+| `gcae: unexpected error: …` | an unhandled bug — the run directory and commits are intact |

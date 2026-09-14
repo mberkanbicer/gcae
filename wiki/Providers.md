@@ -1,85 +1,80 @@
 # Providers
 
-GCAE speaks the OpenAI chat-completions contract. That covers Ollama, llama.cpp server, LM Studio,
-vLLM, OpenRouter, and most hosted endpoints.
+GCAE speaks the OpenAI-compatible chat completions API, which covers OpenRouter, Ollama, LM Studio,
+vLLM and most hosted gateways.
 
 ## Minimal configuration
 
 ```toml
 [provider]
-kind = "http"                            # or "openrouter"
-base_url = "http://localhost:11434/v1"
-model = "qwen2.5-coder:14b"
-api_key_env = "OPENROUTER_API_KEY"       # only for remote endpoints
-context_limit = 8192
-timeout = 60
+kind = "openrouter"
+base_url = "https://openrouter.ai/api/v1"
+model = "qwen/qwen3-coder"
+api_key_env = "OPENROUTER_API_KEY"
+
+[provider.generation]
+temperature = 0.0
+max_tokens = 2048
 ```
 
-`kind = "fake"` is a deterministic offline provider used by the test suite and by
-`tools/tui_demo.py`; it never calls the network.
+A local server needs no key (`base_url = "http://localhost:11434/v1"`). `kind = "fake"` is a
+built-in deterministic provider used by the test suite and the demo scripts; it is the default when
+no configuration is found, which is why GCAE warns instead of failing obscurely.
 
 ## What GCAE sends
 
-- `messages`: one user message containing the reconstructed context.
-- `response_format: {"type": "json_object"}` unless `json_mode = false`.
-- `temperature` (default `0.0`), `max_tokens` (default `min(1024, context_limit)`).
-- everything in `[provider.generation]`, merged verbatim, so provider-specific options
-  (for example OpenRouter's `reasoning` block) can be set there.
-
-Every reply is validated against a pydantic schema. A reply that does not match is re-requested with
-a bounded repair budget; the run never proceeds on free-form text.
+Every call is a fresh, reconstructed prompt: the objective, hard constraints, success criteria, the
+current goal, the accepted commit, relevant memory and the recent trace. Prompts are *not* a growing
+conversation, and pinned data cannot be budgeted away. Output must match a Pydantic schema; invalid
+output is repaired a bounded number of times, then fails the call (and the run's recovery ladder
+takes over) rather than being guessed at.
 
 ## Reasoning models
 
-Reasoning models can spend the entire output budget deliberating. GCAE detects both failure modes and
-recovers:
+Reasoning models can spend the whole output budget thinking and return empty content. If that
+happens:
 
-| Symptom | Cause | Behaviour |
-| --- | --- | --- |
-| empty `content`, `finish_reason=length`, large `reasoning` | JSON mode makes the model deliberate to the token limit | retried **without** `response_format` |
-| valid JSON start, cut off mid-document | `max_tokens` too small for the requested schema | retried with **double** the output budget, bounded by `context_limit` |
+- `json_mode = false` (some models produce empty content when forced into JSON mode);
+- raise `max_tokens` (2048 is enough for the planner schema);
+- keep the model for `[models.recovery]` / `[models.escalation]` where thinking helps, and use a
+  faster model for the controller and planner.
 
-Recommended for reasoning models:
+## Streaming, stalls and retries
 
-```toml
-[provider]
-json_mode = false
+| Behaviour | Detail |
+| --- | --- |
+| Streaming | on by default; the runtime records first-token latency, characters, reasoning characters and a heartbeat every 10s |
+| Buffered fallback | an endpoint that answers without a stream is still accepted |
+| Stall detection | no data for `stall_timeout` fails with `provider request stalled: …`, never an indefinite wait |
+| Retries | 429 / 5xx / timeouts / dropped connections retry with exponential backoff, jitter and `Retry-After` support |
+| No retry | 400/404/422 — configuration problems; the recovery ladder is the better answer than repetition |
 
-[provider.generation]
-max_tokens = 2048      # the planner schema needs roughly 1500
-```
+## Failover and escalation
 
-Failures name the real cause, for example:
+A dead or misconfigured model is the one failure self-diagnosis cannot fix (the advisor would have to
+call the same endpoint), so `[models.escalation]` is used instead:
 
-```
-provider returned no text content (finish_reason=length, 36648 chars of reasoning,
-8192 completion tokens, model=…) — the model hit its output budget; raise
-[provider.generation] max_tokens or set [provider] json_mode = false
-```
+| Trigger | Effect |
+| --- | --- |
+| controller, planner, evaluator or verifier call fails | that role moves to the fallback model once (`model_failover`) |
+| the same rejection repeats three times | the controller escalates (`model_escalated`) before the run would ask you |
+| the evaluator's model fails | the *same* work is judged again on the fallback instead of being thrown away |
 
-## Roles and escalation
-
-```toml
-[models.escalation]
-model = "a/stronger-model"
-```
-
-The escalation role is used after repeated failures and once when a run stagnates, before the run
-asks you. Other roles (`planner`, `evaluator`, `verifier`) can be overridden the same way.
+Verified live: a deliberately invalid controller model id → `model_failover` → the task completed in
+11 seconds.
 
 ## Verifier kinds
 
-`[verifier] kind = "deterministic"` (default) only accepts criteria GCAE can check itself.
-`kind = "hybrid"` adds a model judge for prose criteria; the judge must answer with structured
-evidence and fails closed on provider errors, empty evidence, or a negative verdict. The judge never
-overrides a deterministic failure.
+`deterministic` runs the criteria as code. `hybrid` adds a model judge for criteria that cannot be
+expressed exactly; the judge fails **closed** — an unparseable or uncertain judgement is a failure,
+never a pass.
 
 ## Provider troubleshooting
 
-| Symptom | Fix |
+| Symptom | Explanation |
 | --- | --- |
-| `no API key configured for …` | set `api_key` or `api_key_env`, or use a local endpoint |
-| `Connection refused` | start the local server, or fix `base_url` |
-| `404` | wrong model name or wrong `base_url` path (`/v1/chat/completions` is appended) |
-| endless empty responses | set `json_mode = false` and raise `max_tokens` (see above) |
-| very slow runs | lower `context_limit`, pick a smaller model, or use `[planner] kind = "deterministic"` |
+| `provider output: …` and the run stops | the model produced unusable output repeatedly; the run's diagnosis is in `gcae inspect` |
+| `provider request stalled` / `provider stream stalled` | the endpoint accepted the request and produced nothing within `stall_timeout` |
+| empty content, no error | reasoning model with a small output budget — see above |
+| `no API key configured for …` | set `provider.api_key` or `provider.api_key_env` |
+| every call fails instantly | wrong model id or base URL; check with a single `curl` first |

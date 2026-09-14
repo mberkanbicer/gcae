@@ -2,57 +2,60 @@
 
 ## Requirements
 
-| Requirement | Notes |
+| Requirement | Detail |
 | --- | --- |
-| Python 3.12 or newer | CI tests 3.12 and 3.13 |
-| Git | any recent version; GCAE shells out to `git` |
-| A model provider | a local Ollama endpoint needs no API key; OpenRouter or any OpenAI-compatible API also works |
+| Python | 3.12 or newer |
+| Git | any recent version; GCAE drives `git` itself |
+| A model | an OpenAI-compatible endpoint: OpenRouter, a local Ollama/LM Studio server, or any HTTP provider that speaks `POST /chat/completions` |
+| OS | Linux (developed and tested on Linux/WSL); the repository lock uses `fcntl` |
+
+Runtime dependencies are exactly `pydantic`, `httpx` and `textual`. There is no vector database, no
+embedding model, no message broker, no agent framework.
+
+## Install from a release
+
+```bash
+python -m venv .venv
+.venv/bin/pip install gcae-0.1.7-py3-none-any.whl    # from the Releases page
+```
 
 ## Install from the repository
-
-The package is not published on PyPI yet.
 
 ```bash
 git clone https://github.com/mberkanbicer/gcae.git
 cd gcae
 python -m venv .venv
-.venv/bin/python -m pip install -e ".[dev]"     # runtime + test/lint tooling
+.venv/bin/pip install -e .
 .venv/bin/gcae --version
 ```
-
-Use `pip install -e .` instead if you do not want the development tools (pytest, ruff, mypy, build).
 
 ## Verify the installation
 
 ```bash
-.venv/bin/gcae --version          # 0.1.0
-.venv/bin/gcae --help
-.venv/bin/pytest -q               # 170 tests, no network needed
+.venv/bin/gcae --version     # prints the installed version
+.venv/bin/gcae list          # prints "no runs found" on a fresh state directory
+.venv/bin/pytest -q          # optional: the full test suite
 ```
-
-The test suite uses deterministic providers and `httpx.MockTransport`; it never calls a real model
-and never needs an API key.
 
 ## Where GCAE keeps its state
 
-Everything GCAE writes lives outside your repositories, under
+Everything the runtime owns lives outside your repositories, under
 `${XDG_STATE_HOME:-~/.local/state}/gcae`:
 
 ```
-~/.local/state/gcae/
-├── memory.db                 SQLite FTS5 memory, cumulative across runs
-├── runs/<run-id>/            state.json, events.jsonl, diffs/, tool-results/
-└── worktrees/<run-id>        one isolated worktree per run
+state.json            per-run state (checkpoint, plan, verification, degradations, recovery)
+events.jsonl          append-only event log — the trace self-diagnosis reads
+memory.db             SQLite memory (facts, decisions, failure lessons) that survives rollback
+worktrees/<run>/      the isolated worktree of a run
+locks/<digest>.lock    one run per source repository
 ```
 
-`[runtime] state_dir` and `[runtime] worktree_dir` move these. The state directory must be writable;
-GCAE reports a clear error when it is not.
+Nothing is written into the repository you point GCAE at, except the commits the run accepted and
+the recorded merge.
 
 ## Uninstall
 
 ```bash
-.venv/bin/python -m pip uninstall gcae
+.venv/bin/pip uninstall gcae
+rm -r "${XDG_STATE_HOME:-$HOME/.local/state}/gcae"   # optional: history, memory and worktrees
 ```
-
-Removing `~/.local/state/gcae` deletes all run history and memory. GCAE never stores anything inside
-the repositories it works on, apart from the commits it creates and merges.

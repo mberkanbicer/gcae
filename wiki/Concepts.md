@@ -2,62 +2,78 @@
 
 ## Semantic step
 
-The unit of progress. A step has a goal, a rationale, an expected result, an intended scope and
-validation requirements. Tools run freely *inside* a step — reading five files is one step, not five
-units of progress. A step ends when the agent declares it complete, and then it is validated and
-evaluated.
+A **semantic step** is one meaningful unit of progress — "add the health endpoint", not "call
+`write_file`". Inside a step the agent may call many tools in any order. Validation and evaluation
+happen either when the agent calls `complete_semantic_step` or when it exhausts
+`max_tool_calls_per_step`.
+
+The unit of progress is the verified step, not the tool call.
 
 ## Trusted state and speculative state
 
-- **Trusted state** is the last accepted checkpoint: a commit on the run branch that passed
-  deterministic validation and the evaluation that followed it.
-- **Speculative state** is everything the agent changed in its worktree since that checkpoint.
-
-Rejection discards the speculative state (`reset --hard` plus cleanup, inside the worktree only) and
-never touches the trusted commits.
+| | Trusted | Speculative |
+| --- | --- | --- |
+| What | commits accepted by validation + evaluation | the working tree between checkpoints |
+| Where | `gcae/<run-id>` branch, `accepted_commit` | the run's worktree, untracked files included |
+| On rejection | untouched | `reset --hard accepted_commit` + `clean -fdx` inside the worktree |
 
 ## Run phases
 
 ```
-ANALYZE → PLAN → EXECUTE → VALIDATE → EVALUATE → CHECKPOINT | ROLLBACK → VERIFY → COMPLETE
+PLAN → EXECUTE → OBSERVE → VALIDATE → EVALUATE → ACCEPT / ROLLBACK / REPLAN → VERIFY
 ```
 
-`FAILED` is reachable from every phase, and every failure keeps the accepted commits. Phase changes
-are emitted as events, so the dashboard and the JSONL log always agree on where the run is.
+`state.json` records the phase, so a stopped or crashed run resumes where it was. Illegal
+transitions are refused rather than guessed (a recovery from `checkpoint` re-enters through
+`execute`).
 
 ## Validation, evaluation, verification
 
-Three different questions, asked in that order:
+| Stage | Question | Who answers |
+| --- | --- | --- |
+| Validation | did the step break anything, is it in scope, do the commands pass? | deterministic code |
+| Evaluation | did the step advance the objective? | deterministic evaluator, or a model (`hybrid`) |
+| Verification | are all success criteria met in the final tree? | deterministic criteria, plus an optional model judge that fails closed |
 
-1. **Validation** is deterministic and cheap: your configured commands, `git diff --check`, scope
-   violations, dependency-manifest changes, workspace hygiene. It produces evidence, not opinions.
-2. **Evaluation** is a structured model decision over that evidence: `accept`, `rollback`, `replan`,
-   `continue` or `finish_candidate`, with a reason, a progress score and memories to promote.
-3. **Verification** is the final gate: every success criterion is checked again on the finished tree,
-   plus a hygiene check, before the run may complete.
+Validation is evidence, not a gate: out-of-scope edits and new files are recorded and handed to the
+evaluator instead of silently failing the step.
 
 ## Success criteria
 
-Checkable statements, either supplied with `--criterion` or derived by the planner from your request.
-The deterministic forms are listed in the [Quickstart](Quickstart). Unsupported criteria fail closed
-unless `[verifier] kind = "hybrid"` enables a model judge, which must cite evidence and fails closed
-on provider errors or empty evidence.
+Criteria are how "done" becomes checkable:
+
+```
+file exists: docs/API.md
+file contains: app.py :: /health
+file contains exactly: Makefile :: test:
+command succeeds: python -m pytest -q
+```
+
+If a run has no criteria the planner derives them, and a run that cannot be verified is never
+declared complete.
+
+## Self-recovery
+
+A run that cannot make progress **changes strategy before it gives up**: it records a decision
+memory ("the previous approach is exhausted"), escalates to the stronger model, diagnoses its own
+trace (`events.jsonl`, validation evidence, failure lessons, the candidate diff) and only then asks
+you, and only then fails. Recovery is bounded (`recovery_attempts`, `recovery_budget`) and never
+replaces evidence: a correction is an ordinary semantic step that still has to pass every gate.
+
+See [Architecture](Architecture) for the complete failure taxonomy.
 
 ## Memory
 
-Facts, decisions, observations, failure lessons and immutable user instructions live in SQLite and
-are retrieved by relevance (FTS5). Memory is cumulative: a rollback removes code, never knowledge.
-That is what makes a replanned step different from the attempt that just failed.
+Memory is cumulative while execution is reversible: facts, decisions, failure lessons and user
+instructions live in SQLite and survive rollbacks and runs. Immutable failure lessons are surfaced
+first. See [Memory and Context](Memory-and-Context).
 
 ## Worktree isolation
 
-One run, one branch (`gcae/<run-id>`), one worktree under the state directory. Your checkout is not
-the workshop; it receives the result only through the recorded, reversible merge.
+One worktree per run, under the state directory, on branch `gcae/<run-id>`. Your working tree is not
+the workshop; it changes only when a verified run merges, and `gcae undo` reverses that.
 
 ## Intervention
 
-- **Pause / resume** — pause before the next model or tool action.
-- **Stop** — end the run at an iteration boundary; state is persisted and resumable.
-- **Instruction** — inject a constraint or correction; the runtime stores it as immutable memory,
-  discards speculative work and replans.
-- **Question** — when the agent cannot proceed it asks (`waiting_for_user`) instead of guessing.
+You can pause, stop, or inject an instruction while a run is going. An instruction is immutable
+memory: it discards speculative work, replans and re-arms a run that was waiting for you.

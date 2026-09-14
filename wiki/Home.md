@@ -10,13 +10,26 @@ merge is reversible.
 **Trusted state is committed state.** Nothing reaches your branch unless validation, evaluation and
 final verification accepted it.
 
+## What you get
+
+| Guarantee | How it is kept |
+| --- | --- |
+| Verified work only | `accepted_commit` is always a commit that passed validation, evaluation and final verification. |
+| Failure is cheap | A rejection is `reset --hard` plus cleanup **inside the worktree only**; your checkout is untouched. |
+| Rollback is not amnesia | Facts, decisions and failure lessons live in SQLite and survive every rollback. |
+| Self-recovery is the default | Stagnation, unusable model output, a stall, an exhausted budget, a planner outage, a transient network error, a dead model and even an unexpected exception are diagnosed from the run's own trace before anything stops. |
+| A slow model never looks frozen | Model calls stream; the dashboard shows elapsed time, first-token latency, character counts, and a heartbeat every 10s. Silence past `stall_timeout` fails honestly. |
+| One run per repository | `run`, `resume`, `merge` and `undo` hold a lock, so two runs cannot interleave two merges into one branch. |
+| The loop owns Git | Base commit, branch, worktree, checkpoints, merges, conflict resolution and cleanup are automatic. The model is never allowed to run `git`. |
+| It explains itself | Every failure has a reason in the log, the CLI summary and the dashboard; lost subsystems are reported instead of hidden. |
+
 ## Where to go next
 
 | If you want to… | Read |
 | --- | --- |
 | install it and run something | [Installation](Installation), [Quickstart](Quickstart) |
 | understand the vocabulary | [Concepts](Concepts) |
-| know how it is built | [Architecture](Architecture) |
+| know how it is built and how it recovers | [Architecture](Architecture) |
 | use every command | [CLI Reference](CLI-Reference) |
 | work in the dashboard | [Dashboard](Dashboard) |
 | point it at a model | [Configuration](Configuration), [Providers](Providers) |
@@ -30,10 +43,12 @@ final verification accepted it.
 - Not a multi-agent framework: one agent, one run, no orchestration graph.
 - Not a hosted service: everything runs locally; the only network calls go to your model provider.
 - Not a substitute for your judgement: when a task is ambiguous the run asks instead of guessing.
+- Not a goal-ignoring optimiser: it stops, asks or fails rather than merging work it cannot verify.
 
 ## Project
 
 - Source: <https://github.com/mberkanbicer/gcae>
+- Releases (wheel + sdist): <https://github.com/mberkanbicer/gcae/releases>
 - License: MIT
 - Documentation: [`docs/`](https://github.com/mberkanbicer/gcae/tree/main/docs) in the repository
 - Changelog: [`CHANGELOG.md`](https://github.com/mberkanbicer/gcae/blob/main/CHANGELOG.md)

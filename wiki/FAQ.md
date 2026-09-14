@@ -1,46 +1,57 @@
 # FAQ
 
-**Is this a wrapper around an LLM that runs shell commands?**
-Partly. The difference is what happens around each action: deterministic validation, a structured
-evaluation decision, a Git checkpoint or rollback, and a final verification gate before anything
-reaches your branch.
+**Does GCAE modify my working tree?**
+Not while it works. It edits a worktree under the state directory, one per run. Your checkout changes
+only when a verified run merges, and `gcae undo` reverses that merge.
 
-**What makes it "Git-checkpointed"?**
-Every accepted semantic step is a commit on the run branch, and `accepted_commit` is always a tree
-that passed validation, evaluation and verification. Rejection is `reset --hard` inside the run's own
-worktree, so the failure costs nothing but the tokens spent.
+**Do I need a GPU or a local model?**
+No. Any OpenAI-compatible endpoint works. A local Ollama/LM Studio server is fine for small tasks; a
+stronger model produces better plans and corrections.
 
-**Why does it not just use `git stash` in my working tree?**
-Because your checkout is not the workshop. One run owns one worktree; the only thing GCAE ever does to
-your checkout is the recorded, reversible merge.
+**How do I know the work is actually correct?**
+Deterministic criteria decide completion: `file exists:`, `file contains:`, `file contains exactly:`,
+`command succeeds:`. A model judge is opt-in (`verifier kind = "hybrid"`) and fails closed. GCAE never
+declares success on the model's word alone.
 
-**Does it need a specific model?**
-No. Anything OpenAI-chat-compatible works, including a local Ollama model. Quality varies: the loop's
-guards (repetition, step budget, validation, verification) keep a weak model bounded, and
-`[models.escalation]` lets a stronger model take over when it struggles.
+**What happens when the model is wrong or the endpoint dies?**
+The run recovers in this order: retry transient errors with backoff → fail over to
+`[models.escalation]` → escalate on repeated failures → diagnose its own trace → ask you → fail.
+Bounded at every step, and accepted commits are never lost.
 
-**Can it run several tasks at once?**
-Not in the same repository. One run, one worktree, no cross-run lock: two concurrent runs on one
-repository are unsupported.
+**Can I run it unattended?**
+Yes: `gcae run <repo> "task" --criterion … --headless --merge`. Exit code `0` means the run finished
+and verified; anything else means read `gcae inspect`.
 
-**Where does my data go?**
-Nowhere except your model provider. Memory, events, diffs and tool results stay in
-`~/.local/state/gcae`. Nothing is uploaded; there is no telemetry.
+**Can two runs work on the same repository?**
+No — that would interleave two merges into one branch. The second run is refused with the id of the
+run holding the lock. Runs on different repositories are independent.
 
-**Can I use it in CI?**
-Yes — `--headless` prints the state as JSON on stdout, the log on stderr, and exits non-zero unless
-the run completed *and* the work reached the checkout. `[runtime] auto_merge = false` keeps CI
-branches separate.
+**What if a run needs to ask me something?**
+It stops as `waiting_for_user`, prints the question, and exits non-zero. Answer with
+`gcae resume`, or press `i` in the dashboard and type your instruction.
 
-**How do I trust the result?**
-By reading the same evidence GCAE read: `gcae inspect` for criteria and verification,
-`runs/<run-id>/diffs/` for what each step changed, and `git log` on your branch for the commits that
-were accepted.
+**Where do my prompt and code go?**
+To the provider you configured, and nowhere else. Prompts are reconstructed per call and are not kept
+as a growing conversation. Memory stays in a local SQLite file.
 
-**Does it ever modify files outside the worktree?**
-No. The command tool enforces workspace confinement, and the runtime's Git operations target the run
-worktree or the recorded merge only.
+**How much does a run cost?**
+Each iteration is one controller call (plus planner, evaluator, verifier and possible recovery calls).
+`max_steps` bounds iterations, `recovery_budget` bounds self-corrections, so a run has a known ceiling.
+Fast models for controller and planner, a strong one for recovery, is the configuration that has
+worked best in practice.
 
-**Is the model allowed to run `git`?**
-No. `git reset|clean|commit|worktree|…` are blocked in the command tool; all Git work is owned by the
-runtime. That is what keeps checkpoints trustworthy.
+**Can I edit files while a run is going?**
+Its worktree is separate, so yes — but the merge may then conflict. A conflicting merge is handed to
+the agent, re-verified and retried, or left on the branch with an explanation.
+
+**Is there an undo for everything?**
+`gcae undo` reverses a recorded merge. Rejected steps never needed undoing (they were rolled back
+inside the worktree), and a stopped run keeps its branch, so nothing is lost by failure.
+
+**Why does it say the planner is `deterministic`?**
+`[planner] kind = "auto"` uses the deterministic planner when your criteria are already explicit and a
+model planner otherwise. The deterministic planner is also the fallback when a planner call fails.
+
+**Does it work without a TUI?**
+Yes. The engine never imports Textual; `--headless` is a first-class mode and the only difference is
+where the events are rendered.

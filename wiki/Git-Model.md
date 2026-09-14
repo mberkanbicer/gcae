@@ -2,63 +2,74 @@
 
 ## Branches and worktrees
 
-Each run creates exactly one branch `gcae/<run-id>` and one worktree
-(`<state_dir>/worktrees/<run-id>`) from a committed base. The agent edits only the worktree. Your
-checkout changes only when the run is merged, and that merge is recorded.
+| Thing | Name | Notes |
+| --- | --- | --- |
+| Run branch | `gcae/<run-id>` | created from the current `HEAD` of the source branch |
+| Worktree | `<state_dir>/worktrees/<run-id>` | exactly one per run, never inside your repository |
+| Base commit | your `HEAD` | recorded as the run's starting point |
+| Checkpoint | `gcae: <goal>` | one commit per accepted step |
+| Final commit | `gcae: verified final state` | only if the final tree was dirty |
 
 ## Who does the Git work
 
-The loop does — you never have to run `git` for GCAE to work:
+The runtime. Base commit, commit identity fallback, branch, worktree, checkpoints, merges, conflict
+resolution, cleanup and undo are all performed by GCAE; there is no workflow that requires you to run
+`git`, and the model cannot: `git` subcommands such as `reset`, `clean`, `commit`, `worktree`,
+`checkout` and `merge` are blocked in `run_command`.
 
-| Situation | What GCAE does |
-| --- | --- |
-| `git init` with no commits | creates the base commit (`--allow-empty` when the tree is empty) |
-| uncommitted changes before a run | commits them as `gcae: base commit of the current working tree` — never discards them |
-| uncommitted changes found at merge time | commits them as the base the merge builds on |
-| no `user.name` / `user.email` | commits as `GCAE <gcae@localhost>` |
-| completed run | merges the verified branch into your current branch |
-| run that failed after accepting steps | merges that accepted work, labelled unverified |
-| conflicting merge | aborts it in your checkout, replays it inside the run worktree, has the agent resolve the markers, re-verifies, retries the merge |
-| worktree after merging | removed by GCAE; the branch is kept so `gcae undo` and re-merging still work |
-| worktree deleted by hand | pruned or recreated from the run branch |
-| your repository is mid-merge / rebase / cherry-pick | **refused** — that state belongs to you |
+## One run per repository
+
+`run`, `resume`, `merge` and `undo` take a per-repository lock (`<state_dir>/locks/<digest>.lock`)
+before they touch the source branch. A second run is refused with the id of the run holding it:
+
+```
+gcae: error: another GCAE run is already working on /repo (run 46aa6c93aa43) — wait for it to
+finish before starting a second run on the same repository
+```
+
+The lock lives in the state directory, not in the repository, and the operating system releases it if
+the process dies. Runs on different repositories never block each other.
 
 ## Checkpoints
 
-Only an accepted evaluation creates a commit:
-
-```
-gcae: <goal>            one accepted semantic step
-gcae: verified final state   the final tree after verification, when files changed
-```
-
-`accepted_commit` in `state.json` is therefore always a tree that passed validation, evaluation and
-verification. Rollback is `reset --hard <accepted_commit>` plus `clean -fdx`, scoped to the worktree.
+An accepted step commits everything the step changed — tracked, staged and untracked — as
+`gcae: <goal>`. That commit becomes `accepted_commit`, the only tree a rejection resets to. A
+rejection never touches an earlier accepted commit.
 
 ## Merge and undo
 
-Merging prefers `--ff-only` and falls back to `--no-ff`. The pre-merge and merge commits are recorded
-in `state.json`:
+When a run completes, its branch is merged into the source branch (fast-forward when possible) and
+the merge is recorded in `state.json` (`pre_merge_commit`, `merge_commit`, `target_branch`):
 
-```bash
-gcae merge ~/src/project <run-id>     # merge later, resolving conflicts through the agent
-gcae undo  ~/src/project <run-id>     # reset the branch to the recorded pre-merge commit
+```
+gcae: merged gcae/2f4ac1b0c3e9 into main (b21f0aa1 -> 5c01d9ab)
+gcae: undo with: gcae undo /repo 2f4ac1b0c3e9
 ```
 
-`gcae undo` refuses when the source repository is dirty or when HEAD moved after the merge, so it
-cannot silently discard unrelated work. Undo does **not** delete the run branch, so the merge can be
-redone.
+| Flag | Effect |
+| --- | --- |
+| `--merge` | merge a verified branch without asking |
+| `--no-merge` | never merge this run's branch (`[runtime] auto_merge = false` makes this the default) |
+| `[runtime] merge_accepted_on_failure` | a failed or stopped run may still bring its accepted commits in |
+
+If the merge cannot happen — dirty checkout, branch moved, nothing to merge — the reason is printed
+and the branch stays for `gcae merge <repo> <run-id>`.
+
+## Conflict resolution
+
+A conflicting merge is brought into the run's own worktree, the agent resolves the conflicted files
+as a normal semantic step, the result is re-verified and the merge is retried. Merge markers are
+never committed and never pushed into the source branch. If resolution fails, the branch is kept
+intact and reported.
 
 ## Untracked and generated files
 
-- `.gitignore` is respected everywhere: ignored files are never committed by bootstrap or checkpoint.
-- Generated caches (`__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.coverage`, `*.pyc`)
-  are cleaned before validation and again after verification, so they can never reach a checkpoint.
-- Untracked directories are reported at file level, which is what makes scope checks and `+N -M`
-  counts accurate.
+The candidate diff is `git diff HEAD` plus untracked files, so the agent sees what it actually wrote.
+Generated and ignored artifacts are cleaned before a checkpoint: they never enter a commit, and
+`clean -fdx` on rollback stays inside the worktree.
 
 ## Bootstrap limits
 
-Automatic base commits are bounded: more than 2000 files or 50 MB of pending changes is refused with
-the count and size, so a repository full of unignored build output cannot be swallowed silently.
-`--no-auto-bootstrap` (or `[runtime] auto_bootstrap = false`) restores manual control.
+When a repository needs a base commit, GCAE stages what `.gitignore` allows, bounded to 2000 files
+and 50 MB, and reports it (`created a base commit …`). A repository mid-merge or mid-rebase is
+refused with an explanation rather than modified.

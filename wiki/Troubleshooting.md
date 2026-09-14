@@ -1,64 +1,77 @@
 # Troubleshooting
 
+Start with the trace; it usually says exactly what happened:
+
+```bash
+gcae inspect <repo> <run-id>                     # status, criteria, recovery, degradations
+ls  "${XDG_STATE_HOME:-$HOME/.local/state}/gcae/runs/<run-id>/"
+tail -50 "${XDG_STATE_HOME:-$HOME/.local/state}/gcae/runs/<run-id>/events.jsonl"
+```
+
 ## The run stops by itself
 
-| Status | Meaning | What to do |
-| --- | --- | --- |
-| `waiting_for_user` | the agent ran out of ideas or needs a decision | answer it: `i` in the dashboard, or `gcae resume <repo> <run-id>` |
-| `failed: execution stagnated after asking` | you were asked already and nothing changed | `gcae resume` after an instruction, or start a narrower task |
-| `failed: step budget exhausted after N iterations` | the model kept working without finishing | raise `[runtime] max_steps` or give a smaller task |
-| `failed: provider output` | the model returned something unusable repeatedly | see [Providers](Providers) |
-| `failed: merge conflict unresolved` | the agent could not resolve a conflicting merge | the branch is intact; fix the conflict and run `gcae merge` |
+Runs stop for reasons that are all recorded, and accepted work is always kept:
 
-In every case the accepted checkpoints survive, and they are merged into your checkout (labelled
-unverified when the final verification did not pass).
+| Status | Meaning | Next step |
+| --- | --- | --- |
+| `complete` | every criterion verified | nothing; the branch is merged |
+| `failed: provider output …` | the model produced unusable output even after retries and a diagnosis | check the model/config, then `gcae resume` |
+| `failed: step budget exhausted …` | `max_steps` reached with the plan unfinished | raise `[runtime] max_steps`, or `gcae resume` — it gets `recovery_budget` extra iterations after a successful diagnosis |
+| `failed: run state could not be written …` | the state file is not writable (disk full, permissions) | fix the filesystem; the accepted commits are still on the branch |
+| `failed: unexpected …` | a bug — the exception is recorded as a lesson | `gcae inspect` shows the reason; the run directory and commits are intact |
+| `waiting_for_user` | the run diagnosed itself and needs your decision | read the question, answer with `gcae resume` (dashboard: press `i`) |
+| `stopped` | you stopped it | `gcae resume` |
 
 ## "Nothing happened" after the run
 
-Read the last two summary lines:
+The work is on the run branch, not in your checkout, when the merge did not happen:
 
-```
-files: parser.py
-documents: ~/src/project (in your working tree now)
+```bash
+git -C <repo> branch --list 'gcae/*'
+gcae merge <repo> <run-id>      # brings the accepted commits into your tree
 ```
 
-`documents:` names the folder that holds the result. While a run is unmerged, the files physically
-live in `~/.local/state/gcae/worktrees/<run-id>` on the run branch.
+The usual causes are a dirty checkout, a branch that moved, or `auto_merge = false`. The reason is
+printed at the end of the run and recorded in `state.json`.
 
 ## GCAE refuses to start
 
-| Message | Meaning |
+| Message | Cause |
 | --- | --- |
-| `source is a subdirectory of a Git repository; pass the repository root: …` | pass the repository root |
-| `source repository has an in-progress merge; finish or abort it …` | that state is yours to finish |
-| `source repository has N uncommitted files (X MB) — GCAE will not auto-commit that much` | commit, stash, or ignore the files first |
-| `runtime directories must be external to the source repository` | move `state_dir`/`worktree_dir` outside the repository |
+| `another GCAE run is already working on <repo> (run …)` | the repository lock; wait for the other run, or check `gcae list` |
+| `repository has an unresolved merge` | a mid-merge/rebased repository is never modified — finish it first |
+| `not a git repository` | point GCAE at a repository, or let it bootstrap one |
+| `no config file found … the built-in default provider is the fake one` | pass `--config`, or create `./config.toml` |
 
-## Merge did not happen
+## A model call stalls
 
-```bash
-gcae inspect <run-id>            # shows the merge record, or the absence of one
-gcae merge ~/src/project <run-id>
-```
+`provider request stalled: no data for 45s` means the endpoint accepted the request and produced
+nothing. Lower `provider.stall_timeout` to notice sooner, check the provider status, and remember
+that a cancelled call is a normal failure the ladder handles. Slowness is visible in the dashboard
+(first-token latency, characters received, a heartbeat every 10 s) — a run that looks frozen for more
+than a heartbeat interval is a bug worth reporting.
 
-Common causes: the repository was dirty (GCAE commits pending edits as the merge base), the branch
-moved past the accepted commit (refused on purpose), or the merge conflicted (handed to the agent).
+## The run says `degraded:`
 
-## A run cannot be resumed
+Memory or the event log failed and the run continued without that subsystem (a locked database, a
+full disk). The work still has to pass every gate; only the record is incomplete. Fix the cause, then
+finish or resume the run. A **state** failure is different: it stops the run rather than continuing
+with a resume point that could be wrong.
 
-`gcae resume` recreates a missing worktree from the run branch. It fails only when the branch itself
-is gone, for example after you deleted it; in that case the recorded merge commit in your own history
-(or `git log --all --grep gcae`) is the remaining trace.
+## The run escalated or failed over
+
+`model_escalated` / `model_failover` mean the model in use changed: the controller moved to
+`[models.escalation]` because the same failure repeated, or because that role's model stopped
+answering. Later decisions use the new model; the timeline and `gcae inspect` say which one.
 
 ## The dashboard shows `measuring…` or empty panels
 
-Git status is collected in a worker thread; on very large repositories it can lag a moment. `d`
-(diff), `l` (logs) and `c` (context) are authoritative.
+Some panels read Git state off the UI thread and show `measuring…` until the first read completes. If
+a panel stays empty while the log advances, press `l` — the raw event log is the ground truth — and
+report it with the run id.
 
 ## Still stuck?
 
-1. `gcae inspect <run-id> --json` — the persisted truth for that run.
-2. `runs/<run-id>/events.jsonl` — every event, in order, with payloads.
-3. `runs/<run-id>/tool-results/` — the exact tool outputs, including full command output.
-4. `DEBUG` logging: `PYTHONUNBUFFERED=1 gcae run … 2>&1 | tee run.log` (the CLI sets the `gcae` logger
-   to INFO; library users can raise it).
+- `gcae list` shows whether the run is really still going.
+- `events.jsonl` ends with the last thing that happened.
+- `gcae undo` reverses a merge you did not want; the branch is never deleted by a failure.

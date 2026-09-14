@@ -23,3 +23,7 @@
 
 - [Troubleshooting](Troubleshooting)
 - [FAQ](FAQ)
+
+---
+
+Self-recovery · streaming · reversible merges · one run per repository

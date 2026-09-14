@@ -2,95 +2,81 @@
 
 ## 1. Configure a provider
 
-```bash
-cp config.example.toml config.toml      # config.toml is gitignored: it holds your API key
+Create `config.toml` in the directory you run GCAE from (or in `~/.config/gcae/config.toml`, or point
+`GCAE_CONFIG` at it — see [Configuration](Configuration)). GCAE prints the file it used:
+
+```toml
+[provider]
+kind = "openrouter"
+base_url = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_API_KEY"
+model = "qwen/qwen3-coder"
+
+[provider.generation]
+temperature = 0.0
+max_tokens = 2048
 ```
 
-Local model (no key):
+A local server needs no key:
 
 ```toml
 [provider]
 kind = "http"
 base_url = "http://localhost:11434/v1"
 model = "qwen2.5-coder:14b"
-
-[validation]
-commands = ["pytest -q"]
 ```
 
-Hosted model:
-
-```toml
-[provider]
-kind = "openrouter"
-base_url = "https://openrouter.ai/api/v1"
-model = "your/model"
-api_key_env = "OPENROUTER_API_KEY"      # or api_key = "..." (never commit this)
-```
+If no config file exists at all, GCAE says so — the built-in default provider is the *fake* one, and
+`run` warns instead of failing later with a confusing model error.
 
 ## 2. Prepare the target repository
 
-Any Git repository works. It does not need to be pristine: GCAE creates the base commit a run needs,
-commits pending edits as that base (without discarding them), and uses `GCAE <gcae@localhost>` when
-no Git identity is configured. A repository in the middle of a merge, rebase or cherry-pick is
-refused, because that state is yours to finish.
+Git repository, a committed base, no merge in progress. If the repository is unborn or dirty, GCAE
+creates the base commit it needs (respecting `.gitignore`, bounded to 2000 files / 50 MB) and reports
+it as a notice; `--no-auto-bootstrap` refuses instead. A repository mid-merge is refused.
 
 ## 3. Run a task
 
 ```bash
-# interactive dashboard: it asks for the task and the planner derives the criteria
-gcae run ~/src/project --config config.toml
+# interactive dashboard: type the task, the planner derives the criteria
+gcae run /path/to/repo
 
-# fully specified, non-interactive
-gcae run ~/src/project "add a --dry-run flag to the importer" \
-  --criterion "command succeeds: pytest -q" \
-  --config config.toml
+# fully specified, non-interactive (reproducible criteria)
+gcae run /path/to/repo "Serve /health on port 8000" \
+  --criterion "file contains: app.py :: /health" \
+  --criterion "command succeeds: python -c 'import app'" \
+  --headless
 ```
-
-Criteria GCAE understands deterministically:
-
-```
-file exists: path/to/file
-file contains: path/to/file :: text
-file contains exactly: path/to/file :: text
-command succeeds: pytest -q
-```
-
-Add `--criterion` for anything the planner might miss; user criteria are merged with inferred ones,
-never overwritten.
 
 ## 4. Read the result
 
-```console
-run d1ae6b3af14d: complete
-accepted steps: 1, commit: d176e5f2effb87af4108bafb4ea0b5d699fecc59
-verification: 1/1 criteria passed
-worktree: ~/.local/state/gcae/worktrees/d1ae6b3af14d
-branch: gcae/d1ae6b3af14d merged into main (undo: gcae undo ~/csv-parser d1ae6b3af14d)
-files: parser.py
-documents: ~/csv-parser (in your working tree now)
+The summary prints the run id, the accepted commit, what changed and whether the merge happened:
+
+```
+gcae: merged gcae/2f4ac1b0c3e9 into main (b21f0aa1 -> 5c01d9ab)
 ```
 
-The last two lines are the ones to read: `files:` lists what the run produced, `documents:` names the
-folder that currently holds it.
+```bash
+gcae inspect <repo> <run-id>          # plan, criteria, verification, recovery, degradations
+gcae inspect <repo> <run-id> --json   # the persisted state, verbatim
+git -C /path/to/repo log --oneline -3
+```
 
 ## 5. Undo, inspect, resume
 
 ```bash
-gcae list                                   # runs, status, accepted steps, merge state
-gcae inspect d1ae6b3af14d                   # objective, plan, verification, merge record
-gcae undo ~/src/project d1ae6b3af14d        # reverse the merge
-gcae resume ~/src/project d1ae6b3af14d      # continue a stopped, failed or waiting run
+gcae list /path/to/repo               # known runs, newest first
+gcae undo /path/to/repo <run-id>      # reverse the merge (the branch stays)
+gcae resume /path/to/repo <run-id>    # continue a run that stopped or is waiting for you
 ```
 
 ## If a run stops
 
-| Status | Meaning | What to do |
-| --- | --- | --- |
-| `complete` | verified, merged | nothing |
-| `waiting_for_user` | the agent needs a decision | answer with `gcae resume` or `i` in the dashboard |
-| `failed: …` | it gave up after bounded attempts | read the reason, then `gcae resume` or start a new run |
-| `stopped` | you stopped it | `gcae resume` |
+| The run is… | What to do |
+| --- | --- |
+| `waiting_for_user` | it diagnosed its own trace and needs a decision; read the question, then `gcae resume` or answer in the dashboard with `i` |
+| `failed: … ` | the reason names the cause; accepted commits are on the branch — `gcae merge` brings them in |
+| `stopped` | you stopped it; `gcae resume` continues from the accepted checkpoint |
+| refused at start | another run holds the repository lock, or the repository is mid-merge — see [Troubleshooting](Troubleshooting) |
 
-Accepted checkpoints survive all four cases, and they are merged into your checkout even when the
-final verification did not pass — labelled as unverified.
+Each of those states keeps the accepted work; nothing is thrown away by a failure.

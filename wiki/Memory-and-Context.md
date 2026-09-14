@@ -1,55 +1,55 @@
 # Memory and Context
 
-GCAE keeps two different kinds of state, and confusing them is the most common way to misread a run.
+## Two systems, two purposes
 
-| | Execution state | Knowledge state |
+| | Memory (`memory.db`) | Context (per call) |
 | --- | --- | --- |
-| Where | Git commits on `gcae/<run-id>` | `memory.db` (SQLite + FTS5) |
-| Lifetime | reversible; discarded on rollback | cumulative; survives rollback, resume and new runs |
-| Used by | Git, verification, merge | the context builder for every model call |
+| Nature | cumulative, survives rollbacks and runs | reconstructed for every model call |
+| Contains | facts, decisions, failure lessons, user instructions, promoted memories | objective, constraints, criteria, goal, accepted commit, relevant memory, recent trace |
+| Never | deleted on rollback | allowed to grow into a conversation |
 
 ## Memory kinds
 
-| Kind | Written by | Meaning |
+| Kind | Written by | Notes |
 | --- | --- | --- |
-| `user_instruction` | run start, instructions, criteria, constraints | immutable; always pinned into context |
-| `failure` | rollbacks, provider failures, verification failures | immutable lesson from something that did not work |
-| `decision` | accepted steps, replans, stagnation | a choice worth remembering |
-| `observation` | tool results | what a tool returned, trimmed to a summary |
-| `fact` | promoted by the evaluator | a durable truth about the project |
-| `artifact` | tool results that wrote files | where a large output was stored |
+| `fact` (and the evaluator's own kinds) | the agent, promoted through an evaluation | durable knowledge; the kind string comes from the evaluation, so it stays open |
+| `decision` | the runtime and the agent | why an approach was chosen or abandoned |
+| `failure` | validation, evaluation, recovery, crashes | **immutable**: lessons are never overwritten |
+| `observation` | the runtime | what a step saw, kept for the next attempt |
+| `user_instruction` | you | immutable: "do not touch the database" survives every replanning |
+| stagnation / replan markers | the runtime (as `decision`) | the change-hypothesis record the ladder writes before trying something else |
 
-Immutable records (`failure`, `user_instruction`) are pinned and can never be trimmed out of context
-— that is what makes "rollback without amnesia" real.
+SQLite FTS5 retrieval ranks by relevance to the current step, and immutable lessons are surfaced
+first, because a repeated mistake is more expensive than a missing fact.
 
 ## Retrieval and budgeting
 
-The context builder assembles, in order: pinned instructions and lessons, current state (objective,
-criteria, plan, working memory, step budget), the current diff, validation evidence, recent
-observations, and FTS5 hits relevant to the objective. It then fills the configured
-`context_limit` by priority and reports what it kept:
+The context builder assembles a prompt and fits it into `provider.context_limit`:
 
-```json
-{"characters": 31200, "estimated_tokens": 7800, "pinned": 6, "omitted": 1}
-```
+1. pinned data first — request, hard constraints, success criteria, current goal, accepted commit,
+   failure lessons; these are never dropped;
+2. then memory and recent observations, ranked and truncated;
+3. then the candidate diff and tool results, trimmed to the budget.
 
-Omitted records stay in the database and remain retrievable. Token counts are estimates
-(`chars / 4`) and are labelled `(est)` wherever they appear.
+If the budget cannot hold the pinned part, the call fails visibly instead of silently dropping a
+constraint.
 
 ## Inspecting the real payload
 
-- Dashboard: `c` opens the context inspector — the sections actually sent, their sizes, and each
-  section's content.
-- Dashboard: `m` opens the memory inspector — records grouped by kind with step, commit, timestamp
-  and source provenance.
-- CLI: `gcae inspect <run-id>` shows persisted state; the raw context of any iteration is in
-  `runs/<run-id>/events.jsonl` and the tool results are in `runs/<run-id>/tool-results/`.
-
-Large tool outputs are externalized to `runs/<run-id>/tool-results/` and referenced by summary plus
-artifact path, so one huge `pytest` run cannot consume the whole budget.
+The dashboard's context screen (`c`) shows the exact prompt the model receives, section by section,
+with the estimated token count — the fastest way to understand a surprising decision. `gcae inspect`
+shows what the run kept as durable knowledge.
 
 ## Working memory
 
-Alongside durable memory, each step carries a small working set — active files, the current blocker,
-hypotheses, findings and pending validations. It is settled into durable memory when a step is
-accepted and cleared when a step is rejected, which keeps the model focused on the current attempt.
+Between checkpoints the run keeps hypotheses, the current step's observations and tool results. On
+rejection the speculative working memory is reset while durable memory stays: that is the whole point
+— the next attempt starts smarter than the failed one, with the failure lesson in hand.
+
+## Degraded memory
+
+If `memory.db` cannot be written (for example a locked database), the run does **not** stop:
+knowledge for that run is lost, the loss is recorded (`runtime_degraded` event, a bounded
+`degradations` list, a WARNING, and a `degraded:` line in the CLI summary) and the work continues.
+State is different: a state file that cannot be written stops the run, because a stale state file
+still looks resumable. See [Architecture](Architecture).

@@ -539,6 +539,7 @@ class Guardian:
         accepted_commit: str | None,
         criteria: list[str],
         verified_criteria: list[str],
+        revalidation_required: list[str] | None = None,
     ) -> FailureCheckResult:
         """Review plan consistency after acceptance, rollback, replan, resume, override.
 
@@ -589,7 +590,10 @@ class Guardian:
                     f"completed step {step.get('id')} has no checkpoint linkage",
                     False, RecoveryAction.MARK_BLOCKED,
                 )
-        unresolved = [c for c in criteria if c not in verified_criteria]
+        unresolved = [
+            c for c in criteria
+            if c not in verified_criteria and c not in (revalidation_required or [])
+        ]
         if unresolved and any(
             str(step.get("status")) in {"pending", "active"} for step in steps
         ):

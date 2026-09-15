@@ -288,3 +288,26 @@ class EventLog:
         data = event.model_dump(mode="json") if hasattr(event, "model_dump") else event
         with self._lock, self.path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(data, sort_keys=True) + "\n")
+
+    def repair_tail(self) -> int:
+        """Drop a torn trailing line left by a crash mid-append; return bytes removed.
+
+        Appends write one full JSON line under the lock, so every line except
+        possibly the last is complete. Only the tail is ever repaired — a corrupt
+        line in the middle is external damage and stays visible, not truncated.
+        """
+        if not self.path.exists():
+            return 0
+        raw = self.path.read_bytes()
+        lines = raw.splitlines(keepends=True)
+        last = lines[-1] if lines else b""
+        if last.endswith(b"\n"):
+            try:
+                json.loads(last)
+                return 0
+            except ValueError:
+                pass  # written but corrupt: still only ever the tail
+        keep = len(raw) - len(last)
+        with self._lock, self.path.open("r+b") as handle:
+            handle.truncate(keep)
+        return len(raw) - keep

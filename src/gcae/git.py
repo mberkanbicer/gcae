@@ -282,6 +282,10 @@ class GitRepository:
     def branch_head(self, branch: str) -> str:
         return self._run("rev-parse", f"refs/heads/{branch}")
 
+    def commit_subject(self, commit: str) -> str:
+        """One-line subject of a commit, used to explain reconciliation to the user."""
+        return self._run("log", "-1", "--format=%s", commit)
+
     def is_ancestor(self, commit: str, descendant: str) -> bool:
         """True when ``commit`` is an ancestor of ``descendant`` (or equal).
 

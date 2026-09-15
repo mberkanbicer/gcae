@@ -43,6 +43,7 @@ from .models import (
     PlanVersion,
     RecoveryRecord,
     ReplanPatch,
+    ReplanReason,
     RunPhase,
     SemanticStep,
     StepInvalidation,
@@ -601,11 +602,27 @@ class Runtime:
         self.memory = MemoryStore(self.runtime_dir / "memory.db")
         self._backfill_memory_repos()
         self.events = EventLog(path / "events.jsonl")
+        dropped = self.events.repair_tail()
+        if dropped:
+            self._event(
+                "resume_reconciled",
+                payload={"action": "truncated_torn_event_line", "bytes": dropped},
+            )
+        # a crash between the atomic state write's two steps leaves this debris behind
+        (path / "state.json.write").unlink(missing_ok=True)
         self.repo.validate_source()
         # GCAE owns its worktree: recreate it from the run branch instead of giving up
         self.repo.ensure_worktree(self.state.branch, Path(self.state.worktree))
+        self._reconcile_resume_git_state()
         if self.state.accepted_commit:
             self.repo.rollback(self.state.accepted_commit)
+            # a crash or a manual reset can leave the branch behind the trusted
+            # checkpoint: repair the plan to the boundary git can still prove
+            self._reconcile_plan_with_rollback(
+                self.state.accepted_commit,
+                "resume found execution behind the trusted checkpoint",
+                category="resume_reconciliation",
+            )
         if self.state.status != "complete":
             self.state.status = "running"
             self.state.phase = RunPhase.PLAN
@@ -619,6 +636,41 @@ class Runtime:
         if not self._plan_health_check():
             return self.state
         return self.state
+
+    def _reconcile_resume_git_state(self) -> None:
+        """Report what a crash left on the branch before the trusted checkpoint is restored.
+
+        A checkpoint commit whose ``state.json`` write never happened is correct to
+        discard (the plan never recorded it), but discarding it silently would look
+        exactly like lost work. Every discard and every divergence is explained.
+        """
+        assert self.state is not None and self.repo is not None
+        target = self.state.accepted_commit
+        if not target:
+            return
+        head = self.repo.current_commit()
+        if head == target:
+            return
+        if self.repo.is_ancestor(target, head):
+            self._event(
+                "resume_reconciled",
+                self.state.phase,
+                payload={
+                    "action": "discarded_unrecorded_checkpoint",
+                    "commit": head,
+                    "subject": self.repo.commit_subject(head),
+                },
+            )
+        else:
+            self._event(
+                "resume_reconciled",
+                self.state.phase,
+                payload={
+                    "action": "branch_diverged_from_trusted_checkpoint",
+                    "commit": head,
+                    "target": target,
+                },
+            )
 
     def submit_process_input(self, text: str) -> AgentState:
         """Answer a live process that is waiting for input only the user can provide.
@@ -2243,11 +2295,7 @@ class Runtime:
         current: PlanStep | None,
         *,
         reason: str,
-        category: Literal[
-            "invalid_assumption", "failure", "new_evidence", "user_override",
-            "dependency_invalidated", "blocked_path", "requirement_change",
-            "verified_better_route",
-        ],
+        category: ReplanReason,
         instruction: str,
         invalidate: list[StepInvalidation] | None = None,
     ) -> ReplanPatch:
@@ -2288,8 +2336,47 @@ class Runtime:
         target.locked = False
         target.invalidated_reason = reason
         target.invalidated_evidence_ids = list(evidence_ids)
+        self._unverify_criteria_of_steps([step_id])
         self._remember("decision", f"step {step_id} invalidated: {reason}")
         return True
+
+    def _unverify_criteria_of_steps(self, step_ids: list[str]) -> list[str]:
+        """Move verified criteria whose supporting evidence died with these steps.
+
+        A criterion verified against evidence produced by a step that no longer
+        survives is not unresolved — its *proof* is gone, so it needs revalidation,
+        which final verification performs anyway. The claim moves, never silently
+        disappears; with no evidence linkage the final gate still re-checks it.
+        """
+        if not step_ids or self.memory is None or self.state is None:
+            return []
+        dead = set(step_ids)
+        report = self.state.last_verification
+        passing = {
+            result.criterion: result.evidence_ids
+            for result in (report.criteria if report is not None else [])
+            if result.status == "pass"
+        }
+        try:
+            records = self.memory.evidence_for_run(self.state.run_id)
+        except Exception:  # noqa: BLE001 - degraded memory must not block invalidation
+            return []
+        steps_of = {r.id: r.trajectory_step_id for r in records if r.id is not None}
+        moved: list[str] = []
+        for criterion in list(self.state.verified_criteria):
+            cited = passing.get(criterion) or []
+            if not cited:
+                continue
+            if any(steps_of.get(evidence_id) in dead for evidence_id in cited):
+                self.state.verified_criteria.remove(criterion)
+                if criterion not in self.state.revalidation_required:
+                    self.state.revalidation_required.append(criterion)
+                moved.append(criterion)
+        if moved:
+            self._remember(
+                "decision", f"revalidation required for: {', '.join(moved)}"
+            )
+        return moved
 
     def _invalidation_closure(
         self, invalidate: list[StepInvalidation]
@@ -2361,6 +2448,7 @@ class Runtime:
                 accepted_commit=state.accepted_commit,
                 criteria=list(state.success_criteria),
                 verified_criteria=list(state.verified_criteria),
+                revalidation_required=list(state.revalidation_required),
             )
         except Exception as exc:  # noqa: BLE001 - supervision boundary
             return self._guardian_crash("plan_health", exc) is not None
@@ -2518,7 +2606,7 @@ class Runtime:
         if report.passed and report.hygiene_passed:
             for result in report.criteria:
                 if result.status == "pass" and result.criterion not in self.state.verified_criteria:
-                    self.state.verified_criteria.append(result.criterion)
+                    self._mark_criterion_verified(result.criterion)
             if self._trajectory is not None:
                 self._end_trajectory(
                     TrajectoryStepStatus.ACCEPTED,
@@ -3195,7 +3283,16 @@ class Runtime:
             # the plan must agree about which completed steps are still valid
             self._reconcile_plan_with_rollback(target, reason)
 
-    def _reconcile_plan_with_rollback(self, target: str, reason: str) -> None:
+    def _mark_criterion_verified(self, criterion: str) -> None:
+        """A criterion passed final verification: verified, and no longer pending revalidation."""
+        assert self.state is not None
+        self.state.verified_criteria.append(criterion)
+        if criterion in self.state.revalidation_required:
+            self.state.revalidation_required.remove(criterion)
+
+    def _reconcile_plan_with_rollback(
+        self, target: str, reason: str, *, category: str = "failure"
+    ) -> None:
         """Invalidate completed steps whose checkpoints did not survive the rollback.
 
         Steps at checkpoints still reachable from the target stay completed; the rest
@@ -3236,6 +3333,7 @@ class Runtime:
                     f"rollback to {target[:12]} moved execution behind this step: {reason}"
                 )
                 invalidated.append(step.id)
+        self._unverify_criteria_of_steps(invalidated)
         if invalidated:
             self._remember(
                 "decision",
@@ -3243,7 +3341,7 @@ class Runtime:
             )
             self._plan_bump(
                 reason=f"rollback boundary: {reason}",
-                category="failure",
+                category=category,
                 preserved=survivors,
                 invalidated=invalidated,
                 replaced=[],

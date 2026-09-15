@@ -93,6 +93,14 @@ class StepInvalidation(BaseModel):
     evidence_ids: list[int] = Field(default_factory=list)
 
 
+ReplanReason = Literal[
+    "invalid_assumption", "failure", "new_evidence", "user_override",
+    "dependency_invalidated", "blocked_path", "requirement_change",
+    "verified_better_route", "resume_reconciliation",
+]
+"""Why a plan was revised. The runtime, not the model, picks the category."""
+
+
 class ReplanPatch(BaseModel):
     """A structured, bounded plan change: the affected segment only.
 
@@ -102,11 +110,7 @@ class ReplanPatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
     base_plan_version: int = 1
     reason: str = ""
-    reason_category: Literal[
-        "invalid_assumption", "failure", "new_evidence", "user_override",
-        "dependency_invalidated", "blocked_path", "requirement_change",
-        "verified_better_route",
-    ] = "failure"
+    reason_category: ReplanReason = "failure"
     affected_from_step_id: str = ""
     preserve_step_ids: list[str] = Field(default_factory=list)
     invalidate: list[StepInvalidation] = Field(default_factory=list)
@@ -454,6 +458,9 @@ class AgentState(BaseModel):
     plan_history: list[PlanVersion] = Field(default_factory=list)
     #: success criteria verified against evidence and unaffected since
     verified_criteria: list[str] = Field(default_factory=list)
+    #: verified criteria whose supporting evidence died with an invalidated step:
+    #: not unresolved — the proof is gone, final verification re-checks them cheaply
+    revalidation_required: list[str] = Field(default_factory=list)
     current_step_id: str | None = None
     accepted_commit: str | None = None
     phase: RunPhase = RunPhase.ANALYZE

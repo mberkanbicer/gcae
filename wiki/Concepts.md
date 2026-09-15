@@ -43,6 +43,14 @@ PLAN → EXECUTE → OBSERVE → VALIDATE → EVALUATE → ACCEPT / ROLLBACK / R
 transitions are refused rather than guessed (a recovery from `checkpoint` re-enters through
 `execute`).
 
+A *process death* is a resume with reconciliation, never a lost run: unrecorded checkpoints
+are discarded and named, branch divergence is restored forward, the plan is repaired to the
+boundary git can prove (verified criteria whose proof died move to `revalidation_required`),
+torn event tails are truncated, merge intent persisted before `git merge` guarantees the
+undo record, and a blocked run stays blocked until answered or forced (`gcae resume
+--force`). Every repair is reported; nothing is silently healed. A real SIGKILL killed
+after the first checkpoint and resumed in a second process is a test.
+
 ## Validation, evaluation, verification
 
 | Stage | Question | Who answers |

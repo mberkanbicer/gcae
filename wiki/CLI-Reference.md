@@ -32,11 +32,15 @@ gcae run <repository> [request] [--config FILE] [--runtime-dir DIR]
 ## `gcae resume`
 
 ```
-gcae resume <repository> <run-id> [--headless | --tui] [--merge | --no-merge]
+gcae resume <repository> <run-id> [--headless | --tui] [--merge | --no-merge] [--force]
 ```
 
 Continues a run that stopped, failed or is `waiting_for_user`. The worktree is recreated from the run
-branch and the accepted commit is restored before the loop resumes.
+branch and the accepted commit is restored before the loop resumes. Whatever a crash left behind is
+reconciled and *reported* (`resume_reconciled` notices: discarded unrecorded checkpoint, branch
+divergence, torn event line, plan invalidation). A `blocked` or `waiting_for_user` run is **held**,
+not restarted — the CLI prints the reason and hint; `--force` overrides openly, and an instruction
+(TUI `i`) answers it instead.
 
 ## `gcae list`
 

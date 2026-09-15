@@ -39,6 +39,7 @@ from .models import (
     MergeRecord,
     Observation,
     PendingInput,
+    PendingMerge,
     PlanStep,
     PlanVersion,
     RecoveryRecord,
@@ -145,6 +146,34 @@ def merge_verified_run(
             f"run {state.run_id} is already merged into {state.merge.target_branch}; "
             f"run 'gcae undo {state.source_repo} {state.run_id}' first"
         )
+    if state.pending_merge is not None and state.branch:
+        # crash-window marker: a merge was intended. If it already happened, the
+        # source branch carries the merge and the record is backfilled from git —
+        # never merged twice, never left without an undo record.
+        marker = state.pending_merge
+        try:
+            merged_already = (
+                marker.target_branch == repo.current_branch()
+                and repo.source_commit() != marker.pre_merge_commit
+                and repo.is_ancestor(state.branch, repo.source_commit())
+            )
+        except GitError:
+            merged_already = False
+        if merged_already:
+            record = MergeRecord(
+                branch=marker.branch,
+                target_branch=marker.target_branch,
+                pre_merge_commit=marker.pre_merge_commit,
+                merge_commit=repo.source_commit(),
+            )
+            state.merge = record
+            state.pending_merge = None
+            persist()
+            return record
+        if marker.branch != state.branch or marker.target_branch != repo.current_branch():
+            # stale marker from a different target: forget it and merge fresh
+            state.pending_merge = None
+            persist()
     if not state.branch:
         raise RuntimeError(f"run {state.run_id} has no branch to merge")
     if state.accepted_commit:
@@ -163,6 +192,12 @@ def merge_verified_run(
         # merge builds on (bounded, reported, reversible with git reset --soft HEAD~1).
         repo.bootstrap_source_repository()
     target = repo.current_branch()
+    # persist intent before the merge: a crash between `git merge` and the record
+    # write is then reconcilable by ancestry on the next attempt
+    state.pending_merge = PendingMerge(
+        branch=state.branch, target_branch=target, pre_merge_commit=repo.source_commit()
+    )
+    persist()
     pre, merged = repo.merge_branch(state.branch)
     record = MergeRecord(
         branch=state.branch,
@@ -171,6 +206,7 @@ def merge_verified_run(
         merge_commit=merged,
     )
     state.merge = record
+    state.pending_merge = None
     persist()
     return record
 
@@ -583,7 +619,7 @@ class Runtime:
         self._persist()
         return self.state
 
-    def resume(self, run_id: str) -> AgentState:
+    def resume(self, run_id: str, *, force: bool = False) -> AgentState:
         path = self.runtime_dir / "runs" / run_id
         self.release_lock()
         self._run_lock = RunLock(self.runtime_dir, self.source_repo, f"run {run_id}")
@@ -623,7 +659,25 @@ class Runtime:
                 "resume found execution behind the trusted checkpoint",
                 category="resume_reconciliation",
             )
+        if self.state.status in {"blocked", "waiting_for_user"} and not force:
+            # an asked run stays asked: the question that stopped it survives the
+            # restart and is answered with an instruction or --force — a plain
+            # resume must never silently restart autonomous work
+            self._persist()
+            self._publish_repository_notices()
+            self._event(
+                "run_resumed",
+                self.state.phase,
+                payload={"run_id": run_id, "held": self.state.status},
+            )
+            return self.state
         if self.state.status != "complete":
+            if force:
+                self._event(
+                    "resume_forced", payload={"overrode": self.state.status}
+                )
+                self.state.blocked_reason = None
+                self.state.unblock_hint = None
             self.state.status = "running"
             self.state.phase = RunPhase.PLAN
             self.state.pending_question = None
@@ -788,6 +842,8 @@ class Runtime:
         if not self.state.status.startswith("complete"):
             # an override re-arms a run that stalled waiting for the user
             self.state.status = "running"
+            self.state.blocked_reason = None
+            self.state.unblock_hint = None
         self._remember("user_instruction", f"user override: {text}", immutable=True)
         if self.repo is not None and self.repo.worktree is not None and self.repo.status():
             self._rollback(f"user override: {text}")

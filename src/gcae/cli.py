@@ -78,6 +78,11 @@ def build_parser() -> argparse.ArgumentParser:
     resume = subparsers.add_parser("resume")
     resume.add_argument("repository", type=Path)
     resume.add_argument("run_id")
+    resume.add_argument(
+        "--force",
+        action="store_true",
+        help="override a blocked or waiting run instead of holding it for an answer",
+    )
     add_runtime_flags(resume)
 
     input_parser = subparsers.add_parser(
@@ -657,7 +662,7 @@ def main(argv: list[str] | None = None) -> None:
             return
         if args.command == "input":
             runtime = _build_runtime(args, config, runtime_dir)
-            runtime.resume(args.run_id)
+            runtime.resume(args.run_id, force=getattr(args, 'force', False))
             runtime.submit_process_input(args.text)
             result = runtime.run()
             print(_summary(result), file=sys.stderr)
@@ -708,7 +713,7 @@ def main(argv: list[str] | None = None) -> None:
         runtime = _build_runtime(args, config, runtime_dir)
         if _wants_tui(args):
             if args.command == "resume":
-                runtime.resume(args.run_id)
+                runtime.resume(args.run_id, force=getattr(args, 'force', False))
                 _run_tui(runtime)
             else:
                 if args.request is None and not sys.stdin.isatty():
@@ -731,7 +736,7 @@ def main(argv: list[str] | None = None) -> None:
                 success_criteria=args.criterion,
             )
         else:
-            runtime.resume(args.run_id)
+            runtime.resume(args.run_id, force=getattr(args, 'force', False))
         result = runtime.run()
     except Exception as exc:  # noqa: BLE001 - a CLI must never dump a traceback on the user
         if isinstance(exc, (OSError, RuntimeError, ValueError)):

@@ -245,3 +245,167 @@ def test_invalidation_moves_verified_criteria_to_revalidation(tmp_path: Path) ->
     runtime._mark_criterion_verified("file exists: out.txt")
     assert runtime.state.revalidation_required == []
     assert "file exists: out.txt" in runtime.state.verified_criteria
+
+
+def completed_run(tmp_path: Path) -> tuple[object, str]:
+    """A fully completed run with an accepted checkpoint, unmerged."""
+
+    from gcae.models import AgentState
+    from gcae.providers import FakeProvider
+    from gcae.runtime import Runtime, RuntimeControl
+
+    source = tmp_path / "source"
+    init_repo(source)
+    provider = FakeProvider(
+        [
+            {
+                "action": "execute_tool",
+                "semantic_goal": "create",
+                "reason_summary": "create it",
+                "tool": {"name": "create_file",
+                         "arguments": {"path": "out.txt", "content": "ok\n"}},
+            },
+            {"action": "complete_semantic_step", "semantic_goal": "create",
+             "reason_summary": "done"},
+            {"action": "finish_candidate", "semantic_goal": "create",
+             "reason_summary": "finish"},
+        ]
+    )
+    runtime = Runtime(
+        source, tmp_path / "runtime", provider=provider, control=RuntimeControl(),
+    )
+    events: list = []
+    runtime.subscribe(events.append)
+    runtime.start("create out.txt", success_criteria=["file exists: out.txt"])
+    state = runtime.run()
+    assert isinstance(state, AgentState) and state.status == "complete", state.status
+    return runtime, state.run_id
+
+
+def test_merge_crash_window_backfills_the_record(tmp_path: Path) -> None:
+    """W2: crash after `git merge`, before the record write — undo must still work."""
+    from gcae.git import GitRepository
+    from gcae.models import PendingMerge
+    from gcae.persistence import StateStore
+    from gcae.runtime import merge_verified_run
+
+    runtime, run_id = completed_run(tmp_path)
+    state = runtime.state
+    assert state is not None and state.branch
+    state_path = tmp_path / "runtime" / "runs" / run_id / "state.json"
+    repo = GitRepository(str(tmp_path / "source"), tmp_path / "runtime")
+    pre = repo.source_commit()
+    # the merge ran but the process died before state.merge was persisted
+    _, merged = repo.merge_branch(state.branch)
+    state.pending_merge = PendingMerge(
+        branch=state.branch, target_branch=repo.current_branch(),
+        pre_merge_commit=pre,
+    )
+    StateStore(state_path).save(state)
+    head_after_crash = repo.source_commit()
+    record = merge_verified_run(
+        repo, state, persist=lambda: StateStore(state_path).save(state)
+    )
+    assert record.merge_commit == merged == head_after_crash, "no second merge"
+    assert record.pre_merge_commit == pre
+    assert state.pending_merge is None and state.merge is record
+    # undo reverses exactly the recorded merge
+    repo.undo_merge(record.pre_merge_commit, record.merge_commit)
+    assert repo.source_commit() == pre
+
+
+def test_merge_marker_without_merge_completes_once(tmp_path: Path) -> None:
+    """Marker persisted, crash before the merge: the next attempt merges and clears."""
+    from gcae.git import GitRepository
+    from gcae.models import PendingMerge
+    from gcae.persistence import StateStore
+    from gcae.runtime import merge_verified_run
+
+    runtime, run_id = completed_run(tmp_path)
+    state = runtime.state
+    assert state is not None and state.branch
+    state_path = tmp_path / "runtime" / "runs" / run_id / "state.json"
+    repo = GitRepository(str(tmp_path / "source"), tmp_path / "runtime")
+    pre = repo.source_commit()
+    state.pending_merge = PendingMerge(
+        branch=state.branch, target_branch=repo.current_branch(),
+        pre_merge_commit=pre,
+    )
+    StateStore(state_path).save(state)
+    record = merge_verified_run(
+        repo, state, persist=lambda: StateStore(state_path).save(state)
+    )
+    assert state.merge is record and state.pending_merge is None
+    assert repo.source_commit() == record.merge_commit != pre
+    again = StateStore(state_path).load()
+    assert again.merge is not None
+    import pytest
+
+    from gcae.runtime import merge_verified_run as mvr
+
+    with pytest.raises(RuntimeError, match="already merged"):
+        mvr(repo, again, persist=lambda: StateStore(state_path).save(again))
+
+
+def test_blocked_run_stays_blocked_across_resume(tmp_path: Path) -> None:
+    """W4: a plain resume of a blocked run holds it — no silent autonomous restart."""
+    runtime, run_id, base = start_runtime(tmp_path)
+    assert runtime.state is not None
+    runtime.state.status = "blocked"
+    runtime.state.blocked_reason = "credentials needed"
+    runtime.state.unblock_hint = "set OPENROUTER_API_KEY"
+    runtime._persist()
+    resumed, events = resumed_runtime(tmp_path, run_id)
+    assert resumed.state is not None
+    assert resumed.state.status == "blocked"
+    assert resumed.state.blocked_reason == "credentials needed"
+    assert resumed.state.unblock_hint == "set OPENROUTER_API_KEY"
+    held = [e for e in events if e.event_type == "run_resumed"]
+    assert held and held[0].payload.get("held") == "blocked"
+    # and run() does not start working behind the block
+    out = resumed.run()
+    assert out.status == "blocked"
+
+
+def test_force_resume_overrides_the_block_openly(tmp_path: Path) -> None:
+    runtime, run_id, base = start_runtime(tmp_path)
+    assert runtime.state is not None
+    runtime.state.status = "blocked"
+    runtime.state.blocked_reason = "credentials needed"
+    runtime._persist()
+    forced = Runtime(
+        tmp_path / "source", tmp_path / "runtime", provider=FakeProvider([]),
+        control=RuntimeControl(),
+    )
+    events: list = []
+    forced.subscribe(events.append)
+    forced.resume(run_id, force=True)
+    assert forced.state is not None
+    assert forced.state.status == "running"
+    assert forced.state.blocked_reason is None
+    assert any(e.event_type == "resume_forced" for e in events)
+
+
+def test_instruction_answers_a_held_run(tmp_path: Path) -> None:
+    runtime, run_id, base = start_runtime(tmp_path)
+    assert runtime.state is not None
+    runtime.state.status = "blocked"
+    runtime.state.blocked_reason = "pick a strategy"
+    runtime._persist()
+    resumed, _ = resumed_runtime(tmp_path, run_id)
+    assert resumed.state is not None
+    resumed.inject_user_instruction("use the PTY execution strategy")
+    assert resumed.state.status == "running"
+    assert resumed.state.blocked_reason is None
+
+
+def test_waiting_run_keeps_its_question_across_resume(tmp_path: Path) -> None:
+    runtime, run_id, base = start_runtime(tmp_path)
+    assert runtime.state is not None
+    runtime.state.status = "waiting_for_user"
+    runtime.state.pending_question = "which database should the app target?"
+    runtime._persist()
+    resumed, _ = resumed_runtime(tmp_path, run_id)
+    assert resumed.state is not None
+    assert resumed.state.status == "waiting_for_user"
+    assert resumed.state.pending_question == "which database should the app target?"

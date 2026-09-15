@@ -421,6 +421,21 @@ class RecoveryRecord(BaseModel):
     created_at: datetime = Field(default_factory=now_utc)
 
 
+class PendingMerge(BaseModel):
+    """Merge intent persisted *before* the merge runs.
+
+    A crash between ``git merge`` and the MergeRecord write must not leave the
+    source branch merged with no record (``gcae undo`` reads the record): the
+    marker lets the next attempt backfill the record from git ancestry.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    branch: str
+    target_branch: str
+    pre_merge_commit: str
+    created_at: datetime = Field(default_factory=now_utc)
+
+
 class MergeRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
     branch: str
@@ -491,5 +506,7 @@ class AgentState(BaseModel):
     # recorded so the result is never silently incomplete
     degradations: list[str] = Field(default_factory=list)
     merge: MergeRecord | None = None
+    #: set while a merge was intended but not yet recorded (crash-window marker)
+    pending_merge: PendingMerge | None = None
     created_at: datetime = Field(default_factory=now_utc)
     updated_at: datetime = Field(default_factory=now_utc)

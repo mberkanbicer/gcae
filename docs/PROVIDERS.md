@@ -21,7 +21,7 @@ and the runtime turns each update into events so a slow model is visible instead
 | `provider_first_token` | first content arrived, with the connection latency |
 | `provider_progress` | incremental size (content and reasoning characters) plus a preview tail, rate limited |
 | `provider_waiting` | heartbeat: the call is running and produced nothing for 10s |
-| `provider_finished` | wall-clock time and the final character counts |
+| `provider_finished` | wall-clock time, the final character counts, and the response's token counts (`usage`: prompt/completion/total tokens) — event detail only, never the main UI |
 
 Nothing arrives for `[provider] stall_timeout` seconds (default 45, applied per read) → the call fails
 with `provider request stalled: no data for Ns …` and the run hands that to the recovery ladder
@@ -113,3 +113,7 @@ confidence.
 Malformed structured output gets one bounded repair attempt (a repair prompt with the previous
 response and an explicit schema instruction). If it still fails, the run fails cleanly with a
 `ProviderOutputError` recorded as an immutable failure memory; there is no unbounded retry loop.
+
+A content refusal (`message.refusal`, e.g. after a content filter) is named in the failure
+reason instead of being reported as generic empty content — retrying a refusal cannot help,
+so the repair budget is not wasted silently.

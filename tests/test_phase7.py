@@ -548,3 +548,85 @@ def test_a_client_error_is_not_retried() -> None:
         provider.complete("prompt", Decision)
     # one streaming attempt, then one buffered fallback: a bad request is not worth backing off
     assert len(calls) == 2, f"a 400 must not be retried, saw {len(calls)} attempts"
+
+
+def test_usage_is_recorded_from_a_buffered_response() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                '{"action":"finish_candidate","semantic_goal":"done",'
+                                '"reason_summary":"ok"}'
+                            )
+                        }
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 120,
+                    "completion_tokens": 40,
+                    "total_tokens": 160,
+                    "cost": 0.0,
+                },
+            },
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    provider = OpenAICompatibleProvider(
+        "http://local/v1", "model", client=client, stream=False
+    )
+    provider.complete("prompt", Decision)
+    assert provider.last_usage == {
+        "prompt_tokens": 120,
+        "completion_tokens": 40,
+        "total_tokens": 160,
+    }, "only token counts are kept; cost and vendor extras are dropped"
+
+
+def test_usage_is_recorded_from_a_streamed_response() -> None:
+    frames = [
+        _delta('{"action":"finish_candidate",'),
+        _delta('"semantic_goal":"done","reason_summary":"ok"}'),
+        json.dumps(
+            {
+                "choices": [{"delta": {}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 200, "completion_tokens": 60},
+            }
+        ),
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _sse_response(frames)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    provider = OpenAICompatibleProvider("http://local/v1", "model", client=client)
+    provider.complete("prompt", Decision)
+    assert provider.last_usage == {"prompt_tokens": 200, "completion_tokens": 60}
+
+
+def test_refusal_is_named_in_the_failure_reason() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "finish_reason": "content_filter",
+                        "message": {
+                            "content": None,
+                            "refusal": "I cannot help with that request.",
+                        },
+                    }
+                ]
+            },
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    provider = OpenAICompatibleProvider(
+        "http://local/v1", "model", client=client, stream=False, repair_limit=0
+    )
+    with pytest.raises(ProviderOutputError, match="refusal=I cannot help"):
+        provider.complete("prompt", Decision)

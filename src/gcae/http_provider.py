@@ -69,6 +69,10 @@ class OpenAICompatibleProvider:
         self.retries = max(0, retries)
         self.retry_backoff = max(0.0, retry_backoff)
         self.on_progress: ProgressListener | None = None
+        # token counts from the last HTTP response (buffered or streamed), keyed by
+        # prompt/completion/total. The runtime copies this into provider_finished; the
+        # provider itself never displays anything, so telemetry stays off the main UI.
+        self.last_usage: dict[str, int] = {}
         self._progress_state = (0.0, -1)  # last report time, last reported character count
 
     def complete(self, prompt: str, schema: type[T]) -> T:
@@ -93,6 +97,14 @@ class OpenAICompatibleProvider:
                 raise ProviderOutputError(f"provider request failed: {exc}") from exc
             if isinstance(body, dict) and body.get("error") and not body.get("choices"):
                 raise ProviderOutputError(f"provider error: {json.dumps(body['error'])[:200]}")
+            if isinstance(body, dict):
+                usage = body.get("usage")
+                if isinstance(usage, dict):
+                    self.last_usage = {
+                        key: value
+                        for key in ("prompt_tokens", "completion_tokens", "total_tokens")
+                        if isinstance((value := usage.get(key)), int)
+                    }
             last_attempt = attempt >= self.repair_limit
             try:
                 raw = self._content(body)
@@ -432,11 +444,13 @@ class OpenAICompatibleProvider:
         details: list[str] = []
         finish = None
         reasoning = ""
+        refusal = ""
         try:
             choice = body["choices"][0]
             finish = choice.get("finish_reason")
             message = choice.get("message") or {}
             reasoning = message.get("reasoning") or message.get("reasoning_content") or ""
+            refusal = message.get("refusal") or ""
         except (KeyError, IndexError, TypeError):
             pass
         completion_tokens = (body.get("usage") or {}).get("completion_tokens")
@@ -448,6 +462,8 @@ class OpenAICompatibleProvider:
             details.append(f"{len(reasoning)} chars of reasoning")
         if completion_tokens:
             details.append(f"{completion_tokens} completion tokens")
+        if isinstance(refusal, str) and refusal.strip():
+            details.append(f"refusal={refusal.strip()[:160]}")
         details.append(f"model={self.model}")
         kind = "provider returned incomplete JSON" if raw else "provider returned no text content"
         hint = ""

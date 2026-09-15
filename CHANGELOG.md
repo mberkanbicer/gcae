@@ -4,6 +4,26 @@ All notable changes to GCAE are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.2] — 2026-09-16
+
+### Added
+
+- **Token usage accounting.** The provider keeps the last response's token counts
+  (`prompt_tokens`, `completion_tokens`, `total_tokens`) on `last_usage`; the runtime
+  copies them into the `provider_finished` event payload. Usage lives at event-detail
+  level only — never on the main UI. Verified live against OpenRouter (fib.py baseline
+  run completed end to end) and deterministic at file level for buffered + streamed
+  responses.
+
+### Fixed
+
+- **Content refusals are named, not masked.** A `message.refusal` (e.g. content filter)
+  now appears in the failure reason instead of being reported as generic empty content;
+  retrying a refusal cannot help, so the repair budget is no longer spent silently.
+- Honest scope note: the 429/5xx retry ladder, truncation escalation, stall detection
+  and empty-content paths were re-verified against the live baseline and already had
+  deterministic coverage — no changes needed there.
+
 ## [0.6.1] — 2026-09-16
 
 ### Fixed

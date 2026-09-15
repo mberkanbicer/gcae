@@ -74,6 +74,7 @@ never a pass.
 | Symptom | Explanation |
 | --- | --- |
 | `provider output: …` and the run stops | the model produced unusable output repeatedly; the run's diagnosis is in `gcae inspect` |
+| `refusal=…` in the failure reason | the model refused (e.g. content filter), not an empty glitch — rephrase the task, don't raise budgets |
 | `provider request stalled` / `provider stream stalled` | the endpoint accepted the request and produced nothing within `stall_timeout` |
 | empty content, no error | reasoning model with a small output budget — see above |
 | `no API key configured for …` | set `provider.api_key` or `provider.api_key_env` |

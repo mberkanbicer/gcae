@@ -3908,6 +3908,12 @@ class _ProgressReporter:
                 "elapsed_ms": int((time.monotonic() - self.started) * 1000),
                 "characters": self.progress.characters,
                 "reasoning_characters": self.progress.reasoning_characters,
+                **(
+                    {"usage": usage}
+                    if isinstance((usage := getattr(self.provider, "last_usage", None)), dict)
+                    and usage
+                    else {}
+                ),
             },
         )
 

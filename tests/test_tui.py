@@ -2533,3 +2533,49 @@ def test_plan_panel_keeps_verified_history_across_replans(tmp_path: Path) -> Non
     assert "fix differently" in body
     timeline = [row.text for row in ui.timeline]
     assert any("preserved 2" in text for text in timeline)
+
+
+def test_event_detail_screen_shows_command_outcome_and_evidence(tmp_path: Path) -> None:
+    """§37: Enter on the timeline opens the middle level — event payload, not telemetry."""
+    from datetime import UTC, datetime
+
+    from textual.widgets import Static
+
+    from gcae.tui.screens import EventDetailScreen
+
+    ui = UiState()
+    feed = ui.feed
+    at = datetime(2026, 1, 1, 12, 3, 5, tzinfo=UTC)
+    for _ in feed.push(
+        "decision",
+        {"tool": {"name": "run_command", "arguments": {"command": "python game.py"}}},
+        step_id="step-1", timestamp=at,
+    ):
+        pass
+    resolved = feed.resolve("run_command", "step-1", False, "FAILED · curses.error")
+    assert resolved is not None
+    for _ in feed.push(
+        "failure_classified", {"lesson": "cbreak() returned ERR"}, step_id="step-1"
+    ):
+        pass
+    events = list(feed.events)
+    assert events, "the feed keeps full progress events for the detail view"
+    screen = EventDetailScreen(events)
+    app = GcaeApp(make_runtime(tmp_path, start=False), auto_run=False)
+
+    async def scenario() -> None:
+        async with app.run_test(size=(130, 40)) as pilot:
+            app.push_screen(screen)
+            await pilot.pause()
+            screen.query_one("#viewer-body", Static)  # mounted
+            newest = screen.body.plain
+            assert "DIAGNOSE" in newest and "cbreak() returned ERR" in newest
+            await pilot.press("j")  # step to the older EXECUTE event
+            text = screen.body.plain
+            assert "python game.py" in text
+            assert "FAILED · curses.error" in text
+            assert "step-1" in text
+            assert "reasoning" not in text and "chars=" not in text
+            assert screen.index == 1
+
+    asyncio.run(scenario())

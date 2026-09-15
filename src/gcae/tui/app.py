@@ -33,6 +33,7 @@ from .screens import (
     ContextScreen,
     DiffScreen,
     EvaluationScreen,
+    EventDetailScreen,
     HealthScreen,
     LogsScreen,
     MemoryScreen,
@@ -710,6 +711,14 @@ class GcaeApp(App[None]):
     def action_health(self) -> None:
         self.push_screen(HealthScreen(self._health_checks()))
 
+    def action_event_detail(self) -> None:
+        """Level 2: the timeline's own story, one event at a time."""
+        events = list(self.ui.feed.events)
+        if not events:
+            self.action_logs()
+            return
+        self.push_screen(EventDetailScreen(events))
+
     def action_help(self) -> None:
         self.push_screen(HelpModal())
 
@@ -723,7 +732,7 @@ class GcaeApp(App[None]):
         elif panel_id == "objective":
             self.action_context()
         elif panel_id == "timeline":
-            self.action_logs()
+            self.action_event_detail()
         else:
             self.action_plan_detail()
 

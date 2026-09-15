@@ -25,6 +25,12 @@ VIEWER_BINDINGS: list[BindingType] = [
 ]
 
 
+def _compact(value: object, limit: int = 100) -> str:
+    """One bounded line for an event detail value."""
+    flat = " ".join(str(value).split())
+    return flat if len(flat) <= limit else flat[: limit - 1] + "…"
+
+
 class ViewerScreen(ModalScreen[None]):
     """Common frame: a header line, a scrollable body, a hint line."""
 
@@ -356,6 +362,69 @@ class TrajectoryScreen(ViewerScreen):
                 count = len(attempt.evidence_ids)
                 body.append(f"    evidence {count} records\n", style=STYLES["muted"])
             body.append("\n")
+        self.set_body(body)
+
+
+class EventDetailScreen(ViewerScreen):
+    """Level 2 for one semantic event: command, outcome, evidence — no telemetry.
+
+    j/k walk the run's progress events (newest first). Everything shown comes
+    from the event's own payload; raw provider output stays in Logs.
+    """
+
+    BINDINGS: ClassVar[list[BindingType]] = [
+        Binding("escape", "close_viewer", "Close", show=False),
+        Binding("q", "close_viewer", "Close", show=False),
+        Binding("j", "step(1)", "Older", show=False),
+        Binding("k", "step(-1)", "Newer", show=False),
+    ]
+
+    def __init__(self, events: Sequence[ProgressEvent]) -> None:
+        super().__init__("event detail", "j/k step through events · Esc closes")
+        self.events = list(reversed(list(events)))
+        self.index = 0
+
+    def compose_body(self) -> ComposeResult:
+        with VerticalScroll(id="viewer-scroll", classes="scrollpane"):
+            yield Static("", id="viewer-body")
+
+    def on_mount(self) -> None:
+        self._show()
+
+    def action_step(self, delta: int) -> None:
+        if self.events:
+            self.index = max(0, min(len(self.events) - 1, self.index + delta))
+            self._show()
+
+    def _show(self) -> None:
+        if not self.events:
+            self.set_body(Text("no semantic events yet"))
+            return
+        event = self.events[self.index]
+        body = Text()
+        body.append(f"{self.index + 1}/{len(self.events)}\n", style=STYLES["muted"])
+        body.append(
+            f"{event.category.value.upper()}  {event.title}\n", style=STYLES["value"]
+        )
+        if event.result:
+            body.append(f"result    {event.result}\n")
+        body.append(
+            f"at        {event.timestamp.astimezone().strftime('%H:%M:%S')}\n",
+            style=STYLES["muted"],
+        )
+        if event.trajectory_step_id:
+            body.append(f"step      {event.trajectory_step_id}\n")
+        if event.related_command:
+            body.append(f"command   {event.related_command}\n")
+        if event.related_file:
+            body.append(f"file      {event.related_file}\n")
+        if event.evidence_ids:
+            ids = ", ".join(f"E{identifier}" for identifier in event.evidence_ids)
+            body.append(f"evidence  {ids}\n")
+        if event.severity != "info":
+            body.append(f"severity  {event.severity}\n", style=STYLES["warning"])
+        for key, value in (event.detail or {}).items():
+            body.append(f"{key:<9} {_compact(value)}\n", style=STYLES["muted"])
         self.set_body(body)
 
 

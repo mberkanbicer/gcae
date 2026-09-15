@@ -18,9 +18,9 @@ the TUI is one front end for it.
 | Plan | steps with status; the active step is expanded |
 | Activity | what is happening now: tool, provider stream (characters, reasoning characters, preview), waiting state |
 | Checkpoint | accepted commit, branch, merge record, undo hint |
-| Validation | commands and their results, scope evidence |
+| Validation | commands and their results, scope evidence, evidence counts (`N supporting · M contradicting · K records`) |
 | Metrics | iterations, accepted steps, rollbacks, replans, context usage |
-| Timeline | the run's story: plan, steps, validation, evaluation, rollback, recovery, failover, merge |
+| Timeline | the run's story: plan, steps, validation, evaluation, trajectory verdicts, rollback, recovery, failover, merge |
 | Banner | completion, stop or failure summary with the reason and the next step |
 | Footer | keys valid in the current state |
 
@@ -30,6 +30,8 @@ The dashboard and the CLI tell the same story. The timeline carries:
 
 | Event | Shown as |
 | --- | --- |
+| `trajectory_step_completed` | `trajectory accepted` / `candidate rejected` / `repair` / `trajectory replanned` / `trajectory blocked` |
+| `evidence_recorded` (contradicting) | `evidence contradicts · <claim>` |
 | `model_failover` | `controller failed over to <model>` |
 | `model_escalated` | escalation to the stronger model |
 | `runtime_degraded` | `degraded · <component> · <error>` |

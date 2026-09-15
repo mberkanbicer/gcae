@@ -5,7 +5,7 @@
 | | Memory (`memory.db`) | Context (per call) |
 | --- | --- | --- |
 | Nature | cumulative, survives rollbacks and runs | reconstructed for every model call |
-| Contains | facts, decisions, failure lessons, user instructions, promoted memories | objective, constraints, criteria, goal, accepted commit, relevant memory, recent trace |
+| Contains | facts, decisions, failure lessons, user instructions, promoted memories, the evidence ledger | objective, constraints, criteria, goal, accepted commit, relevant memory, recent trace |
 | Never | deleted on rollback | allowed to grow into a conversation |
 
 ## Memory kinds
@@ -19,20 +19,29 @@
 | `user_instruction` | you | immutable: "do not touch the database" survives every replanning |
 | stagnation / replan markers | the runtime (as `decision`) | the change-hypothesis record the ladder writes before trying something else |
 
-SQLite FTS5 retrieval ranks by relevance to the current step, and immutable lessons are surfaced
-first, because a repeated mistake is more expensive than a missing fact.
+SQLite FTS5 retrieval ranks by relevance to the current step, scoped to the source repository:
+knowledge accumulates across runs of one project without leaking into another's. Immutable
+lessons are surfaced first, because a repeated mistake is more expensive than a missing fact.
+
+## Evidence ledger
+
+One record per command result, validation, interactive session and criterion verdict, each with
+`supports` / `contradicts` claims. Evidence is present, absent, supporting or contradicting —
+never scored. The verifier maps every success criterion to its evidence (PASS needs support, no
+evidence is INSUFFICIENT, contradiction is FAIL), and the dashboard shows running counts.
 
 ## Retrieval and budgeting
 
 The context builder assembles a prompt and fits it into `provider.context_limit`:
 
-1. pinned data first — request, hard constraints, success criteria, current goal, accepted commit,
-   failure lessons; these are never dropped;
+1. pinned data first — request, hard constraints, success criteria, current goal, expectation,
+   accepted commit, failure lessons (the last 8; the store keeps all of them retrievable);
+   P0 is never dropped;
 2. then memory and recent observations, ranked and truncated;
 3. then the candidate diff and tool results, trimmed to the budget.
 
-If the budget cannot hold the pinned part, the call fails visibly instead of silently dropping a
-constraint.
+If the budget cannot hold the pinned part, the pinned set is returned as-is: shortening the
+projection never destroys P0.
 
 ## Inspecting the real payload
 

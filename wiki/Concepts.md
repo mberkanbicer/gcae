@@ -9,6 +9,12 @@ happen either when the agent calls `complete_semantic_step` or when it exhausts
 
 The unit of progress is the verified step, not the tool call.
 
+Each attempt at a step is a **trajectory step**: what it tried, what it expected, what
+evidence would prove it, which failure signals would disprove it, what actually happened,
+why it was accepted or rejected, and what was learned. The record persists in `state.json`
+and appears on the dashboard timeline, so a rejected strategy stays visible without any
+chat transcript.
+
 ## Trusted state and speculative state
 
 | | Trusted | Speculative |
@@ -32,8 +38,8 @@ transitions are refused rather than guessed (a recovery from `checkpoint` re-ent
 | Stage | Question | Who answers |
 | --- | --- | --- |
 | Validation | did the step break anything, is it in scope, do the commands pass? | deterministic code |
-| Evaluation | did the step advance the objective? | deterministic evaluator, or a model (`hybrid`) |
-| Verification | are all success criteria met in the final tree? | deterministic criteria, plus an optional model judge that fails closed |
+| Evaluation | did the step advance the objective? | deterministic evaluator, or a model (`hybrid`); decisions are accept, **repair** (keep the candidate, fix it), rollback, replan, continue, finish_candidate |
+| Verification | are all success criteria met in the final tree, each mapped to evidence? | deterministic criteria, plus an optional model judge that fails closed |
 
 Validation is evidence, not a gate: out-of-scope edits and new files are recorded and handed to the
 evaluator instead of silently failing the step.
@@ -50,7 +56,8 @@ command succeeds: python -m pytest -q
 ```
 
 If a run has no criteria the planner derives them, and a run that cannot be verified is never
-declared complete.
+declared complete. Completion requires PASS for every criterion, each mapped to ledger
+evidence: no evidence means INSUFFICIENT, contradiction means FAIL.
 
 ## Self-recovery
 
@@ -66,7 +73,10 @@ See [Architecture](Architecture) for the complete failure taxonomy.
 
 Memory is cumulative while execution is reversible: facts, decisions, failure lessons and user
 instructions live in SQLite and survive rollbacks and runs. Immutable failure lessons are surfaced
-first. See [Memory and Context](Memory-and-Context).
+first. Every command result, validation, interactive session and criterion verdict is also an
+**evidence record** (supports / contradicts) in the same database, and the verifier maps each
+success criterion to its evidence. Retrieval is scoped to the source repository, so one project's
+lessons never leak into another's. See [Memory and Context](Memory-and-Context).
 
 ## Worktree isolation
 

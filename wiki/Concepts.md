@@ -45,7 +45,8 @@ transitions are refused rather than guessed (a recovery from `checkpoint` re-ent
 
 A *process death* is a resume with reconciliation, never a lost run: unrecorded checkpoints
 are discarded and named, branch divergence is restored forward, the plan is repaired to the
-boundary git can prove (verified criteria whose proof died move to `revalidation_required`),
+boundary git can prove (verified criteria whose proof died move to `revalidation_required`,
+including criteria proven by surviving steps that depended on invalidated work),
 torn event tails are truncated, merge intent persisted before `git merge` guarantees the
 undo record, and a blocked run stays blocked until answered or forced (`gcae resume
 --force`). Every repair is reported; nothing is silently healed. A real SIGKILL killed

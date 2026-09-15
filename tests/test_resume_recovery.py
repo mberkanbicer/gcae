@@ -198,7 +198,9 @@ def test_invalidation_moves_verified_criteria_to_revalidation(tmp_path: Path) ->
 
     proof = runtime.memory.add_evidence(
         EvidenceRecord(
-            run_id=run_id, trajectory_step_id="step-2", kind=EvidenceKind.COMMAND_RESULT,
+            run_id=run_id,
+            trajectory_step_id="trajectory-step-2-1",
+            kind=EvidenceKind.COMMAND_RESULT,
             claim_or_subject="file exists: out.txt",
         )
     )

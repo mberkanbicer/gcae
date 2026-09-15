@@ -74,16 +74,28 @@ dependency set is exactly `pydantic`, `httpx`, `textual`. Removed in this pass: 
 - The judge cannot *request* new evidence at verification time; the run's ladder does that
   work instead (verification failure replans with the missing evidence named).
 - The judge weighs recency explicitly (newest-first bundle with timestamps), not a score.
-- Cross-step criterion impact analysis is the one planning deferral left: criteria move to
-  `revalidation_required` only when the step that proved them is invalidated; the runtime
-  does not heuristically infer that "a scoring change might affect keyboard input". Add
-  when verified criteria start being invalidated by cross-step changes in practice.
+- Cross-step criterion impact analysis: **shipped in 0.6.1** — see below.
 
 ### Deferred items closed in 0.5.x–0.6.0 (recorded here because earlier audits were wrong)
 
 - Typed replan-reason categories: **shipped** (the 0.5.x audit grepped SCREAMING_SNAKE
   and missed the lowercase `ReplanReason` literals; `PlanVersion.reason_category` is
   persisted and tested).
+
+### Deferred items closed in 0.6.1
+
+- **Cross-step criterion impact analysis (PH §43).** Invalidating a step now also flags
+  verified criteria proven by *surviving* steps that `depends_on` the invalidated one —
+  the declared dependency graph, not a semantic guess ("a scoring change might affect
+  keyboard input" inference is still out of scope by design: it would need evidence,
+  not heuristics). Implementing it surfaced two latent bugs, both fixed:
+  - the evidence-to-step linkage compared `trajectory_step_id` values
+    (`trajectory-step-2-1`) against bare plan ids (`step-2`) and never matched in real
+    runs — only the fabricated test form matched; the mapping now resolves the attempt
+    suffix (and still accepts bare plan ids from older records);
+  - the replan-patch path never moved criteria of the steps it invalidated at all — only
+    step-reopen and rollback-reconciliation did.
+  Three invalidation paths, one rule, four tests (`tests/test_plan_history.py`).
 - The ACTIVE in-panel model row: **shipped** (rendered during model actions:
   `controller · generating · 3.4s` + model name — the audit pattern `model_row` never
   matched `_row("model", …)`).

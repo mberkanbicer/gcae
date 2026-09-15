@@ -18,11 +18,16 @@ FUTURE      remaining steps — adaptive
 - **Invalidation needs evidence.** A completed step moves to `invalidated` only with a
   recorded reason and ledger evidence IDs; dependents (via `depends_on`) follow with a
   dependency reason. Anything less is rejected.
-- **Invalidation un-verifies what it disproved.** Verified criteria whose supporting
-  evidence died with an invalidated step move to `revalidation_required`: not silently
-  deleted, not falsely verified. Guardian plan-health treats them as covered (final
-  verification re-checks them), the replan prompt asks for a cheap revalidation step
-  instead of a rebuild, and a passing final verification clears them.
+- **Invalidation un-verifies what it disproved — across steps.** Verified criteria whose
+  supporting evidence died with an invalidated step move to `revalidation_required`: not
+  silently deleted, not falsely verified. Evidence is linked to plan steps through the
+  trajectory id it was recorded under (`trajectory-step-2-3` → `step-2`). A criterion
+  proven by a *surviving* step that `depends_on` invalidated work moves too — its proof
+  rests on dead work; the dependent step itself stays completed. Guardian plan-health
+  treats moved criteria as covered (final verification re-checks them), the replan
+  prompt asks for a cheap revalidation step instead of a rebuild, and a passing final
+  verification clears them. All three invalidation paths (step reopen, replan patch,
+  rollback reconciliation) apply the same rule.
 - **Replans are patches, not rewrites.** `ReplanPatch` carries the base plan version,
   the affected region, invalidations, replacements and new steps. The runtime validates
   deterministically — stale base, unknown IDs, locked rewrites without evidence,

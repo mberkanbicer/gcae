@@ -2320,6 +2320,7 @@ class Runtime:
             target.locked = False
             target.invalidated_reason = invalidation.reason
             target.invalidated_evidence_ids = list(invalidation.evidence_ids)
+        self._unverify_criteria_of_steps(invalidated_ids)
         new_ids = [step.id for step in patch.new_steps]
         first_new = new_ids[0] if new_ids else ""
         for step_id in replaced_ids:
@@ -2422,10 +2423,21 @@ class Runtime:
         survives is not unresolved — its *proof* is gone, so it needs revalidation,
         which final verification performs anyway. The claim moves, never silently
         disappears; with no evidence linkage the final gate still re-checks it.
+
+        Cross-step impact (PH §43): a criterion proven by a *surviving* step that
+        depends on invalidated work is also flagged — the declared dependency graph
+        is deterministic structure, not a semantic guess. The dependent step itself
+        stays completed; only its proof's trust is withdrawn.
         """
         if not step_ids or self.memory is None or self.state is None:
             return []
         dead = set(step_ids)
+        suspects = {
+            s.id
+            for s in self.state.plan
+            if s.status == "completed" and any(dep in dead for dep in s.depends_on)
+        }
+        dead_or_suspect = dead | suspects
         report = self.state.last_verification
         passing = {
             result.criterion: result.evidence_ids
@@ -2436,13 +2448,24 @@ class Runtime:
             records = self.memory.evidence_for_run(self.state.run_id)
         except Exception:  # noqa: BLE001 - degraded memory must not block invalidation
             return []
+
+        def owner(traj_id: str) -> str:
+            # "trajectory-step-2-3" is attempt 3 of plan step "step-2"; a bare plan
+            # step id is also accepted (older records carry it directly)
+            if traj_id.startswith("trajectory-"):
+                return traj_id[len("trajectory-") :].rsplit("-", 1)[0]
+            return traj_id
+
         steps_of = {r.id: r.trajectory_step_id for r in records if r.id is not None}
         moved: list[str] = []
         for criterion in list(self.state.verified_criteria):
             cited = passing.get(criterion) or []
             if not cited:
                 continue
-            if any(steps_of.get(evidence_id) in dead for evidence_id in cited):
+            if any(
+                owner(steps_of.get(evidence_id) or "") in dead_or_suspect
+                for evidence_id in cited
+            ):
                 self.state.verified_criteria.remove(criterion)
                 if criterion not in self.state.revalidation_required:
                     self.state.revalidation_required.append(criterion)

@@ -249,3 +249,128 @@ def test_resume_restores_plan_versions_and_mapping(tmp_path: Path) -> None:
     assert len(resumed.state.plan_history) == 2
     assert resumed.state.accepted_commit == base
     assert resumed.state.current_step_id == "step-2"
+
+
+def _proof_for(runtime: Runtime, run_id: str, traj: str, claim: str) -> int:
+    from gcae.models import EvidenceKind, EvidenceRecord
+
+    assert runtime.memory is not None
+    record = runtime.memory.add_evidence(
+        EvidenceRecord(
+            run_id=run_id, trajectory_step_id=traj, kind=EvidenceKind.COMMAND_RESULT,
+            claim_or_subject=claim,
+        )
+    )
+    return record.id or 0
+
+
+def _verify_claim(runtime: Runtime, claim: str, evidence_id: int) -> None:
+    from gcae.models import CriterionResult, VerificationReport
+
+    runtime.state.last_verification = VerificationReport(
+        passed=False,
+        criteria=[CriterionResult(criterion=claim, passed=True, status="pass",
+                                  evidence_ids=[evidence_id])],
+    )
+
+
+def test_cross_step_criterion_moves_to_revalidation(tmp_path: Path) -> None:
+    """§43: a criterion proven by a surviving step that depends on invalidated work
+    loses its proof's trust — the step stays completed, the claim needs revalidation."""
+    from gcae.models import PlanStep
+
+    runtime = start_runtime(tmp_path)
+    assert runtime.state is not None
+    base = runtime.state.accepted_commit or ""
+    run_id = runtime.state.run_id
+    claim = "file exists: out.txt"
+    proof = _proof_for(runtime, run_id, "trajectory-step-2-1", claim)
+    _verify_claim(runtime, claim, proof)
+    runtime.state.verified_criteria = [claim]
+    runtime.state.plan = [
+        completed("step-1", "build parser", base),
+        PlanStep(id="step-2", goal="verify parser", status="completed",
+                 checkpoint=base, locked=True, depends_on=["step-1"]),
+        PlanStep(id="step-3", goal="finish", status="pending"),
+    ]
+    assert runtime._invalidate_step(
+        "step-1", reason="parser semantics changed", evidence_ids=[proof]
+    )
+    assert runtime.state.verified_criteria == []
+    assert runtime.state.revalidation_required == [claim]
+    step2 = next(s for s in runtime.state.plan if s.id == "step-2")
+    assert step2.status == "completed", "the dependent survives, only its proof is flagged"
+
+
+def test_trajectory_id_form_matches_real_records(tmp_path: Path) -> None:
+    """Evidence carries 'trajectory-step-2-1' (attempt of a plan step), not the bare
+    plan id: invalidating step-2 must move a criterion its evidence proved."""
+    runtime = start_runtime(tmp_path)
+    assert runtime.state is not None
+    base = runtime.state.accepted_commit or ""
+    run_id = runtime.state.run_id
+    claim = "file exists: out.txt"
+    proof = _proof_for(runtime, run_id, "trajectory-step-2-3", claim)
+    _verify_claim(runtime, claim, proof)
+    runtime.state.verified_criteria = [claim]
+    runtime.state.plan = [
+        completed("step-1", "inspect", base),
+        completed("step-2", "build", "ffffffffffffffffffffffffffffffffffffffff"),
+        PlanStep(id="step-3", goal="finish", status="pending"),
+    ]
+    runtime._reconcile_plan_with_rollback(base, "test rollback")
+    assert runtime.state.verified_criteria == []
+    assert runtime.state.revalidation_required == [claim]
+
+
+def test_replan_patch_moves_criteria_of_invalidated_steps(tmp_path: Path) -> None:
+    """Applying a replan patch that invalidates a step must also unverify the criteria
+    its evidence proved — the patch path used to leave stale verified claims."""
+    runtime = start_runtime(tmp_path)
+    assert runtime.state is not None
+    base = runtime.state.accepted_commit or ""
+    run_id = runtime.state.run_id
+    claim = "file exists: out.txt"
+    proof = _proof_for(runtime, run_id, "trajectory-step-2-1", claim)
+    _verify_claim(runtime, claim, proof)
+    runtime.state.verified_criteria = [claim]
+    runtime.state.plan = [
+        completed("step-1", "inspect", base),
+        completed("step-2", "build", base),
+        PlanStep(id="step-3", goal="finish", status="pending"),
+    ]
+    before = runtime.state.plan_version
+    patch = ReplanPatch(
+        base_plan_version=before,
+        reason="approach wrong",
+        affected_from_step_id="step-2",
+        preserve_step_ids=["step-1"],
+        invalidate=[StepInvalidation(step_id="step-2", reason="approach wrong",
+                                     evidence_ids=[proof])],
+        new_steps=[PlanStep(id="step-4", goal="rebuild", status="pending")],
+    )
+    assert runtime._apply_replan_patch(patch, source="test") is True
+    assert runtime.state.verified_criteria == []
+    assert runtime.state.revalidation_required == [claim]
+
+
+def test_unrelated_criterion_stays_verified(tmp_path: Path) -> None:
+    """Invalidating step-2 must not flag a criterion proven by independent step-3."""
+    runtime = start_runtime(tmp_path)
+    assert runtime.state is not None
+    base = runtime.state.accepted_commit or ""
+    run_id = runtime.state.run_id
+    claim = "file exists: out.txt"
+    proof = _proof_for(runtime, run_id, "trajectory-step-3-1", claim)
+    _verify_claim(runtime, claim, proof)
+    runtime.state.verified_criteria = [claim]
+    runtime.state.plan = [
+        completed("step-1", "inspect", base),
+        completed("step-2", "build", "ffffffffffffffffffffffffffffffffffffffff"),
+        completed("step-3", "other work", base),
+    ]
+    assert runtime._invalidate_step(
+        "step-2", reason="wrong approach", evidence_ids=[proof]
+    )
+    assert runtime.state.verified_criteria == [claim]
+    assert runtime.state.revalidation_required == []

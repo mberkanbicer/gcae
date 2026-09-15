@@ -4,6 +4,32 @@ All notable changes to GCAE are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] — 2026-09-16
+
+### Fixed
+
+- **Cross-step criterion impact (PH §43, the last planning deferral).** Invalidating a
+  step now also moves verified criteria proven by *surviving* steps that depend on the
+  invalidated one to `revalidation_required` — their proof rests on dead work; the
+  dependent step itself stays completed. Deterministic dependency-graph rule, one
+  implementation shared by all three invalidation paths (step reopen, replan patch,
+  rollback reconciliation).
+- **Latent evidence-linkage bug** (found while implementing the above): the unverify
+  pass compared trajectory ids (`trajectory-step-2-1`) against bare plan ids (`step-2`)
+  and never matched in real runs — only the fabricated test form matched. The mapping
+  now resolves the attempt suffix and still accepts bare ids from older records.
+- **Replan patches never unverified criteria** of the steps they invalidated — only
+  step-reopen and rollback reconciliation did. Stale `verified` claims after a replan
+  are gone.
+
+### Docs
+
+- `docs/PLAN_HISTORY.md`: the un-verification rule now states cross-step semantics and
+  the trajectory-id linkage; `docs/IMPLEMENTATION_AUDIT.md`: the §43 deferral is closed
+  with both latent bugs recorded honestly.
+
+353 tests pass.
+
 ## [0.6.0] — 2026-09-16
 
 ### Added — resume robustness and plan-consistency recovery

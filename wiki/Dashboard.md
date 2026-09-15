@@ -13,14 +13,15 @@ the TUI is one front end for it.
 
 | Panel | Contents |
 | --- | --- |
-| Status bar | app, run state, project, run id, active model and role, elapsed time, `ROLLBACK` / `DEGRADED` flags |
+| Status bar | one primary state (fatal → terminal → blocked → waiting → recovering → phase), project, run id, active model and role, elapsed time, `DEGRADED` flag |
 | Objective | the request, constraints and current goal |
-| Plan | steps with status; the active step is expanded |
-| Activity | what is happening now: tool, provider stream (characters, reasoning characters, preview), waiting state |
-| Checkpoint | accepted commit, branch, merge record, undo hint |
+| Plan | versioned steps with status (`v3 · 2/4 verified`); completed history stays visible and muted, invalidated steps show their reason |
+| Activity | goal, doing, last result, next intent; model progress is one calm row, never token counts |
+| Health | guardian state in up to three rows (`✓ HEALTHY`, or what is wrong and what happens next); `[h]` opens per-subsystem detail from live probes |
 | Validation | commands and their results, scope evidence, evidence counts (`N supporting · M contradicting · K records`) |
 | Metrics | iterations, accepted steps, rollbacks, replans, context usage |
-| Timeline | the run's story: plan, steps, validation, evaluation, trajectory verdicts, rollback, recovery, failover, merge |
+| Checkpoint | accepted commit, branch, merge record, undo hint |
+| Timeline | engineering journal with category prefixes (`PLAN`, `FAILURE`, `RECOVER`, …); outcomes resolve their own lines; raw telemetry never appears |
 | Banner | completion, stop or failure summary with the reason and the next step |
 | Footer | keys valid in the current state |
 
@@ -50,10 +51,11 @@ degradation is a condition rather than a moment.
 | Key | Action | Key | Action |
 | --- | --- | --- | --- |
 | `p` / `r` | pause / resume | `d` | candidate diff, per file |
-| `s` | stop the run | `l` | event log |
+| `s` | stop the run | `l` | event log (semantic filter by default) |
 | `i` | send an instruction, or start a new task | `m` | memory |
 | `M` | merge accepted work (when done) | `c` | the exact context sent to the model |
-| `t` | full plan | `e` | evaluation history |
+| `t` | trajectory: plan steps plus attempts with verdicts and knowledge | `e` | evaluation history |
+| `h` | guardian health per subsystem, from live probes | `?` | help |
 | `enter` | open the focused panel | `?` | help |
 | `tab`, `j` / `k` | move between panels | `q` | quit |
 

@@ -15,6 +15,16 @@ why it was accepted or rejected, and what was learned. The record persists in `s
 and appears on the dashboard timeline, so a rejected strategy stays visible without any
 chat transcript.
 
+## Plan history
+
+The plan is trajectory state with three stability regions: a locked verified prefix
+(completed steps with checkpoint linkage), the current step, and an adaptive future
+suffix. Replans patch the affected region — completed steps keep stable IDs and require
+recorded reason plus evidence to invalidate; dependents follow; rollback to an older
+checkpoint invalidates exactly the steps that no longer survive it. Every revision bumps
+the plan version (`PLAN v3 · 2/4 verified`) with a persisted record of what was
+preserved, invalidated, replaced and inserted.
+
 ## Trusted state and speculative state
 
 | | Trusted | Speculative |
@@ -70,6 +80,17 @@ you, and only then fails. Recovery is bounded (`recovery_attempts`, `recovery_bu
 replaces evidence: a correction is an ordinary semantic step that still has to pass every gate.
 
 See [Architecture](Architecture) for the complete failure taxonomy.
+
+## Runtime Guardian
+
+A deterministic in-process supervisor watches the *mechanism* while the agent works the
+task: every model call and tool operation gets pre/during/post health checks, every step
+boundary verifies runtime integrity, heartbeats detect soft stalls (active, no verified
+progress) and hard stalls (mechanism stuck), and every recovery is bounded with an
+escalation path. The Guardian decides recoveries; the runtime executes them. Health is
+one of six states (`healthy`, `degraded`, `recovering`, `waiting`, `blocked`, `fatal`),
+shown as a single top-bar state with a compact panel; `[h]` shows per-subsystem rows
+built from live probes, never painted green.
 
 ## Memory
 

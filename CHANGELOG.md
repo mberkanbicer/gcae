@@ -4,6 +4,19 @@ All notable changes to GCAE are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] — 2026-09-15
+
+### Changed
+
+- Wiki synced with 0.5.0: Concepts gains **Plan history** and **Runtime Guardian**
+  sections; Dashboard panels and keys refreshed (single primary status, health panel,
+  trajectory view, semantic-first log filter).
+- Corrected the 0.5.0 changelog test count (331, not 340).
+
+### Tests
+
+331 pass, unchanged (documentation-only release).
+
 ## [0.5.0] — 2026-09-14
 
 ### Added

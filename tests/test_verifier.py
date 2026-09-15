@@ -189,3 +189,55 @@ def test_hygiene_is_measured_before_criterion_commands_run(tmp_path: Path) -> No
     assert report.hygiene_passed
     # the criterion really did run pytest and really did create caches
     assert list((tmp_path / "tests").rglob("*.pyc"))
+
+
+def test_judge_sees_newest_evidence_first(tmp_path: Path) -> None:
+    """Recency is explicit, not scored: the bundle is newest-first with timestamps, so a
+    repaired run's fresh support outranks the stale contradiction it replaced."""
+    from datetime import UTC, datetime
+
+    criterion = "restart functionality works"
+    stale = EvidenceRecord(
+        id=1, run_id="r", trajectory_step_id="t1", kind=EvidenceKind.OBSERVATION,
+        claim_or_subject=criterion, source_type="session", source_reference="game.py",
+        summary="old contradiction", contradicts=[criterion],
+        created_at=datetime(2020, 1, 1, tzinfo=UTC),
+    )
+    fresh = EvidenceRecord(
+        id=2, run_id="r", trajectory_step_id="t2", kind=EvidenceKind.TEST_RESULT,
+        claim_or_subject=criterion, source_type="test", source_reference="test_restart",
+        summary="fresh support", supports=[criterion],
+    )
+    capture = PromptCapture({"passed": True, "evidence": "the fresh session restarts"})
+    report = FinalVerifier(capture).verify(
+        make_state(tmp_path, criterion), evidence=[stale, fresh]
+    )
+    assert report.passed
+    prompt = capture.prompts[0]
+    assert "newest first" in prompt
+    assert prompt.index('"id":2') < prompt.index('"id":1'), "newest cited first"
+    assert '"created_at"' in prompt
+    assert report.criteria[0].evidence_ids == [2]
+
+
+def test_contradiction_cites_newest_first(tmp_path: Path) -> None:
+    from datetime import UTC, datetime
+
+    criterion = "restart functionality works"
+
+    def against(record_id: int, year: int, summary: str) -> EvidenceRecord:
+        return EvidenceRecord(
+            id=record_id, run_id="r", trajectory_step_id="t1",
+            kind=EvidenceKind.OBSERVATION, claim_or_subject=criterion,
+            source_type="session", source_reference="game.py", summary=summary,
+            contradicts=[criterion],
+            created_at=datetime(year, 1, 1, tzinfo=UTC),
+        )
+
+    report = FinalVerifier(FakeProvider([], repair_limit=0)).verify(
+        make_state(tmp_path, criterion),
+        evidence=[against(1, 2020, "old contradiction"), against(2, 2024, "new contradiction")],
+    )
+    assert not report.passed
+    assert report.criteria[0].status == "fail"
+    assert report.criteria[0].evidence.index("E2") < report.criteria[0].evidence.index("E1")

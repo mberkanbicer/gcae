@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import sys
+from datetime import timedelta
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -12,7 +13,7 @@ from .config import Config, ProviderConfig, discover_config, load_config
 from .evaluator import DeterministicEvaluator, Evaluator, LLMEvaluator
 from .git import GitError, GitRepository, MergeConflict, NothingToMerge
 from .http_provider import OpenAICompatibleProvider
-from .models import AgentState, MergeRecord
+from .models import AgentState, MergeRecord, now_utc
 from .persistence import StateStore
 from .planner import LLMPlanner, Planner
 from .providers import FakeProvider, Provider
@@ -114,6 +115,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help="also delete records whose merge is still recorded (their `gcae undo` is lost)",
+    )
+    prune.add_argument(
+        "--older-than",
+        type=float,
+        default=None,
+        help="also prune runs older than this many days (overrides [runtime] run_retention_days)",
     )
     prune.add_argument("--config", type=Path)
     prune.add_argument("--runtime-dir", type=Path)
@@ -436,9 +443,17 @@ def _list_runs(runtime_dir: Path) -> None:
         )
 
 
-def _prune_runs(runtime_dir: Path, keep: int, dry_run: bool, force: bool = False) -> None:
-    """Delete the oldest run records beyond `keep`, never touching a run whose repository lock
-    is held — that is a live run in another process, however old its record is.
+def _prune_runs(
+    runtime_dir: Path,
+    keep: int,
+    dry_run: bool,
+    force: bool = False,
+    older_than_days: float | None = None,
+) -> None:
+    """Delete old run records: beyond `keep`, plus runs older than the retention TTL.
+
+    Never touches a run whose repository lock is held — that is a live run in another
+    process, however old its record is.
 
     A recorded merge is the only piece of run data that git does not already have (the
     pre-merge/merge commit pair), so `gcae undo` stops working without it; such records are
@@ -446,6 +461,8 @@ def _prune_runs(runtime_dir: Path, keep: int, dry_run: bool, force: bool = False
     import shutil
 
     runs_dir = Path(runtime_dir).expanduser() / "runs"
+    if older_than_days is not None and older_than_days <= 0:
+        raise ValueError("--older-than must be a positive number of days")
     if not runs_dir.is_dir():
         print("no runs found")
         return
@@ -456,8 +473,11 @@ def _prune_runs(runtime_dir: Path, keep: int, dry_run: bool, force: bool = False
         except (OSError, ValueError) as exc:
             print(f"gcae: skipping {state_file}: {exc}", file=sys.stderr)
     states.sort(key=lambda pair: pair[0].updated_at, reverse=True)
+    cutoff = now_utc() - timedelta(days=older_than_days) if older_than_days is not None else None
     pruned = 0
-    for state, run_dir in states[keep:]:
+    for index, (state, run_dir) in enumerate(states):
+        if index < keep and (cutoff is None or state.updated_at >= cutoff):
+            continue
         if state.merge is not None and not force:
             print(
                 f"gcae: keeping {state.run_id} (its merge is still recorded; pruning would "
@@ -630,7 +650,10 @@ def main(argv: list[str] | None = None) -> None:
             )
         runtime_dir = (args.runtime_dir or config.state_dir).expanduser()
         if args.command == "prune":
-            _prune_runs(runtime_dir, args.keep, args.dry_run, args.force)
+            older_than = args.older_than
+            if older_than is None:
+                older_than = config.runtime.run_retention_days
+            _prune_runs(runtime_dir, args.keep, args.dry_run, args.force, older_than)
             return
         if args.command == "input":
             runtime = _build_runtime(args, config, runtime_dir)

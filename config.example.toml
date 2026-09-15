@@ -24,6 +24,9 @@ command_idle_timeout = 20.0            # seconds without output before a running
 command_startup_timeout = 10.0         # seconds without any output before it never started
 strategy_retry_limit = 2               # identical failures before a blind repeat is refused
 require_execution_evidence = true      # a step that changed code must run something before acceptance
+# run_retention_days = 90            # automatic retention for `gcae prune`: runs older than
+                                     # this many days go even within --keep (CLI --older-than
+                                     # overrides it; live and merge-recorded runs are kept)
 recovery_attempts = 2
 recovery_budget = 5
 command_timeout = 30

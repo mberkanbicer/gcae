@@ -90,11 +90,18 @@ class FinalVerifier:
             claim_match = (
                 record.claim_or_subject and record.claim_or_subject.lower() in target
             )
-            if target in claims or claim_match:
-                supporting.append(record)
             contradictions = " | ".join(record.contradicts).lower()
             if target in contradictions or (claim_match and record.contradicts):
                 contradicting.append(record)
+            elif target in claims or claim_match:
+                # an explicit contradiction beats an implicit claim match: a record that
+                # says the criterion is false never counts as supporting it
+                supporting.append(record)
+        # the judge weighs recency, not a score: newest first, so a repaired run's fresh
+        # supporting evidence outranks the stale contradiction it replaced (ISO strings
+        # sort chronologically and never raise on naive/aware mixes)
+        supporting.sort(key=lambda record: record.created_at.isoformat(), reverse=True)
+        contradicting.sort(key=lambda record: record.created_at.isoformat(), reverse=True)
         return supporting, contradicting
 
     def _verify_criterion(
@@ -258,6 +265,7 @@ class FinalVerifier:
                 "source": record.source_reference[:160],
                 "summary": record.summary[:300],
                 "contradicts": record.contradicts[:3],
+                "created_at": record.created_at.isoformat(),
             }
             for record in [*supporting[:6], *contradicting[:3]]
         ]
@@ -286,6 +294,7 @@ class FinalVerifier:
             "provided; if the evidence is insufficient, answer passed=false. Never assume "
             "unobserved behavior. Reply with exactly one JSON object and no other text.\n"
             "When passed=true, evidence must cite the concrete observation that establishes it.\n"
+            "ledger_evidence is newest first; weigh recent observations over stale ones.\n"
             f"Criterion: {criterion}\n"
             f"CriterionJudgement JSON schema: {schema}\n"
             f"Evidence: {json.dumps(evidence_bundle, separators=(',', ':'))}\n"
@@ -301,13 +310,21 @@ class FinalVerifier:
             )
         passed = judgement.passed and bool(judgement.evidence.strip())
         verdict = judgement.evidence.strip() or "judge returned no evidence"
-        supporting_ids = [record.id for record in supporting if record.id is not None]
+        contra_ids = {record.id for record in contradicting}
+        supporting_ids = [
+            record.id for record in supporting
+            if record.id is not None and record.id not in contra_ids
+        ]
+        weighed_ids = supporting_ids + [
+            record.id for record in contradicting if record.id is not None
+        ]
+        # a pass rests on its support; a fail weighed both sides, so it cites both
         return CriterionResult(
             criterion=criterion,
             passed=passed,
             status="pass" if passed else "fail",
             evidence=verdict,
-            evidence_ids=supporting_ids,
+            evidence_ids=supporting_ids if passed else weighed_ids,
         )
 
     @staticmethod

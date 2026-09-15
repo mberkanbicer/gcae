@@ -214,3 +214,51 @@ def test_prune_keeps_a_record_with_an_un_undone_merge(tmp_path: Path, capsys) ->
     assert "pruned run-old" in capsys.readouterr().out
     assert not (runtime_dir / "runs" / "run-old").exists()
     assert (runtime_dir / "runs" / "run-new").exists()
+
+
+def test_prune_older_than_deletes_runs_past_the_ttl(tmp_path: Path, capsys) -> None:
+    """Retention is by age as well as by count: a run older than the TTL goes even when
+    it is among the newest `--keep`."""
+    from datetime import UTC, datetime, timedelta
+
+    runtime_dir = tmp_path / "runtime"
+    now = datetime.now(UTC)
+    old = make_state("run-old", (now - timedelta(days=60)).isoformat())
+    new = make_state("run-new", now.isoformat())
+    StateStore(runtime_dir / "runs" / "run-old" / "state.json").save(old)
+    StateStore(runtime_dir / "runs" / "run-new" / "state.json").save(new)
+    _prune_runs(runtime_dir, keep=10, dry_run=False, older_than_days=30)
+    output = capsys.readouterr().out
+    assert "pruned run-old" in output
+    assert not (runtime_dir / "runs" / "run-old").exists()
+    assert (runtime_dir / "runs" / "run-new").exists(), "a recent run survives the TTL"
+
+
+def test_prune_rejects_a_non_positive_older_than(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="positive"):
+        _prune_runs(tmp_path / "runtime", keep=10, dry_run=False, older_than_days=0)
+
+
+def test_prune_uses_config_retention_when_the_flag_is_absent(
+    tmp_path: Path, capsys
+) -> None:
+    """`[runtime] run_retention_days` applies unless --older-than overrides it."""
+    from datetime import UTC, datetime, timedelta
+
+    from gcae.cli import main
+
+    runtime_dir = tmp_path / "runtime"
+    now = datetime.now(UTC)
+    StateStore(runtime_dir / "runs" / "run-old" / "state.json").save(
+        make_state("run-old", (now - timedelta(days=60)).isoformat())
+    )
+    StateStore(runtime_dir / "runs" / "run-new" / "state.json").save(
+        make_state("run-new", now.isoformat())
+    )
+    config = tmp_path / "config.toml"
+    config.write_text("[runtime]\nrun_retention_days = 30\n")
+    main(["prune", "--runtime-dir", str(runtime_dir),
+          "--config", str(config), "--keep", "10"])
+    output = capsys.readouterr().out
+    assert "pruned run-old" in output
+    assert (runtime_dir / "runs" / "run-new").exists()

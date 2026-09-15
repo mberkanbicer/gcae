@@ -68,14 +68,20 @@ Run records accumulate under the state directory (`runs/<run-id>/` each: state, 
 history). `prune` deletes the oldest records, keeping the newest `--keep` (default 10):
 
 ```
-gcae prune --dry-run          # list what would be deleted
-gcae prune --keep 20          # keep the 20 newest, delete the rest
-gcae prune --keep 0           # delete every run record
+gcae prune --dry-run                 # list what would be deleted
+gcae prune --keep 20                 # keep the 20 newest, delete the rest
+gcae prune --keep 0                  # delete every run record
+gcae prune --older-than 30           # also delete runs older than 30 days, even within --keep
 ```
+
+`[runtime] run_retention_days` applies the same TTL without the flag (the flag wins when both
+are given).
 
 Pruning removes run records only — it never touches repositories or worktrees, and it never
 deletes a run whose repository lock is held: that is a live run in another process, however old its
-record is. Two further guards keep pruning from breaking anything: a record whose merge is still
+record is. The shared knowledge database is deliberately left alone: `memory.db` (memory records
+and the evidence ledger) is cumulative knowledge, so pruning a run's directory does not delete
+what that run taught — the per-run record goes, the lesson stays. Two further guards keep pruning from breaking anything: a record whose merge is still
 recorded is kept (it holds the pre-merge/merge commit pair that `gcae undo` reverses from) unless
 `--force` says otherwise, and unreadable records are reported and skipped, not silently kept or
 deleted.

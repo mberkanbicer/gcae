@@ -102,6 +102,10 @@ class RuntimeConfig(BaseModel):
     #: when a step changed code and the run declares checkable commands, at least one command
     #: must actually have run before the step can be accepted
     require_execution_evidence: bool = True
+    #: automatic retention for `gcae prune`: runs older than this many days are pruned even
+    #: when they are among the newest `--keep` (the CLI --older-than flag overrides it;
+    #: live runs and merge-recorded runs are still kept)
+    run_retention_days: float | None = None
 
 
 class ValidationConfig(BaseModel):

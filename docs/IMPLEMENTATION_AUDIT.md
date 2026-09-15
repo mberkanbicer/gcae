@@ -68,7 +68,9 @@ dependency set is exactly `pydantic`, `httpx`, `textual`. Removed in this pass: 
 
 ## Still missing (accepted, not silently ignored)
 
-- Run-data pruning exists (`gcae prune`); no automatic retention TTL.
+- Run-data pruning has a retention TTL (`--older-than`, `[runtime] run_retention_days`);
+  pruning removes run directories only — `memory.db` stays cumulative by design.
 - The evidence ledger is append-only; no compaction (run history is the archive).
 - The judge cannot *request* new evidence at verification time; the run's ladder does that
   work instead (verification failure replans with the missing evidence named).
+- The judge weighs recency explicitly (newest-first bundle with timestamps), not a score.

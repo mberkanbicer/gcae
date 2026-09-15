@@ -96,6 +96,26 @@ class MemoryStore:
             row_id = cursor.lastrowid
         return record.model_copy(update={"id": row_id})
 
+    def backfill_source_repos(self, mapping: dict[str, str]) -> int:
+        """Attribute legacy memory rows (empty ``source_repo``) to their run's repository.
+
+        ``mapping`` is run_id -> source_repo, typically rebuilt from the run state files.
+        Only rows the migration left blank are touched; rows that already carry a
+        repository are never rewritten. Returns the number of rows updated."""
+        updated = 0
+        with self._lock:
+            for run_id, source_repo in mapping.items():
+                if not source_repo:
+                    continue
+                cursor = self.connection.execute(
+                    "UPDATE memory SET source_repo = ? "
+                    "WHERE run_id = ? AND (source_repo = '' OR source_repo IS NULL)",
+                    (source_repo, run_id),
+                )
+                updated += cursor.rowcount if cursor.rowcount > 0 else 0
+            self.connection.commit()
+        return updated
+
     def get(self, record_id: int) -> MemoryRecord:
         with self._lock:
             row = self.connection.execute(

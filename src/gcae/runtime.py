@@ -468,6 +468,7 @@ class Runtime:
         worktree, branch, base = self.repo.create_isolated_worktree(run_id)
         try:
             self.memory = MemoryStore(self.runtime_dir / "memory.db")
+            self._backfill_memory_repos()
             self.events = EventLog(self.runtime_dir / "runs" / run_id / "events.jsonl")
         except OSError as exc:
             raise RuntimeError(
@@ -578,6 +579,7 @@ class Runtime:
         self.repo.worktree = Path(self.state.worktree)
         self.repo.branch = self.state.branch
         self.memory = MemoryStore(self.runtime_dir / "memory.db")
+        self._backfill_memory_repos()
         self.events = EventLog(path / "events.jsonl")
         self.repo.validate_source()
         # GCAE owns its worktree: recreate it from the run branch instead of giving up
@@ -2535,6 +2537,31 @@ class Runtime:
                 f"run state could not be written: {type(exc).__name__}: {exc} — stopping so "
                 "resume cannot continue from a stale checkpoint (accepted commits are intact)"
             ) from exc
+
+    def _backfill_memory_repos(self) -> None:
+        """Best-effort migration aid: attribute legacy memory rows to their repository.
+
+        Rows written before scoped retrieval carry an empty ``source_repo`` and would stay
+        invisible to every scoped search. The run state files still know which repository
+        each run belongs to, so rebuild that mapping and backfill. Never fails the run:
+        unreadable state files are skipped and store errors are only logged."""
+        if self.memory is None:
+            return
+        try:
+            runs_dir = self.runtime_dir / "runs"
+            mapping: dict[str, str] = {}
+            if runs_dir.is_dir():
+                for state_file in runs_dir.glob("*/state.json"):
+                    try:
+                        state = StateStore(state_file).load()
+                    except (OSError, ValueError):
+                        continue
+                    if state.source_repo:
+                        mapping[state.run_id] = state.source_repo
+            if mapping:
+                self.memory.backfill_source_repos(mapping)
+        except Exception:  # noqa: BLE001 - migration aid, never run-critical
+            logger.debug("memory source_repo backfill skipped", exc_info=True)
 
     def _remember(self, kind: str, content: str, immutable: bool = False) -> None:
         if self.state is None or self.memory is None:

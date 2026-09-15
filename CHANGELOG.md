@@ -4,6 +4,32 @@ All notable changes to GCAE are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] — 2026-09-14
+
+### Added
+
+- **Retention TTL for `gcae prune`.** `--older-than DAYS` deletes runs older than the TTL
+  even within `--keep`; `[runtime] run_retention_days` applies the same default without the
+  flag. Live runs and merge-recorded runs are still kept; pruning removes run directories
+  only and deliberately leaves the cumulative `memory.db` alone.
+- **Legacy memory backfill.** Opening a run attributes pre-0.4.0 memory rows (empty
+  `source_repo`) to their run's repository from the persisted run states, best-effort and
+  never run-critical — scoped retrieval now sees old knowledge where the repo is known.
+- **Explicit evidence recency.** The judge bundle is newest-first with `created_at` on every
+  cited record (no scoring); a repaired run's fresh support outranks the stale contradiction
+  it replaced, and contradiction-only verdicts cite newest first.
+
+### Fixed
+
+- An explicit contradiction no longer counts as support via claim matching: a record that
+  says a criterion is false is contradicting-only, so pure contradiction fails fast without
+  asking the judge, and PASS verdicts cite only what supports them.
+
+### Tests
+
+286 pass (+7): backfill store + runtime wiring, TTL prune / rejection / config fallback,
+judge newest-first ordering and newest-first contradiction citation.
+
 ## [0.4.0] — 2026-09-14
 
 ### Added

@@ -541,3 +541,39 @@ def test_legacy_memory_database_gains_the_source_repo_column(tmp_path: Path) -> 
                                    source_repo="/s"))
     assert saved.id == 1
     assert [r.record.run_id for r in store.search("works", source_repo="/s")] == ["r"]
+
+
+def test_backfill_attributes_legacy_rows_to_their_repository(tmp_path: Path) -> None:
+    """Pre-0.4.0 rows carry an empty source_repo and are invisible to scoped search;
+    backfilling from the run state files makes them retrievable without rewriting
+    rows that already carry a repository."""
+    store = MemoryStore(tmp_path / "memory.db")
+    store.add(MemoryRecord(kind="failure", content="old lesson about games",
+                           run_id="run-old", source_repo=""))
+    store.add(MemoryRecord(kind="failure", content="already scoped lesson",
+                           run_id="run-old", source_repo="/repo/other"))
+    updated = store.backfill_source_repos({"run-old": "/repo/A", "run-x": "", "": "/repo/A"})
+    assert updated == 1, "only the blank row may be rewritten"
+    assert [r.record.run_id for r in store.search("games", source_repo="/repo/A")] == ["run-old"]
+    scoped = store.search("scoped lesson", source_repo="/repo/other")
+    assert [r.record.run_id for r in scoped] == ["run-old"]
+
+
+def test_runtime_backfills_legacy_memory_on_start(tmp_path: Path) -> None:
+    """Opening a run backfills legacy rows from the persisted run states (best effort)."""
+    from gcae.persistence import StateStore
+
+    source = fresh_repo(tmp_path)
+    runtime_dir = tmp_path / "runtime"
+    store = MemoryStore(runtime_dir / "memory.db")
+    store.add(MemoryRecord(kind="failure", content="legacy lesson token xyzzy",
+                           run_id="legacy-run", source_repo=""))
+    legacy = AgentState(run_id="legacy-run", source_repo=str(source), worktree="/w",
+                        branch="b", objective="o", original_request="o")
+    StateStore(runtime_dir / "runs" / "legacy-run" / "state.json").save(legacy)
+    runtime = Runtime(source, runtime_dir, control=RuntimeControl())
+    runtime.memory = MemoryStore(runtime_dir / "memory.db")
+    runtime._backfill_memory_repos()
+    assert runtime.memory is not None
+    found = runtime.memory.search("xyzzy", source_repo=str(source))
+    assert [r.record.run_id for r in found] == ["legacy-run"]

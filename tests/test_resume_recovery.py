@@ -449,15 +449,28 @@ if mode == "run":
     time.sleep(600)  # hold: the parent must be able to kill a live process
 else:
     run_id = run_id_file.read_text(encoding="utf-8").strip()
-    provider = FakeProvider([
-        {"action": "execute_tool", "semantic_goal": "finish", "reason_summary": "finish",
-         "tool": {"name": "create_file",
-                  "arguments": {"path": "done.txt", "content": "done\\n"}}},
-        {"action": "complete_semantic_step", "semantic_goal": "finish",
+    # ensure out.txt once (a no-op if the checkpoint survived), then cycles whose
+    # write always changes the tree — a fixed-content repeat can burn decisions
+    # as a rejected no-op until the provider exhausts on slow machines
+    ensure = [
+        {"action": "execute_tool", "semantic_goal": "ensure out", "reason_summary": "ensure",
+         "tool": {"name": "write_file",
+                  "arguments": {"path": "out.txt", "content": "ok\\n"}}},
+        {"action": "complete_semantic_step", "semantic_goal": "ensure out",
          "reason_summary": "done"},
-        {"action": "finish_candidate", "semantic_goal": "finish",
-         "reason_summary": "finish"},
-    ])
+    ]
+    cycles = []
+    for i in range(10):
+        cycles.extend([
+            {"action": "execute_tool", "semantic_goal": "finish", "reason_summary": "finish",
+             "tool": {"name": "write_file",
+                      "arguments": {"path": "done.txt", "content": f"done {i}\\n"}}},
+            {"action": "complete_semantic_step", "semantic_goal": "finish",
+             "reason_summary": "done"},
+            {"action": "finish_candidate", "semantic_goal": "finish",
+             "reason_summary": "finish"},
+        ])
+    provider = FakeProvider(ensure + cycles)
     runtime = Runtime(source, runtime_dir, provider=provider, control=RuntimeControl())
     runtime.resume(run_id)
     state = runtime.run()

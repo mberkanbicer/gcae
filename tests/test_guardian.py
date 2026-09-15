@@ -314,3 +314,126 @@ def test_empty_model_output_recovers_through_the_ladder(tmp_path) -> None:
     check = next(e for e in events if e.event_type == "guardian_check")
     assert check.payload["subject"] == "model:controller"
     assert (Path(state.worktree) / "out.txt").read_text() == "ok\n"
+
+
+def _plan_step(
+    sid: str, status: str, checkpoint: str | None = None, depends: list[str] | None = None,
+    requirements: list[str] | None = None,
+) -> dict[str, object]:
+    step: dict[str, object] = {"id": sid, "status": status, "goal": sid}
+    if checkpoint:
+        step["checkpoint"] = checkpoint
+    if depends:
+        step["depends_on"] = depends
+    if requirements:
+        step["validation_requirements"] = requirements
+    return step
+
+
+def test_plan_health_reviews_every_invariant_directly() -> None:
+    guardian = Guardian()
+    healthy = guardian.plan_health(
+        steps=[
+            _plan_step("s1", "completed", checkpoint="a1"),
+            _plan_step("s2", "active", requirements=["file exists: out.txt"]),
+        ],
+        history=[{"version": 2}],
+        version=2,
+        current_step_id="s2",
+        accepted_commit="a1",
+        criteria=["file exists: out.txt"],
+        verified_criteria=[],
+    )
+    assert healthy.ok
+    duplicated = guardian.plan_health(
+        steps=[_plan_step("s1", "active"), _plan_step("s1", "pending")],
+        history=[], version=1, current_step_id="s1",
+        accepted_commit=None, criteria=[], verified_criteria=[],
+    )
+    assert duplicated.kind == "plan_history_corrupted"
+    assert duplicated.recovery_action is RecoveryAction.MARK_BLOCKED
+    mismatched = guardian.plan_health(
+        steps=[_plan_step("s1", "active")],
+        history=[{"version": 3}],
+        version=2, current_step_id="s1",
+        accepted_commit=None, criteria=[], verified_criteria=[],
+    )
+    assert mismatched.kind == "plan_history_corrupted"
+    dangling = guardian.plan_health(
+        steps=[_plan_step("s1", "active", depends=["s0"])],
+        history=[], version=1, current_step_id="s1",
+        accepted_commit=None, criteria=[], verified_criteria=[],
+    )
+    assert dangling.kind == "invalid_dependency"
+    stale_current = guardian.plan_health(
+        steps=[
+            _plan_step("s1", "completed", checkpoint="a1"),
+            _plan_step("s2", "completed", checkpoint="a2"),
+        ],
+        history=[], version=1, current_step_id="s2",
+        accepted_commit="a2", criteria=[], verified_criteria=[],
+    )
+    assert stale_current.kind == "current_step_missing"
+    unlinked = guardian.plan_health(
+        steps=[_plan_step("s1", "completed")],
+        history=[], version=1, current_step_id=None,
+        accepted_commit=None, criteria=[], verified_criteria=[],
+    )
+    assert unlinked.kind == "plan_checkpoint_mismatch"
+    uncovered = guardian.plan_health(
+        steps=[_plan_step("s1", "active", requirements=["unrelated"])],
+        history=[], version=1, current_step_id="s1",
+        accepted_commit=None,
+        criteria=["file exists: out.txt"], verified_criteria=[],
+    )
+    assert uncovered.kind == "missing_success_criterion"
+
+
+def test_event_store_failure_is_detected_and_visible(tmp_path) -> None:
+    """§78: events.jsonl write failure must surface, not silently continue as healthy."""
+    import subprocess
+
+    from gcae.providers import FakeProvider
+    from gcae.runtime import Runtime, RuntimeControl
+
+    source = tmp_path / "source"
+    source.mkdir()
+    subprocess.run(["git", "init", "-q", str(source)], check=True)
+    subprocess.run(
+        ["git", "-C", str(source), "-c", "user.name=T", "-c", "user.email=t@e.f",
+         "commit", "-q", "--allow-empty", "-m", "base"],
+        check=True,
+    )
+    provider = FakeProvider(
+        [
+            {
+                "action": "execute_tool",
+                "semantic_goal": "create",
+                "reason_summary": "create it",
+                "tool": {"name": "create_file",
+                         "arguments": {"path": "out.txt", "content": "ok\n"}},
+            },
+            {"action": "complete_semantic_step", "semantic_goal": "create",
+             "reason_summary": "done"},
+            {"action": "finish_candidate", "semantic_goal": "create",
+             "reason_summary": "finish"},
+        ]
+    )
+    runtime = Runtime(
+        source, tmp_path / "runtime", provider=provider, control=RuntimeControl(),
+    )
+    events: list = []
+    runtime.subscribe(events.append)
+    runtime.start("create out.txt", success_criteria=["file exists: out.txt"])
+    log_path = tmp_path / "runtime" / "runs" / runtime.state.run_id / "events.jsonl"
+    log_path.unlink()
+    log_path.mkdir()  # append mode can no longer open the path
+    state = runtime.run()
+    assert state.status == "complete", state.status
+    degraded = [e for e in events if e.event_type == "runtime_degraded"]
+    assert degraded, "the lost event store must be reported, not ignored"
+    assert degraded[0].payload["component"] == "event log"
+    assert any("event log failed" in d for d in state.degradations), (
+        "the run must not look healthy while its own record is unwritable"
+    )
+    log_path.rmdir()

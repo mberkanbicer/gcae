@@ -93,6 +93,32 @@ The candidate diff the agent works from is the working tree **against the last c
 untracked and staged changes are visible: an agent that cannot see the file it just wrote rewrites it
 forever (observed: six rewrites of one complete script).
 
+## Guardian supervision and progress presentation
+
+Every model call and every tool operation passes through the **Runtime Guardian**
+(`guardian.py`, docs/RUNTIME_GUARDIAN.md) — a deterministic in-process supervisor, not
+an agent:
+
+```
+model/tool call ──► Guardian.pre_*_check ──► execute ──► Guardian.post_*_check
+                        │                                     │
+                     refuse early            FailureCheckResult: ok | recoverable | blocked
+                                                               │
+                          evaluator never sees unusable output: guardian_check first
+```
+
+The Guardian supervises the *mechanism* (provider responsive, output schema valid,
+worktree sane, no orphans, state persisted, soft/hard stalls); the evaluator judges the
+*task*. A `guardian_check` event fires before recovery; recoveries are bounded, verified
+after the fact, and escalate to block/fatal instead of looping. A Guardian exception stops
+the run safely with FATAL — there are no autonomous writes without supervision. Plan
+consistency (stable IDs, versions, checkpoint linkage, criteria coverage) is reviewed by
+the same Guardian after every acceptance, rollback, replan, resume and override.
+
+Presentation is a separate layer (`progress.py`, docs/PROGRESS_MODEL.md): raw runtime
+events are projected into semantic `ProgressEvent`s — the engineering-journal timeline,
+the ACTIVE story and the health panel — while token/chunk telemetry stays in Logs.
+
 ## Replanning and safeguards
 
 Replanning discards speculative changes, keeps accepted commits and knowledge, and preserves

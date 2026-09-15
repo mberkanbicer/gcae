@@ -554,7 +554,7 @@ class Guardian:
                 False, RecoveryAction.MARK_BLOCKED,
             )
         try:
-            last_version = history[-1].get("version", 0)
+            last_version = history[-1].get("version", 0) if history else 0
             version_seen = int(str(last_version))
         except (TypeError, ValueError):
             version_seen = -1

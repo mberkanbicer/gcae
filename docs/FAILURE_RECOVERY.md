@@ -21,3 +21,19 @@ The recovery ladder is bounded and evidence-chosen, not mechanical:
 `BLOCKED` is not `FAILED`: blocked records the last trusted state, the exact blocker, the
 attempted strategies, and what would unblock; failed means the runtime itself cannot
 continue safely (or the user was already asked).
+
+## Where the Guardian fits
+
+The **Runtime Guardian** (`docs/RUNTIME_GUARDIAN.md`) wraps this ladder's inputs: every
+model call gets pre/during/post checks (empty, truncated, invalid-schema, stalled and
+rate-limited outputs are classified before the evaluator ever sees them), every tool
+operation gets a post-check even on success (exit code, timeout, orphan process, worktree
+state), and every step boundary verifies persistence and integrity invariants. A failed
+check emits `guardian_check` with a recovery action; the runtime executes it, verifies the
+recovery itself, and only resumes if the post-recovery health check passes. Recovery
+budgets are bounded per failure kind — same provider retry, backoff, then fallback, then
+block; never an endless loop, and never a second LLM agent. Soft stalls (active, no
+verified progress) route to the ladder above; hard stalls (mechanism stuck) route to
+Guardian recovery. If the Guardian itself throws, the run stops safely with FATAL and the
+trusted checkpoint survives. Health states (`healthy`, `degraded`, `recovering`,
+`waiting`, `blocked`, `fatal`) surface on the dashboard and `[h]`.

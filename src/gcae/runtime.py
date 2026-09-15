@@ -377,6 +377,8 @@ class Runtime:
         self._same_failure_count = 0
         self.repeated_failure_limit = 3
         self._degrade_notified: dict[str, bool] = {}
+        # context anomalies repeat on every rebuild while memory stays large: warn once
+        self._context_warned = False
         self._failed_over: set[str] = set()
         #: what each approach has already achieved, keyed by its fingerprint
         self.command_idle_timeout = command_idle_timeout
@@ -1154,9 +1156,12 @@ class Runtime:
             "pinned": len(context.pinned_ids),
             "omitted": len(context.omitted_ids),
         }
-        if context.memory_share > 0.4 or context.dropped_duplicates > 0:
+        if (
+            context.memory_share > 0.4 or context.dropped_duplicates > 0
+        ) and not self._context_warned:
             # anomaly warning: retrieved memory is eating the prompt, or the gate
-            # is working hard. Details only — the main screen stays semantic.
+            # is working hard. One line, once per run — the main screen stays semantic.
+            self._context_warned = True
             self._event(
                 "context_warning",
                 RunPhase.EXECUTE,

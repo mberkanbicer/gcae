@@ -155,11 +155,39 @@ def test_semantic_progress_reads_like_an_engineering_journal() -> None:
         shown.append(f"{line.category.value.upper()} {line.title}")
     for line in feed.push("replan", {"reason": "use PTY execution"}, step_id="step-1"):
         shown.append(f"{line.category.value.upper()} {line.title}")
+    for line in feed.push(
+        "validation",
+        {"passed": True, "command_results": [{"tool": "run_command", "success": True}]},
+        step_id="step-2",
+    ):
+        shown.append(f"{line.category.value.upper()} {line.title}")
+    for line in feed.push(
+        "checkpoint_created",
+        {"commit": "7fa89c2", "message": "curses initialization fixed"},
+        step_id="step-2",
+    ):
+        shown.append(f"{line.category.value.upper()} {line.title}")
     text = "\n".join(shown)
     for expected in (
         "PLAN", "INSPECT Reviewed 3 relevant files", "EDIT", "EXECUTE",
         "FAILED · curses.error", "DIAGNOSE", "ROLLBACK", "REPLAN",
+        "VALIDATE Validation passed · 1 checks", "ACCEPT Checkpoint 7fa89c2",
     ):
         assert expected in text, expected
     assert "reasoning" not in text and "chars=" not in text
     assert "read_file" not in text, "no per-file callback lines"
+
+
+def test_context_warning_is_one_deliberate_line() -> None:
+    """§28: the anomaly reaches the user as one SYSTEM line, never as raw telemetry."""
+    feed = ProgressFeed()
+    lines = feed.push(
+        "context_warning",
+        {"memory_share": 0.44, "dropped_duplicates": 12, "retrieved": 31},
+        step_id="step-1",
+    )
+    assert len(lines) == 1
+    line = lines[0]
+    assert line.category.value == "system"
+    assert "44%" in line.title and "12 duplicates" in line.title
+    assert "reasoning" not in line.title

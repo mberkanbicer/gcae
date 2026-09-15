@@ -229,6 +229,17 @@ def summarize_event(
             ProgressStatus.RUNNING,
             detail={"tool": name, "arguments": arguments},
         )
+    if event_type == "context_warning":
+        share = payload.get("memory_share")
+        title = (
+            f"Retrieved memory {float(share):.0%} of context"
+            if isinstance(share, (int, float))
+            else "Context anomaly"
+        )
+        dropped = payload.get("dropped_duplicates") or 0
+        if dropped:
+            title += f" · {int(dropped)} duplicates dropped"
+        return make(ProgressCategory.SYSTEM, title, severity="warning")
     if event_type == "validation":
         if payload.get("passed"):
             commands = payload.get("command_results") or []

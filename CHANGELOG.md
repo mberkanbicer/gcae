@@ -4,6 +4,39 @@ All notable changes to GCAE are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2] — 2026-09-15
+
+### Fixed
+
+- **Doc sync (the §86 gap):** `FAILURE_RECOVERY.md` (Guardian's place in the ladder),
+  `CONTEXT_RECONSTRUCTION.md` (retrieval tiers, duplicate gate, `context_warning`),
+  `ARCHITECTURE.md` (Guardian-wrapped pipeline and the progress presentation layer) and
+  `TUI.md` (three detail levels, semantic-first Logs default, `[h]` Health screen row,
+  ACTIVE Goal/Doing/Last/Next) now describe shipped behavior instead of the pre-0.5.0 UI.
+- **Guardian `plan_health` crashed on empty plan history** (`history[-1]` before the
+  guard) — exposed by the new direct test; empty history is now valid.
+- `context_warning` had no presentation mapping: it now renders as one deliberate SYSTEM
+  line (`Retrieved memory 44% of context · 12 duplicates dropped`) and the runtime emits it
+  once per run, so a persistently heavy memory share cannot flood the timeline.
+- The §71 journal test now asserts the full required sequence, including
+  `Validation passed · 1 checks` and `Checkpoint 7fa89c2` (10/10 lines).
+
+### Added
+
+- `tests/test_guardian.py::test_event_store_failure_is_detected_and_visible` (§78:
+  events.jsonl unwritable → `runtime_degraded` + state degradations, run completes
+  visibly degraded, never silently healthy) and
+  `test_plan_health_reviews_every_invariant_directly` (duplicate IDs, version mismatch,
+  dangling dependency, non-executable current step, missing checkpoint linkage, uncovered
+  criterion — each classified and routed to `MARK_BLOCKED`).
+- Deferred gaps recorded honestly in `docs/IMPLEMENTATION_AUDIT.md`: typed replan-reason
+  categories, criterion revalidation model, per-event timeline expansion, in-panel model
+  row.
+
+### Tests
+
+334 pass (+2 guardian, +1 progress).
+
 ## [0.5.1] — 2026-09-15
 
 ### Changed

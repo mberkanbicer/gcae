@@ -24,8 +24,9 @@ prompt so the same session can be retried after the repository is fixed.
 ```
 ┌ top status bar ───────────────────────────────────────────────────────────────────────┐
 ├─────────────────────────────┬─────────────────────────────────────────────────────────┤
-│ OBJECTIVE  (request + NOW)  │ ACTIVE      (goal · action · target · expected · state) │
-│ PLAN       (roadmap)        │ CHECKPOINT  (TRUSTED · CANDIDATE · file scope)          │
+│ OBJECTIVE  (request + NOW)  │ ACTIVE     (Goal · Doing · Last result · Next)          │
+│ PLAN       (roadmap)        │ HEALTH      (guardian state, compact)                  │
+│                             │ CHECKPOINT  (TRUSTED · CANDIDATE · file scope)          │
 │                             │ VALIDATION  (checks · criteria · failures first)        │
 │                             │ EVALUATION  (the latest decision and its reason)        │
 ├─────────────────────────────┴─────────────────────────────────────────────────────────┤
@@ -60,6 +61,13 @@ Differences from a plain log viewer:
 - **Curated events.** Routine tool successes and model telemetry are not timeline entries; the full
   stream is one keystroke away (`l`). Tool failures, rollbacks, replans, checkpoints, validation
   results, user instructions and terminal states always appear.
+- **Three detail levels, never mixed.** *Level 1* is the main timeline: one categorized line per
+  meaningful action or outcome (`INSPECT Reviewed 3 relevant files`, `ROLLBACK Restored c00a1ba`),
+  with consecutive reads grouped and outcomes resolved in place. *Level 2* is the dedicated detail
+  screens — `Enter` on the focused section, plus `d` diff, `e` evaluation, `t` trajectory, `h`
+  health, `m` memory, `c` context — command output, evidence records, evaluator reasons.
+  *Level 3* is raw telemetry: provider chunks, character counts, retry messages, stack traces —
+  Logs only, and never the default view. "Detailed" never means a token stream.
 - **A slow model is never a frozen screen.** Every model call is bracketed by `provider_started` /
   `provider_finished` events; a silent call emits a `provider_waiting` heartbeat every 10 s. The
   ACTIVE panel shows one calm row (`controller · generating · 3.4s`) plus the model name, and the
@@ -188,11 +196,12 @@ there — it ends the run with its reason in the banner.
 | Key | Screen | Contents |
 | --- | --- | --- |
 | `d` | Diff | file list (`M`/`A`/`D`/`R` + `+N -M`) on the left, colourised unified diff on the right, `j/k`/`↑`/`↓` to switch, `Esc` to close. New files are diffed with `git diff --no-index`; clean trees say so explicitly |
-| `l` | Logs | the full event stream with timestamps; `f` cycles filters (all / model / tools / context / git / validation / evaluation / errors); follows the tail until you scroll up |
+| `l` | Logs | the full event stream with timestamps; opens on the **semantic** filter (decisions, failures, recovery, checkpoints — no telemetry); `f` cycles filters (semantic / all / model / guardian / tools / context / git / validation / evaluation / errors); follows the tail until you scroll up |
 | `m` | Memory | stored records grouped by kind (`USER_INSTRUCTION`, `FACT`, `DECISION`, `FAILURE`, …) with step, commit, timestamp and source provenance |
 | `c` | Context | the request payload actually sent to the model: section list with size share, plus the selected section's content |
 | `e` | Evaluation | latest decision and reason, next goal, promoted memories, verification criteria with evidence, validation command output tails |
 | `t` | Trajectory | plan steps plus every attempt with verdict, knowledge and evidence; completed history stays visible |
+| `h` | Health | the guardian's view per subsystem — runtime, model, worktree, memory, event store, active process, last recovery — built from live probes, never painted green |
 | `Enter` | Inspect | opens the detail screen for the focused section (plan, checkpoint→diff, validation/active→evaluation, objective→context, events→logs) |
 
 ## Keys

@@ -23,6 +23,8 @@ def next_step(state: AgentState, reason: str) -> list[PlanStep]:
             goal=state.objective,
             rationale=f"Replanned after: {reason}",
             expected_result="A corrected implementation passes deterministic validation.",
+            expected_evidence=["the corrected implementation passes its checks"],
+            failure_signals=[f"the same failure repeats: {reason[:80]}"],
             validation_requirements=state.success_criteria,
         )
     ]
@@ -67,6 +69,10 @@ def build_planner_prompt(state: AgentState) -> str:
         "Each step's intended_scope must be repository-relative file or directory paths you "
         "expect that step to touch (for example 'fib.py' or 'src/parser.py'), and [] when "
         "you cannot say: scope is checked evidence, so prose there is useless.\n"
+        "Each step should state expected_result (what succeeding looks like), up to three "
+        "expected_evidence items (observable checks that would prove it, e.g. 'the test "
+        "suite passes'), and up to three failure_signals (observations that would mean the "
+        "step failed, e.g. 'the process exits immediately').\n"
         f"InitialPlan JSON schema: {schema}\n"
         f"User request: {state.original_request}\n"
         f"User-provided criteria: {json.dumps(state.success_criteria)}\n"

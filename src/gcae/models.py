@@ -38,6 +38,10 @@ class PlanStep(BaseModel):
     goal: str
     rationale: str = ""
     expected_result: str = ""
+    #: what observable evidence should exist when the step succeeds
+    expected_evidence: list[str] = Field(default_factory=list)
+    #: observations that would contradict the expectation (checked, not decorative)
+    failure_signals: list[str] = Field(default_factory=list)
     intended_scope: list[str] = Field(default_factory=list)
     validation_requirements: list[str] = Field(default_factory=list)
     status: Literal["pending", "active", "completed", "failed", "skipped"] = "pending"
@@ -58,6 +62,8 @@ class SemanticStep(BaseModel):
     goal: str
     rationale: str = ""
     expected_result: str = ""
+    expected_evidence: list[str] = Field(default_factory=list)
+    failure_signals: list[str] = Field(default_factory=list)
     intended_scope: list[str] = Field(default_factory=list)
     validation_requirements: list[str] = Field(default_factory=list)
 
@@ -88,6 +94,43 @@ class ToolResult(BaseModel):
     prompt: str = ""
     termination_reason: str = ""
     stdin_sent: int = 0
+
+
+class EvidenceKind(StrEnum):
+    """Evidence classes, kept small: a kind exists only when something displays it differently."""
+
+    COMMAND_RESULT = "command_result"
+    TEST_RESULT = "test_result"
+    BUILD_RESULT = "build_result"
+    FILE_STATE = "file_state"
+    GIT_DIFF = "git_diff"
+    STATIC_CHECK = "static_check"
+    INTERACTIVE_SESSION = "interactive_session"
+    ARTIFACT = "artifact"
+    USER_CONFIRMATION = "user_confirmation"
+    OBSERVATION = "observation"
+
+
+class EvidenceRecord(BaseModel):
+    """One piece of observable evidence in the run's evidence ledger.
+
+    Deliberately not a knowledge graph and not scored: evidence is present, absent,
+    supporting, or contradicting.  ``supports`` and ``contradicts`` hold the claims
+    (expectations or success criteria) the evidence speaks for or against.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    id: int | None = None
+    run_id: str
+    trajectory_step_id: str = ""
+    kind: EvidenceKind
+    claim_or_subject: str = ""
+    source_type: str = ""
+    source_reference: str = ""
+    summary: str = ""
+    supports: list[str] = Field(default_factory=list)
+    contradicts: list[str] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=now_utc)
 
 
 class FailureSignal(BaseModel):
@@ -131,6 +174,53 @@ class WorkingMemory(BaseModel):
     pending_validations: list[str] = Field(default_factory=list)
 
 
+class TrajectoryStepStatus(StrEnum):
+    """The life of one semantic attempt: from intention to a trusted-state transition."""
+
+    PREPARING = "preparing"
+    EXECUTING = "executing"
+    OBSERVING = "observing"
+    VALIDATING = "validating"
+    EVALUATING = "evaluating"
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+    REPAIRED = "repaired"
+    REPLANNED = "replanned"
+    BLOCKED = "blocked"
+
+
+class TrajectoryStep(BaseModel):
+    """The primary execution entity: what one semantic attempt tried, did, observed and learned.
+
+    A trajectory step answers, from persisted state alone: what was the goal, what was
+    expected, what happened, what evidence was collected, why was the candidate accepted or
+    rejected, and what did the system learn — without consulting any chat history.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    id: str
+    semantic_goal: str
+    parent_plan_step_id: str
+    started_at: datetime = Field(default_factory=now_utc)
+    completed_at: datetime | None = None
+    expectation: str = ""
+    expected_evidence: list[str] = Field(default_factory=list)
+    failure_signals: list[str] = Field(default_factory=list)
+    #: bounded summaries of the actions taken (tool, one line each)
+    actions: list[str] = Field(default_factory=list)
+    #: bounded summaries of what was observed
+    observations: list[str] = Field(default_factory=list)
+    #: outcome of deterministic validation (pass/fail plus one-line detail)
+    validations: list[str] = Field(default_factory=list)
+    evidence_ids: list[int] = Field(default_factory=list)
+    candidate_base_commit: str = ""
+    candidate_result_commit: str | None = None
+    decision: str = ""
+    decision_reason: str = ""
+    knowledge_gained: list[str] = Field(default_factory=list)
+    status: TrajectoryStepStatus = TrajectoryStepStatus.PREPARING
+
+
 class Decision(BaseModel):
     model_config = ConfigDict(extra="forbid")
     action: Action
@@ -162,6 +252,9 @@ class MemoryRecord(BaseModel):
     kind: str
     content: str
     run_id: str
+    #: the repository the knowledge came from; retrieval is scoped to it, so lessons from
+    #: one project never leak into another project's decision context
+    source_repo: str = ""
     step_id: str | None = None
     source: str = "runtime"
     commit_sha: str | None = None
@@ -178,7 +271,7 @@ class MemoryCandidate(BaseModel):
 
 class Evaluation(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    decision: Literal["accept", "rollback", "replan", "continue", "finish_candidate"]
+    decision: Literal["accept", "repair", "rollback", "replan", "continue", "finish_candidate"]
     reason: str
     progress_score: float = 0.0
     next_goal: str | None = None
@@ -200,7 +293,11 @@ class CriterionResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
     criterion: str
     passed: bool
+    #: PASS / FAIL / INSUFFICIENT_EVIDENCE — completion requires PASS for every criterion
+    status: Literal["pass", "fail", "insufficient"] = "fail"
     evidence: str = ""
+    #: ledger records that support this verdict
+    evidence_ids: list[int] = Field(default_factory=list)
 
 
 class CriterionJudgement(BaseModel):
@@ -287,6 +384,8 @@ class AgentState(BaseModel):
     latest_observations: list[str] = Field(default_factory=list)
     working_memory: WorkingMemory = Field(default_factory=WorkingMemory)
     pending_question: str | None = None
+    #: the persisted trajectory: the run's semantic attempts, newest last (bounded)
+    trajectory: list[TrajectoryStep] = Field(default_factory=list)
     step_tool_calls: int = 0
     #: commands actually executed during the current step (evidence, not intent)
     step_commands: int = 0

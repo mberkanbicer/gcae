@@ -1,5 +1,21 @@
 # Test plan
 
+## Architectural invariants
+
+`tests/test_hardening.py` asserts the invariants as runtime behavior:
+
+A rejected execution never becomes trusted · B accepted execution always has evidence ·
+C rollback restores trusted execution state · D rollback does not delete knowledge ·
+E context reconstructs without chat history · F pinned information survives budget pressure ·
+G the same failed strategy cannot repeat indefinitely · H completion requires evidence for
+every mandatory criterion · I the source repository is never destructively manipulated ·
+J runtime artifacts stay outside the target repository.
+
+Trajectory tests: 1 wrong-implementation → rollback → different-strategy → checkpoint
+(`tests/test_integration_rollback.py`), 2 interactive CLI (`tests/test_adaptive_trajectory.py`),
+3 contradictory evidence, 4 stagnation/refusal, 6 final evidence mapping (3, 4, 6 in
+`tests/test_hardening.py`), 5 context reconstruction (`tests/test_context_budget.py`).
+
 ## Suites
 
 | File | Proves |

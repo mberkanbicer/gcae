@@ -29,6 +29,7 @@ def test_context_budget_prefers_pinned_over_low_priority(tmp_path: Path) -> None
                 kind="observation",
                 content=f"python old log line {index} " + "x" * 80,
                 run_id="r",
+                source_repo="/s",
             )
         )
     lesson = store.add(
@@ -48,7 +49,7 @@ def test_context_budget_prefers_pinned_over_low_priority(tmp_path: Path) -> None
         )
     )
     context = ContextBuilder(store).build(
-        state(), SemanticStep(id="s", goal="write result"), budget=300
+        state(), SemanticStep(id="s", goal="write result"), budget=450
     )
     assert "Objective: python" in context.text
     assert "no new dependencies" in context.text
@@ -57,7 +58,7 @@ def test_context_budget_prefers_pinned_over_low_priority(tmp_path: Path) -> None
     assert "critical failure lesson" in context.text
     assert lesson.id in context.pinned_ids
     assert context.omitted_ids
-    assert estimate_tokens(context.text) <= 300
+    assert estimate_tokens(context.text) <= 450
     dropped = store.get(context.omitted_ids[0])
     assert dropped.content not in context.text
     assert store.get(dropped.id or 0).content == dropped.content
@@ -115,6 +116,7 @@ def test_long_trajectory_keeps_records_after_budget_trim(tmp_path: Path) -> None
                 kind="observation",
                 content=f"inspect repository noise {index} " + "y" * 60,
                 run_id=result.run_id,
+                source_repo=result.source_repo,
             )
         )
     before = len(runtime.memory.all(result.run_id))

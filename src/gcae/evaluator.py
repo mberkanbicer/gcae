@@ -71,9 +71,10 @@ def build_evaluation_prompt(payload: EvaluationInput) -> str:
     return (
         "You are the evaluator of GCAE, a reversible coding runtime. Judge the last semantic "
         "step and reply with exactly one JSON object and no other text.\n"
-        "Decisions: accept (validated progress), rollback (incorrect, unnecessary, or validation "
-        "failed), replan (blocked route or invalidated assumption), continue (more work needed in "
-        "this step), finish_candidate (goal satisfied).\n"
+        "Decisions: accept (validated progress), repair (the direction is valid but the "
+        "implementation is wrong; keep the candidate and fix it), rollback (incorrect, "
+        "unnecessary, or validation failed), replan (blocked route or invalidated assumption), "
+        "continue (more work needed in this step), finish_candidate (goal satisfied).\n"
         "When a step is rejected, put the failure lesson into memories_to_promote so it survives "
         "rollback.\n"
         "Assess correctness, requirement compliance, scope discipline, unnecessary architecture, "

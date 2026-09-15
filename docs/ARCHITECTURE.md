@@ -109,6 +109,20 @@ A provider that stops producing data is a *detected failure*: `[provider] stall_
 read, the error names the silence and the characters already received, and it enters the recovery
 ladder like any other fatal condition. Nothing in the loop waits unboundedly.
 
+## Trajectory and evidence
+
+- **TrajectoryStep** is the primary execution entity: one semantic attempt with its
+  expectation, expected evidence, failure signals, actions, observations, verdict and
+  knowledge gained, persisted in `state.json` and visible to the TUI and the advisor
+  (see docs/TRAJECTORY_MODEL.md).
+- **Execution state is reversible, knowledge state is not**: rejection resets the worktree
+  to the trusted commit; failures, lessons and evidence stay in `memory.db`
+  (docs/EXECUTION_KNOWLEDGE_SPLIT.md).
+- **The evidence ledger** holds one record per command result, validation, interactive
+  session and criterion verdict, with supports/contradicts (docs/EVIDENCE_LEDGER.md).
+- **Completion is evidence-backed**: every success criterion maps to ledger evidence and
+  must reach PASS; no evidence → INSUFFICIENT, contradiction → FAIL (docs/VERIFICATION.md).
+
 ## Adaptive execution
 
 The runtime does not merely execute a plan: it observes what happened, classifies it, and lets the

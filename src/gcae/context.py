@@ -8,8 +8,12 @@ from .models import AgentState, MemoryRecord, SemanticStep, ValidationResult, Wo
 
 
 def estimate_tokens(text: str) -> int:
-    """Conservative token estimate for mixed English and code text."""
-    return max(1, (len(text) + 3) // 4)
+    """Conservative token estimate for mixed English and code text.
+
+    Code tokenizes closer to one token per three characters; dividing by four
+    systematically underestimated code-heavy prompts and could exceed a real model window.
+    """
+    return max(1, (len(text) + 2) // 3)
 
 
 @dataclass(frozen=True)
@@ -37,12 +41,26 @@ class ContextBuilder:
         max_tool_calls: int = 0,
         evidence: Sequence[str] = (),
     ) -> Context:
+        all_records = self.memory.all(state.run_id)
+        # Pinned is lossless for what the user said and for accepted decisions; failures are
+        # knowledge but unbounded, so only the most recent ones are pinned — the rest stay
+        # retrievable in the store, never lost.
+        failure_records = sorted(
+            (record for record in all_records if record.kind == "failure"),
+            key=lambda record: record.id or 0,
+        )[-8:]
         pinned = [
             record
-            for record in self.memory.all(state.run_id)
-            if record.immutable or record.kind in {"failure", "user_instruction"}
-        ]
-        relevant = self.memory.search(state.objective, limit=20) if state.objective else []
+            for record in all_records
+            if record.immutable or record.kind == "user_instruction"
+        ] + failure_records
+        # relevant memory is scoped to this repository: the store is cumulative across runs,
+        # but another project's lessons must not enter this project's decision context
+        relevant = (
+            self.memory.search(state.objective, limit=20, source_repo=state.source_repo)
+            if state.objective
+            else []
+        )
         records: list[MemoryRecord] = []
         seen: set[int] = set()
         for record in pinned + [candidate.record for candidate in relevant]:
@@ -57,6 +75,9 @@ class ContextBuilder:
             f"Success criteria: {', '.join(state.success_criteria) or 'none'}",
             f"Accepted commit: {state.accepted_commit or 'none'}",
             f"Current goal: {step.goal if step else 'none'}",
+            f"Expected result: {step.expected_result if step else 'none'}",
+            f"Expected evidence: {', '.join(step.expected_evidence) if step else 'none'}",
+            f"Failure signals: {', '.join(step.failure_signals) if step else 'none'}",
             f"Latest user instruction: {state.latest_user_instruction or 'none'}",
         ]
         if max_tool_calls:

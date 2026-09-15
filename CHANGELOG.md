@@ -4,6 +4,71 @@ All notable changes to GCAE are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-09-14
+
+### Added
+
+- **TrajectoryStep is the primary execution entity.** Every semantic attempt is now a typed,
+  persisted record (`state.json`, bounded) answering: what was the goal, what was expected,
+  what evidence would prove it, which failure signals would disprove it, what happened, why
+  was it accepted or rejected, and what was learned — with no chat history. Events
+  `trajectory_step_started` / `trajectory_step_completed` feed the TUI and the advisor.
+  (docs/TRAJECTORY_MODEL.md)
+- **Evidence ledger.** A lightweight append-only table in `memory.db`: one record per command
+  result, validation, interactive session and criterion verdict, with `supports` /
+  `contradicts`. Every executed command becomes evidence; a declared failure signal observed
+  in output contradicts the expectation even when the exit code says success.
+  (docs/EVIDENCE_LEDGER.md)
+- **Evidence-backed verification.** Every success criterion maps to ledger evidence and must
+  reach PASS: no evidence → INSUFFICIENT_EVIDENCE (the run replans with the missing evidence
+  named), contradiction without support → FAIL with the contradicting records cited, and the
+  model judge rules only over the cited bundle. Each criterion verdict is itself recorded as
+  evidence. (docs/VERIFICATION.md)
+- **Repair as a distinct evaluator decision.** The direction is valid but the implementation
+  is wrong → keep the candidate, tell the next attempt what to fix; the trajectory records
+  the repair. ACCEPT / REPAIR / ROLLBACK / REPLAN are now distinct transitions.
+- **Verified-progress stagnation.** Learning a *new* failure signature counts as progress
+  (knowledge), repeating one does not (activity); the stagnation window now feeds on
+  knowledge, not busyness.
+- **Expectation before action.** Plan steps carry `expected_evidence` and `failure_signals`
+  (the planner prompt asks for them; replanned steps get them from the failure reason); the
+  controller context shows them; the runtime checks signals against observed output.
+- **TUI trajectory semantics.** Trajectory verdicts on the timeline (accepted / rejected /
+  repaired / replanned / blocked), running evidence counts in the validation panel
+  (`3 supporting · 1 contradicting · 9 records`), contradictory evidence gets a semantic line.
+
+### Changed / repaired
+
+- **Knowledge retrieval is scoped to the source repository** (`source_repo` column, migrated):
+  lessons accumulate across runs of one project without leaking into another project's
+  decision context.
+- **Pinned context is bounded**: user instructions and immutable records stay lossless; the
+  last 8 failure lessons are pinned and the store keeps the rest retrievable — a cap on the
+  projection, never on the truth.
+- **Context duplication removed**: constraints and criteria were stored twice (header +
+  pinned records); the request record is now the single canonical user-instruction record.
+- **Evaluator-promoted memories capped** at 3 per step (model-authored advice, not ground
+  truth). Sensitive-answer redaction no longer shreds output on short answers (whole echo
+  lines are redacted instead of every occurrence). `estimate_tokens` corrected (chars/3).
+- Dead code removed (`looks_interactive`).
+
+### Tests
+
+275 pass (+11 in `tests/test_hardening.py` + 4 TUI): invariants A–J as runtime behavior
+(rejected execution never trusted; accepted work has evidence; rollback restores state but
+keeps knowledge; context reconstructs without chat; pinned survives budget pressure;
+strategy refusal; evidence-backed completion; source repo untouched; artifacts outside the
+target), trajectory tests 3 (contradictory evidence forces repair), 4 (repeated strategy
+refused and reconsidered) and 6 (final evidence mapping refuses and then passes), plus the
+evidence ledger and migration tests.
+
+### Docs
+
+IMPLEMENTATION_AUDIT.md (the 0.4.0 audit), TRAJECTORY_MODEL.md, EXECUTION_KNOWLEDGE_SPLIT.md,
+EVIDENCE_LEDGER.md, CONTEXT_RECONSTRUCTION.md, VERIFICATION.md, FAILURE_RECOVERY.md,
+INTERACTIVE_EXECUTION.md; ARCHITECTURE, MEMORY_CONTEXT, TUI and TEST_PLAN refreshed; AGENTS.md
+rewritten around the invariants.
+
 ## [0.3.1] — 2026-09-14
 
 ### Added

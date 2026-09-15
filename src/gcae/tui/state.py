@@ -88,6 +88,14 @@ class UiState:
     provider_role: str = ""
     # the step whose speculative changes were already announced in the timeline
     _candidate_announced: str | None = None
+    #: the semantic attempt currently executing (goal, expectation, expected evidence)
+    trajectory: dict[str, Any] | None = None
+    #: evidence ledger counts for this run (supporting / contradicting / total)
+    evidence: dict[str, int] = field(
+        default_factory=lambda: {"supporting": 0, "contradicting": 0, "total": 0}
+    )
+    #: the verdict of the last completed trajectory attempt (for the transition display)
+    last_trajectory: dict[str, Any] | None = None
     #: the goal the run was last working on (the objective box keeps it after completion)
     last_goal: str = ""
     #: how the current command runs and how many answers it was given
@@ -237,6 +245,36 @@ class UiState:
         self.timeline = self.timeline[-TIMELINE_HISTORY:]
 
     # ------------------------------------------------------------------ handlers
+
+    def _on_trajectory_step_started(self, event: Event, payload: dict[str, Any]) -> set[str]:
+        self.trajectory = {
+            "id": payload.get("id"),
+            "semantic_goal": payload.get("semantic_goal"),
+            "expectation": payload.get("expectation"),
+            "expected_evidence": payload.get("expected_evidence") or [],
+            "failure_signals": payload.get("failure_signals") or [],
+            "status": payload.get("status"),
+            "candidate_base_commit": payload.get("candidate_base_commit"),
+        }
+        return {"activity", "status"}
+
+    def _on_trajectory_step_completed(self, event: Event, payload: dict[str, Any]) -> set[str]:
+        self.trajectory = None
+        self.last_trajectory = {
+            "status": payload.get("status"),
+            "decision": payload.get("decision"),
+            "decision_reason": payload.get("decision_reason"),
+            "semantic_goal": payload.get("semantic_goal"),
+        }
+        return {"activity", "status"}
+
+    def _on_evidence_recorded(self, event: Event, payload: dict[str, Any]) -> set[str]:
+        self.evidence["total"] += 1
+        if payload.get("contradicts"):
+            self.evidence["contradicting"] += 1
+        if payload.get("supports"):
+            self.evidence["supporting"] += 1
+        return {"validation", "metrics"}
 
     def _on_plan_updated(self, event: Event, payload: dict[str, Any]) -> set[str]:
         self.plan = list(payload.get("steps") or [])

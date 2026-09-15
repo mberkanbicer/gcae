@@ -24,10 +24,13 @@ from .memory import EventLog, MemoryStore
 from .models import (
     Action,
     AgentState,
+    CriterionResult,
     Decision,
     Evaluation,
     EvaluationInput,
     Event,
+    EvidenceKind,
+    EvidenceRecord,
     FailureSignal,
     MemoryCandidate,
     MemoryRecord,
@@ -40,6 +43,8 @@ from .models import (
     SemanticStep,
     ToolCall,
     ToolResult,
+    TrajectoryStep,
+    TrajectoryStepStatus,
     ValidationResult,
     WorkingMemory,
     now_utc,
@@ -400,6 +405,13 @@ class Runtime:
         self.stagnation = StagnationDetector(stagnation_window)
         self._subscribers: list[EventSubscriber] = []
         self._trace: deque[Event] = deque(maxlen=200)
+        #: the semantic attempt currently executing (the primary execution entity)
+        self._trajectory: TrajectoryStep | None = None
+        self._trajectory_attempt = 0
+        #: evidence ledger ids collected during the current trajectory step
+        self._step_evidence: list[int] = []
+        #: failure signatures already seen this run — a *new* signature is knowledge
+        self._known_failure_signatures: set[str] = set()
         self._consecutive_failures = 0
         self._escalated = False
         self.last_context_info: dict[str, int] = {}
@@ -540,11 +552,10 @@ class Runtime:
             )
             self._planner_notice = None
         self._emit_plan(reason="initial plan")
+        # the request is the one canonical user-instruction record; constraints and criteria
+        # already live in the pinned header of every reconstructed context, so storing them a
+        # second time only duplicated tokens in each projection
         self._remember("user_instruction", request, immutable=True)
-        for constraint in self.state.hard_constraints:
-            self._remember("user_instruction", f"hard constraint: {constraint}", immutable=True)
-        for criterion in self.state.success_criteria:
-            self._remember("user_instruction", f"success criterion: {criterion}", immutable=True)
         self._event("run_started", RunPhase.ANALYZE, payload={"objective": self.state.objective})
         self._emit_candidate_state()
         self._persist()
@@ -614,10 +625,12 @@ class Runtime:
             self.state.pending_question = None
             if result is not None:
                 if pending.sensitive:
-                    # a PTY echoes what was typed: the answer must not enter the run's record
-                    result.output = result.output.replace(text, "<redacted>")
+                    # a PTY echoes what was typed: the answer must not enter the run's record.
+                    # The echo line is redacted, not every occurrence of the text — a short
+                    # answer like "y" must not shred unrelated output.
+                    result.output = self._redact_answer(result.output, text)
                     if result.error:
-                        result.error = result.error.replace(text, "<redacted>")
+                        result.error = self._redact_answer(result.error, text)
                 plan = self._current_plan_step()
                 signature = self._strategy_key(
                     ToolCall(name="run_command", arguments={"command": pending.command}), plan
@@ -660,6 +673,10 @@ class Runtime:
     def block(self, reason: str, unblock_hint: str) -> AgentState:
         """Stop because no safe autonomous path remains — and say exactly why."""
         assert self.state is not None
+        if self._trajectory is not None:
+            self._end_trajectory(
+                TrajectoryStepStatus.BLOCKED, "blocked", reason, knowledge=[reason]
+            )
         self.state.status = "blocked"
         self.state.blocked_reason = reason
         self.state.unblock_hint = unblock_hint
@@ -797,12 +814,16 @@ class Runtime:
                         "total": len(self.state.plan),
                     },
                 )
+            if self._trajectory is None:
+                self._begin_trajectory(plan)
             self._transition(RunPhase.EXECUTE)
             step = SemanticStep(
                 id=plan.id,
                 goal=plan.goal,
                 rationale=plan.rationale,
                 expected_result=plan.expected_result,
+                expected_evidence=plan.expected_evidence,
+                failure_signals=plan.failure_signals,
                 intended_scope=plan.intended_scope,
                 validation_requirements=plan.validation_requirements,
             )
@@ -861,6 +882,11 @@ class Runtime:
                     return self.state
                 continue
 
+            if self._trajectory is not None:
+                arguments = json.dumps(decision.tool.arguments, sort_keys=True, default=str)
+                if len(arguments) > 160:
+                    arguments = arguments[:157] + "..."
+                self._trajectory.actions.append(f"{decision.tool.name}: {arguments}")
             signature = self._strategy_key(decision.tool, plan)
             self._pending_command = str(decision.tool.arguments.get("command") or "")
             self._pending_sensitive = False
@@ -887,6 +913,140 @@ class Runtime:
                 )
                 if self._evaluate_step(plan, tools):
                     return self.state
+
+    # ------------------------------------------------------------------ trajectory
+
+    def _begin_trajectory(self, plan: PlanStep) -> None:
+        """Open the trajectory record for this semantic attempt.
+
+        The record is the primary execution entity: from it alone one can answer what the
+        attempt tried, what it expected, what it did, what happened, what evidence it
+        collected, and why it was accepted or rejected — with no chat history.
+        """
+        assert self.state is not None
+        self._trajectory_attempt += 1
+        record = TrajectoryStep(
+            id=f"trajectory-{plan.id}-{self._trajectory_attempt}",
+            semantic_goal=plan.goal,
+            parent_plan_step_id=plan.id,
+            expectation=plan.expected_result,
+            expected_evidence=list(plan.expected_evidence),
+            failure_signals=list(plan.failure_signals),
+            candidate_base_commit=self.state.accepted_commit or "",
+            status=TrajectoryStepStatus.EXECUTING,
+        )
+        self._trajectory = record
+        self._step_evidence = []
+        self.state.trajectory.append(record)
+        self.state.trajectory = self.state.trajectory[-20:]
+        self._event(
+            "trajectory_step_started",
+            RunPhase.EXECUTE,
+            step_id=plan.id,
+            payload=record.model_dump(mode="json"),
+        )
+
+    def _end_trajectory(
+        self,
+        status: TrajectoryStepStatus,
+        decision: str,
+        reason: str,
+        *,
+        result_commit: str | None = None,
+        knowledge: list[str] | None = None,
+    ) -> None:
+        """Close the current attempt with its verdict; the record stays in persisted state."""
+        trajectory = self._trajectory
+        if trajectory is None:
+            return
+        trajectory.status = status
+        trajectory.completed_at = now_utc()
+        trajectory.decision = decision
+        trajectory.decision_reason = reason[:400]
+        trajectory.candidate_result_commit = result_commit
+        trajectory.evidence_ids = list(self._step_evidence)
+        if knowledge:
+            trajectory.knowledge_gained.extend(knowledge[:3])
+        trajectory.actions = trajectory.actions[-20:]
+        trajectory.observations = trajectory.observations[-12:]
+        self._event(
+            "trajectory_step_completed",
+            self.state.phase if self.state else None,
+            step_id=trajectory.parent_plan_step_id,
+            payload=trajectory.model_dump(mode="json"),
+        )
+        self._trajectory = None
+
+    def _record_evidence(
+        self,
+        kind: EvidenceKind,
+        claim: str,
+        *,
+        source_type: str = "",
+        source_reference: str = "",
+        summary: str = "",
+        supports: list[str] | None = None,
+        contradicts: list[str] | None = None,
+    ) -> int | None:
+        """Append one record to the evidence ledger (knowledge state, never rolled back).
+
+        Returns the ledger id (None when the store is unavailable, which degrades and is
+        reported, never fatal)."""
+        assert self.state is not None
+        if self.memory is None:
+            return None
+        try:
+            saved = self.memory.add_evidence(
+                EvidenceRecord(
+                    run_id=self.state.run_id,
+                    trajectory_step_id=self._trajectory.id if self._trajectory else "",
+                    kind=kind,
+                    claim_or_subject=claim,
+                    source_type=source_type,
+                    source_reference=source_reference[:200],
+                    summary=summary[:500],
+                    supports=list(supports or []),
+                    contradicts=list(contradicts or []),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - the ledger degrades, the run does not
+            self._degrade("evidence ledger", exc)
+            return None
+        if saved.id is not None:
+            self._step_evidence.append(saved.id)
+            self._event(
+                "evidence_recorded",
+                self.state.phase,
+                payload={
+                    "id": saved.id,
+                    "kind": str(saved.kind),
+                    "claim": saved.claim_or_subject[:160],
+                    "supports": saved.supports,
+                    "contradicts": saved.contradicts,
+                    "summary": saved.summary[:200],
+                },
+            )
+        return saved.id
+
+    @staticmethod
+    def _redact_answer(output: str, answer: str) -> str:
+        """Redact the answer's echo without destroying unrelated output.
+
+        A long answer is replaced wherever it appears; a short answer (a single letter or
+        digit) would corrupt legitimate text, so only whole lines equal to it are redacted.
+        """
+        if not answer:
+            return output
+        if len(answer) >= 4:
+            return output.replace(answer, "<redacted>")
+        redacted: list[str] = []
+        for line in output.splitlines():
+            stripped = line.strip()
+            if stripped in {answer, answer + "\r", answer + "\n"}:
+                redacted.append(line.replace(stripped, "<redacted>"))
+            else:
+                redacted.append(line)
+        return "\n".join(redacted)
 
     # ------------------------------------------------------------------ steps
 
@@ -955,6 +1115,8 @@ class Runtime:
         if self.repo.worktree_merge_in_progress():
             # the agent edits conflicted files directly; staging is the runtime's job
             self.repo.stage_all()
+        if self._trajectory is not None:
+            self._trajectory.status = TrajectoryStepStatus.VALIDATING
         self._transition(RunPhase.VALIDATE)
         validation = DeterministicValidator(
             self.repo,
@@ -964,6 +1126,58 @@ class Runtime:
         ).validate(plan.intended_scope)
         self.state.latest_validation = validation
         self._save_diff(plan.id)
+        if self._trajectory is not None:
+            detail = (
+                f"passed ({len(validation.command_results)} checks)"
+                if validation.passed
+                else f"failed: {validation.details[:1]}".strip("[]'")
+            )
+            self._trajectory.validations.append(detail[:200])
+        # the deterministic check is evidence in its own right, recorded with the claim it
+        # speaks to — expectation when it passed, contradiction when it did not
+        if validation.changed_files or validation.command_results:
+            passed_claim = plan.expected_result or plan.goal
+            self._record_evidence(
+                EvidenceKind.GIT_DIFF,
+                claim=passed_claim,
+                source_type="deterministic validation",
+                source_reference=(
+                    f"diff-check {'passed' if validation.diff_check_passed else 'failed'}; "
+                    f"{validation.diff_stat}"
+                ),
+                summary=(
+                    f"validation {'passed' if validation.passed else 'failed'}; "
+                    f"{len(validation.changed_files)} changed, "
+                    f"{len(validation.new_files)} new"
+                ),
+                supports=(
+                    [passed_claim, *plan.validation_requirements] if validation.passed else []
+                ),
+                contradicts=[passed_claim] if not validation.passed else [],
+            )
+            for index, result in enumerate(validation.command_results):
+                command_kind = (
+                    EvidenceKind.TEST_RESULT
+                    if result.tool == "run_tests"
+                    else EvidenceKind.COMMAND_RESULT
+                )
+                self._record_evidence(
+                    command_kind,
+                    claim=passed_claim,
+                    source_type="validation command",
+                    source_reference=(
+                        str(validation.commands[index])
+                        if index < len(validation.commands)
+                        else result.tool
+                    ),
+                    summary=(result.output or result.error or "")[:300],
+                    supports=(
+                        [passed_claim, *plan.validation_requirements]
+                        if result.success
+                        else []
+                    ),
+                    contradicts=[passed_claim] if not result.success else [],
+                )
         self._event(
             "validation",
             RunPhase.VALIDATE,
@@ -979,6 +1193,8 @@ class Runtime:
             context=self._evaluation_context(plan, validation),
             validation=validation,
         )
+        if self._trajectory is not None:
+            self._trajectory.status = TrajectoryStepStatus.EVALUATING
         self._transition(RunPhase.EVALUATE)
         evaluation: Evaluation | None = None
         for attempt in (1, 2):
@@ -1011,9 +1227,18 @@ class Runtime:
         if evaluation.decision == "finish_candidate":
             return self._verify_and_route("finish candidate failed verification")
         if evaluation.decision == "replan":
+            self._end_trajectory(
+                TrajectoryStepStatus.REPLANNED, "replan", evaluation.reason,
+                knowledge=[f"path invalidated: {evaluation.reason}"],
+            )
             if self._replan(plan, evaluation.reason, failed=False):
                 if self._handle_stagnation(evaluation.reason) is not None:
                     return True
+            return False
+        if evaluation.decision == "repair":
+            # the direction is valid but the implementation is wrong: keep the candidate and
+            # tell the next attempt what to fix, instead of throwing the work away
+            self._require_repair(plan, evaluation.reason)
             return False
         if evaluation.decision == "continue":
             self._transition(RunPhase.EXECUTE)
@@ -1044,6 +1269,13 @@ class Runtime:
                 )
             else:
                 logger.info("step %s accepted without file changes", plan.id)
+            self._end_trajectory(
+                TrajectoryStepStatus.ACCEPTED,
+                "accept",
+                evaluation.reason,
+                result_commit=self.state.accepted_commit if validation.changed_files else None,
+                knowledge=[f"step accepted: {plan.goal}"],
+            )
             plan.status = "completed"
             self.state.plan = [item for item in self.state.plan if item.id != plan.id]
             self._settle_working_memory(plan)
@@ -1070,6 +1302,12 @@ class Runtime:
             return False
 
         self._remember("failure", evaluation.reason, immutable=True)
+        self._end_trajectory(
+            TrajectoryStepStatus.REJECTED,
+            "rollback",
+            evaluation.reason,
+            knowledge=[f"failed: {evaluation.reason}"],
+        )
         if self._record_failure(evaluation.reason):
             self._event(
                 "repeated_failure",
@@ -1347,6 +1585,13 @@ class Runtime:
     def _queue_correction(self, plan: PlanStep | None, instruction: str) -> None:
         """Discard speculative work and queue the step the advisor prescribed."""
         assert self.state is not None
+        if self._trajectory is not None:
+            self._end_trajectory(
+                TrajectoryStepStatus.REPLANNED,
+                "replan",
+                instruction,
+                knowledge=[f"recovery: {instruction}"],
+            )
         if self.repo is not None and self.repo.worktree is not None and self.repo.status():
             self._rollback(f"recovery: {instruction}")
         plan = plan or self._current_plan_step()
@@ -1418,6 +1663,13 @@ class Runtime:
         Returns True when stagnation is detected.
         """
         assert self.state is not None
+        if self._trajectory is not None:
+            self._end_trajectory(
+                TrajectoryStepStatus.REPLANNED,
+                "replan",
+                reason,
+                knowledge=[f"path changed: {reason}"],
+            )
         if self.repo is not None and self.repo.worktree is not None and self.repo.status():
             self._rollback()
         if failed:
@@ -1469,11 +1721,32 @@ class Runtime:
             return False
         self._transition(RunPhase.VERIFY)
         self._event("verification_started", RunPhase.VERIFY)
+        ledger = self.memory.evidence_for_run(self.state.run_id) if self.memory else []
         with self._progress("verifier", getattr(self.verifier, "judge", None)):
-            report = self.verifier.verify(self.state, diff=self.repo.diff())
+            report = self.verifier.verify(self.state, diff=self.repo.diff(), evidence=ledger)
         # criterion commands may generate caches; never let them reach the checkpoint
         self.repo.clean_generated_artifacts()
         self.repo.clean_ignored_artifacts()
+        # every criterion verdict becomes an evidence record: completion is a claim, and the
+        # claim is only as strong as the ledger that supports it
+        updated: list[CriterionResult] = []
+        for result in report.criteria:
+            record_id = self._record_evidence(
+                EvidenceKind.TEST_RESULT
+                if result.criterion.startswith("command succeeds:")
+                else EvidenceKind.OBSERVATION,
+                claim=result.criterion,
+                source_type="final verification",
+                source_reference=result.evidence[:200],
+                summary=f"criterion {result.status}: {result.criterion[:120]}",
+                supports=[result.criterion] if result.status == "pass" else [],
+                contradicts=[result.criterion] if result.status == "fail" else [],
+            )
+            evidence_ids = list(result.evidence_ids)
+            if record_id is not None and record_id not in evidence_ids:
+                evidence_ids.append(record_id)
+            updated.append(result.model_copy(update={"evidence_ids": evidence_ids}))
+        report = report.model_copy(update={"criteria": updated})
         self.state.last_verification = report
         self._event(
             "verification_completed",
@@ -1482,6 +1755,13 @@ class Runtime:
         )
         self._emit_candidate_state()
         if report.passed and report.hygiene_passed:
+            if self._trajectory is not None:
+                self._end_trajectory(
+                    TrajectoryStepStatus.ACCEPTED,
+                    "finish_candidate",
+                    "final verification passed",
+                    knowledge=["all criteria verified"],
+                )
             if self.repo.status():
                 self._transition(RunPhase.CHECKPOINT)
                 self.state.accepted_commit = self.repo.checkpoint("gcae: verified final state")
@@ -1510,9 +1790,19 @@ class Runtime:
             self._event("run_completed", RunPhase.COMPLETE)
             return True
         missing = report.missing_requirements
+        insufficient = [
+            result.criterion for result in report.criteria if result.status == "insufficient"
+        ]
         details = "; ".join([*missing, *report.details]) or "criteria or hygiene did not pass"
         logger.warning("run %s verification failed: %s", self.state.run_id, details)
         self._remember("failure", f"{failure_reason}: {details}", immutable=True)
+        if insufficient:
+            self._end_trajectory(
+                TrajectoryStepStatus.REPLANNED,
+                "replan",
+                f"evidence missing for: {', '.join(insufficient)}",
+                knowledge=[f"criteria without evidence: {', '.join(insufficient)}"],
+            )
         self.state.plan.extend(next_step(self.state, failure_reason))
         self._transition(RunPhase.PLAN)
         self._persist()
@@ -1688,6 +1978,40 @@ class Runtime:
             + ") but nothing was executed to check it"
         )
 
+    def _knowledge_progress(self, signature: str) -> bool:
+        """First sight of a failure signature is knowledge; repeats of it are not.
+
+        Stagnation measures verified progress: an accepted checkpoint, a criterion verified,
+        a hypothesis invalidated, or a new failure lesson.  The same lesson learned again is
+        activity, not progress.
+        """
+        if not signature or signature in self._known_failure_signatures:
+            return False
+        self._known_failure_signatures.add(signature)
+        return True
+
+    def _require_repair(self, plan: PlanStep, reason: str) -> None:
+        """Keep a candidate whose direction is valid and tell the next attempt what to fix.
+
+        Repair is the middle ground the evidence gate also uses: the work is kept, the step
+        returns to EXECUTE, and the controller gets the reason as its next instruction.
+        """
+        assert self.state is not None
+        lesson = f"repair the candidate: {reason}"
+        self._event(
+            "repair_started", RunPhase.EVALUATE, step_id=plan.id, payload={"reason": reason}
+        )
+        self._remember("failure", lesson, immutable=True)
+        self.state.working_memory.blocker = reason
+        self.state.working_memory.hypotheses.append(lesson)
+        self.state.working_memory.hypotheses = self.state.working_memory.hypotheses[-4:]
+        self._end_trajectory(
+            TrajectoryStepStatus.REPAIRED, "repair", reason, knowledge=[lesson]
+        )
+        self.state.step_tool_calls = 0
+        self._transition(RunPhase.EXECUTE)
+        self._persist()
+
     def _require_execution_evidence(self, plan: PlanStep, reason: str) -> None:
         """Downgrade an acceptance that arrived without evidence, and say what is missing."""
         assert self.state is not None
@@ -1712,6 +2036,9 @@ class Runtime:
             )
         self.state.working_memory.hypotheses = self.state.working_memory.hypotheses[-4:]
         # keep the candidate: the work exists, what is missing is a command that checks it
+        self._end_trajectory(
+            TrajectoryStepStatus.REPAIRED, "repair", reason, knowledge=[lesson]
+        )
         self.state.step_tool_calls = 0
         self._transition(RunPhase.EXECUTE)
         self._persist()
@@ -1719,12 +2046,73 @@ class Runtime:
     def _record_execution_evidence(
         self, result: ToolResult, tool: ToolCall, plan: PlanStep, signature: str
     ) -> None:
-        """Turn an execution result into knowledge the next decision has to respect."""
+        """Turn an execution result into knowledge the next decision has to respect.
+
+        Every command becomes an evidence ledger record — a successful run supports the
+        step's expectation, a failed one contradicts it.  The ledger is knowledge state and
+        survives rollback, exactly as the failure lesson does.
+        """
         assert self.state is not None
         if not result.mode or result.mode == "refused":
             return  # not a command: file tools carry their own, different evidence
         self.state.step_commands += 1
         kind = self._failure_kind(result)
+        claim = plan.expected_result or plan.goal
+        command = str(tool.arguments.get("command") or tool.name)
+        # a failure signal observed in the output is contradiction evidence even when the
+        # exit code says success: the step named what would disprove it, and reality matched
+        signal_hit = next(
+            (
+                signal
+                for signal in plan.failure_signals
+                if signal.lower() in f"{result.output}\n{result.error or ''}".lower()
+            ),
+            "",
+        )
+        if signal_hit:
+            self._record_evidence(
+                EvidenceKind.OBSERVATION,
+                claim=claim,
+                source_type="command execution",
+                source_reference=command,
+                summary=f"failure signal observed: {signal_hit}",
+                supports=[],
+                contradicts=[claim] if claim else [],
+            )
+        if result.waiting_for_input:
+            self._record_evidence(
+                EvidenceKind.INTERACTIVE_SESSION,
+                claim=claim,
+                source_type="command execution",
+                source_reference=command,
+                summary=f"process asked for input: {result.prompt or 'prompt not captured'}",
+                supports=[],
+                contradicts=[claim] if claim else [],
+            )
+        elif kind is FailureKind.NONE:
+            success_kind = (
+                EvidenceKind.TEST_RESULT
+                if tool.name == "run_tests"
+                else EvidenceKind.COMMAND_RESULT
+            )
+            self._record_evidence(
+                success_kind,
+                claim=claim,
+                source_type="command execution",
+                source_reference=command,
+                summary=(result.output or "exit 0")[:300],
+                supports=[claim, *plan.validation_requirements] if claim else [],
+            )
+        else:
+            self._record_evidence(
+                EvidenceKind.COMMAND_RESULT,
+                claim=claim,
+                source_type="command execution",
+                source_reference=command,
+                summary=(result.error or result.output or f"exit {result.exit_code}")[:300],
+                supports=[],
+                contradicts=[claim] if claim else [],
+            )
         if kind is FailureKind.NONE:
             self._strategies.pop(signature, None)
             self.state.working_memory.hypotheses = [
@@ -1742,6 +2130,10 @@ class Runtime:
         record.lesson = lesson
         record.tree = self._tree_hash()
         self._strategies[signature] = record
+        if self._knowledge_progress(error_signature):
+            # learning a *new* failure signature is verified progress even though the
+            # attempt failed: the run now knows something it did not know before
+            self.stagnation.record(True)
 
         signal = FailureSignal(
             kind=str(kind),
@@ -1955,6 +2347,13 @@ class Runtime:
             if path not in working.active_files:
                 working.active_files.append(path)
         working.active_files = working.active_files[-12:]
+        if self._trajectory is not None:
+            self._trajectory.observations.append(text[:200])
+            if (
+                self._trajectory.status is TrajectoryStepStatus.EXECUTING
+                or self._trajectory.status is TrajectoryStepStatus.PREPARING
+            ):
+                self._trajectory.status = TrajectoryStepStatus.OBSERVING
         self._event(
             "tool_result",
             RunPhase.EXECUTE,
@@ -2026,6 +2425,8 @@ class Runtime:
             goal=plan.goal,
             rationale=plan.rationale,
             expected_result=plan.expected_result,
+            expected_evidence=plan.expected_evidence,
+            failure_signals=plan.failure_signals,
             intended_scope=plan.intended_scope,
             validation_requirements=plan.validation_requirements,
         )
@@ -2043,7 +2444,9 @@ class Runtime:
 
     def _promote(self, candidates: list[MemoryCandidate]) -> None:
         assert self.state is not None and self.memory is not None
-        for candidate in candidates:
+        # a model-authored lesson is advice, not ground truth: bounded per step, and never
+        # more trusted than the failure records the runtime itself writes
+        for candidate in candidates[:3]:
             record = candidate.record.model_copy(
                 update={
                     "id": None,
@@ -2142,6 +2545,7 @@ class Runtime:
                     kind=kind,
                     content=content,
                     run_id=self.state.run_id,
+                    source_repo=self.state.source_repo,
                     step_id=self.state.current_step_id,
                     commit_sha=self.state.accepted_commit,
                     immutable=immutable,

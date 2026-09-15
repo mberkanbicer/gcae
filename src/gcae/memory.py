@@ -6,7 +6,7 @@ import sqlite3
 import threading
 from pathlib import Path
 
-from .models import MemoryCandidate, MemoryRecord
+from .models import EvidenceKind, EvidenceRecord, MemoryCandidate, MemoryRecord
 
 
 class MemoryStore:
@@ -25,6 +25,7 @@ class MemoryStore:
                 kind TEXT NOT NULL,
                 content TEXT NOT NULL,
                 run_id TEXT NOT NULL,
+                source_repo TEXT NOT NULL DEFAULT '',
                 step_id TEXT,
                 source TEXT NOT NULL,
                 commit_sha TEXT,
@@ -43,19 +44,46 @@ class MemoryStore:
                     VALUES ('delete', old.id, old.content, old.kind);
                 INSERT INTO memory_fts(rowid, content, kind) VALUES (new.id, new.content, new.kind);
             END;
+            CREATE TABLE IF NOT EXISTS evidence (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL,
+                trajectory_step_id TEXT NOT NULL DEFAULT '',
+                kind TEXT NOT NULL,
+                claim_or_subject TEXT NOT NULL DEFAULT '',
+                source_type TEXT NOT NULL DEFAULT '',
+                source_reference TEXT NOT NULL DEFAULT '',
+                summary TEXT NOT NULL DEFAULT '',
+                supports TEXT NOT NULL DEFAULT '[]',
+                contradicts TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS evidence_run ON evidence(run_id, id);
+            CREATE INDEX IF NOT EXISTS evidence_step ON evidence(trajectory_step_id);
             """
         )
+        # older databases predate the source_repo column: knowledge stays, but retrieval is
+        # scoped from here on, so the column must exist before any search touches it
+        columns = {
+            str(row["name"])
+            for row in self.connection.execute("PRAGMA table_info(memory)").fetchall()
+        }
+        if "source_repo" not in columns:
+            self.connection.execute(
+                "ALTER TABLE memory ADD COLUMN source_repo TEXT NOT NULL DEFAULT ''"
+            )
         self.connection.commit()
 
     def add(self, record: MemoryRecord) -> MemoryRecord:
         with self._lock:
             cursor = self.connection.execute(
-                """INSERT INTO memory(kind, content, run_id, step_id, source, commit_sha,
-                   created_at, importance, immutable) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                """INSERT INTO memory(kind, content, run_id, source_repo, step_id, source,
+                   commit_sha, created_at, importance, immutable)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     record.kind,
                     record.content,
                     record.run_id,
+                    record.source_repo,
                     record.step_id,
                     record.source,
                     record.commit_sha,
@@ -87,17 +115,32 @@ class MemoryStore:
             )
             self.connection.commit()
 
-    def search(self, query: str, limit: int = 10) -> list[MemoryCandidate]:
+    def search(
+        self, query: str, limit: int = 10, source_repo: str | None = None
+    ) -> list[MemoryCandidate]:
+        """FTS retrieval scoped to one repository.
+
+        The knowledge store is cumulative across runs, but a lesson learned in one project
+        must not silently become another project's context.  ``source_repo`` restricts the
+        hits; legacy rows (empty ``source_repo``) are excluded from scoped searches rather
+        than guessed into a project.
+        """
         tokens = re.findall(r"\w+", query, flags=re.UNICODE)
         if not tokens or limit <= 0:
             return []
         match_query = " OR ".join(f'"{token}"' for token in tokens)
+        if source_repo:
+            where = "WHERE memory_fts MATCH ? AND m.source_repo = ?"
+            parameters: tuple[object, ...] = (match_query, source_repo)
+        else:
+            where = "WHERE memory_fts MATCH ?"
+            parameters = (match_query,)
         with self._lock:
             rows = self.connection.execute(
-                """SELECT m.*, bm25(memory_fts) AS score FROM memory_fts
-                   JOIN memory m ON m.id = memory_fts.rowid WHERE memory_fts MATCH ?
+                f"""SELECT m.*, bm25(memory_fts) AS score FROM memory_fts
+                   JOIN memory m ON m.id = memory_fts.rowid {where}
                    ORDER BY score LIMIT ?""",
-                (match_query, limit),
+                (*parameters, limit),
             ).fetchall()
         return [
             MemoryCandidate(record=self._to_record(row), score=float(row["score"]))
@@ -134,10 +177,72 @@ class MemoryStore:
     def _to_record(row: sqlite3.Row) -> MemoryRecord:
         return MemoryRecord(
             id=row["id"], kind=row["kind"], content=row["content"], run_id=row["run_id"],
+            source_repo=row["source_repo"] if "source_repo" in row.keys() else "",
             step_id=row["step_id"], source=row["source"], commit_sha=row["commit_sha"],
             created_at=row["created_at"],
             importance=row["importance"],
             immutable=bool(row["immutable"]),
+        )
+
+    # ------------------------------------------------------------------ evidence ledger
+
+    def add_evidence(self, record: EvidenceRecord) -> EvidenceRecord:
+        """Append one evidence record; returns it with its ledger id."""
+        with self._lock:
+            cursor = self.connection.execute(
+                """INSERT INTO evidence(run_id, trajectory_step_id, kind, claim_or_subject,
+                   source_type, source_reference, summary, supports, contradicts, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    record.run_id,
+                    record.trajectory_step_id,
+                    str(record.kind),
+                    record.claim_or_subject,
+                    record.source_type,
+                    record.source_reference,
+                    record.summary,
+                    json.dumps(record.supports),
+                    json.dumps(record.contradicts),
+                    record.created_at.isoformat(),
+                ),
+            )
+            self.connection.commit()
+            row_id = cursor.lastrowid
+        return record.model_copy(update={"id": row_id})
+
+    def evidence_for_run(self, run_id: str) -> list[EvidenceRecord]:
+        with self._lock:
+            rows = self.connection.execute(
+                "SELECT * FROM evidence WHERE run_id = ? ORDER BY id", (run_id,)
+            ).fetchall()
+        return [self._to_evidence(row) for row in rows]
+
+    def evidence_for_step(self, trajectory_step_id: str) -> list[EvidenceRecord]:
+        with self._lock:
+            rows = self.connection.execute(
+                "SELECT * FROM evidence WHERE trajectory_step_id = ? ORDER BY id",
+                (trajectory_step_id,),
+            ).fetchall()
+        return [self._to_evidence(row) for row in rows]
+
+    @staticmethod
+    def _to_evidence(row: sqlite3.Row) -> EvidenceRecord:
+        try:
+            supports = json.loads(row["supports"])
+            contradicts = json.loads(row["contradicts"])
+        except (json.JSONDecodeError, TypeError):  # pragma: no cover - corrupt ledger row
+            supports, contradicts = [], []
+        return EvidenceRecord(
+            id=row["id"],
+            run_id=row["run_id"],
+            trajectory_step_id=row["trajectory_step_id"],
+            kind=EvidenceKind(row["kind"]),
+            claim_or_subject=row["claim_or_subject"],
+            source_type=row["source_type"],
+            source_reference=row["source_reference"],
+            summary=row["summary"],
+            supports=[str(item) for item in supports],
+            contradicts=[str(item) for item in contradicts],
         )
 
     def close(self) -> None:

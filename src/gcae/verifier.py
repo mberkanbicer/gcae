@@ -7,6 +7,7 @@ from .models import (
     AgentState,
     CriterionJudgement,
     CriterionResult,
+    EvidenceRecord,
     ToolCall,
     VerificationReport,
 )
@@ -36,7 +37,19 @@ class FinalVerifier:
     def __init__(self, judge: Provider | None = None) -> None:
         self.judge = judge
 
-    def verify(self, state: AgentState, diff: str = "") -> VerificationReport:
+    def verify(
+        self,
+        state: AgentState,
+        diff: str = "",
+        evidence: list[EvidenceRecord] | None = None,
+    ) -> VerificationReport:
+        """Verify every mandatory criterion against evidence, never against vibes.
+
+        Completion requires PASS for every criterion.  A criterion with no evidence in the
+        ledger is INSUFFICIENT, a criterion with contradicting evidence fails even when a
+        check nominally passed, and a criterion verdict always carries the ledger ids it
+        rests on.
+        """
         worktree = Path(state.worktree)
         if not worktree.exists():
             return VerificationReport(
@@ -45,7 +58,7 @@ class FinalVerifier:
                 hygiene_passed=False,
                 details=["agent worktree does not exist"],
             )
-
+        ledger = list(evidence or [])
         tools = ToolRegistry(worktree)
         # Hygiene describes the candidate as the agent left it, so it is measured before
         # criterion commands run: a criterion that runs pytest creates __pycache__ and
@@ -53,9 +66,9 @@ class FinalVerifier:
         hygiene_passed = self._hygiene(worktree)
         results: list[CriterionResult] = []
         for criterion in state.success_criteria:
-            results.append(self._verify_criterion(criterion, tools, state, diff))
-        passed = all(result.passed for result in results)
-        missing = [result.criterion for result in results if not result.passed]
+            results.append(self._verify_criterion(criterion, tools, state, diff, ledger))
+        passed = all(result.status == "pass" for result in results)
+        missing = [result.criterion for result in results if result.status != "pass"]
         return VerificationReport(
             passed=passed,
             criteria=results,
@@ -64,12 +77,33 @@ class FinalVerifier:
             details=[] if hygiene_passed else ["workspace hygiene failed"],
         )
 
+    @staticmethod
+    def _matching(
+        evidence: list[EvidenceRecord], criterion: str
+    ) -> tuple[list[EvidenceRecord], list[EvidenceRecord]]:
+        """Ledger records that speak for or against a criterion (substring, both ways)."""
+        target = criterion.lower()
+        supporting: list[EvidenceRecord] = []
+        contradicting: list[EvidenceRecord] = []
+        for record in evidence:
+            claims = " | ".join([record.claim_or_subject, *record.supports]).lower()
+            claim_match = (
+                record.claim_or_subject and record.claim_or_subject.lower() in target
+            )
+            if target in claims or claim_match:
+                supporting.append(record)
+            contradictions = " | ".join(record.contradicts).lower()
+            if target in contradictions or (claim_match and record.contradicts):
+                contradicting.append(record)
+        return supporting, contradicting
+
     def _verify_criterion(
         self,
         criterion: str,
         tools: ToolRegistry,
         state: AgentState,
         diff: str,
+        evidence: list[EvidenceRecord],
     ) -> CriterionResult:
         command = criterion.strip()
         if command.startswith("file exists: "):
@@ -77,11 +111,16 @@ class FinalVerifier:
             try:
                 path = tools._path(relative)
                 passed = path.is_file()
-                evidence = str(path)
+                text = str(path)
             except ValueError as exc:
                 passed = False
-                evidence = str(exc)
-            return CriterionResult(criterion=criterion, passed=passed, evidence=evidence)
+                text = str(exc)
+            return CriterionResult(
+                criterion=criterion,
+                passed=passed,
+                status="pass" if passed else "fail",
+                evidence=text,
+            )
 
         if command.startswith("file contains exactly: "):
             value = command.removeprefix("file contains exactly: ")
@@ -98,11 +137,16 @@ class FinalVerifier:
                 # "exactly" is about the content, not the final byte: a trailing newline at
                 # end of file is conventional, and criteria are often inferred from prose.
                 passed = found is not None and found.rstrip("\n") == expected.rstrip("\n")
-                evidence = evidence_for(path, expected, found)
+                text = evidence_for(path, expected, found)
             except (OSError, UnicodeError, ValueError) as exc:
                 passed = False
-                evidence = str(exc)
-            return CriterionResult(criterion=criterion, passed=passed, evidence=evidence)
+                text = str(exc)
+            return CriterionResult(
+                criterion=criterion,
+                passed=passed,
+                status="pass" if passed else "fail",
+                evidence=text,
+            )
 
         if command.startswith("file contains: "):
             value = command.removeprefix("file contains: ")
@@ -117,11 +161,16 @@ class FinalVerifier:
                 path = tools._path(relative.strip())
                 found = path.read_text(encoding="utf-8") if path.is_file() else None
                 passed = found is not None and expected in found
-                evidence = evidence_for(path, expected, found)
+                text = evidence_for(path, expected, found)
             except (OSError, UnicodeError, ValueError) as exc:
                 passed = False
-                evidence = str(exc)
-            return CriterionResult(criterion=criterion, passed=passed, evidence=evidence)
+                text = str(exc)
+            return CriterionResult(
+                criterion=criterion,
+                passed=passed,
+                status="pass" if passed else "fail",
+                evidence=text,
+            )
 
         if command.startswith("command succeeds: "):
             shell_command = command.removeprefix("command succeeds: ").strip()
@@ -131,15 +180,17 @@ class FinalVerifier:
             return CriterionResult(
                 criterion=criterion,
                 passed=result.success,
+                status="pass" if result.success else "fail",
                 evidence=result.output or result.error or "",
             )
 
         if self.judge is not None:
-            return self._judge_criterion(criterion, state, diff)
+            return self._judge_criterion(criterion, state, diff, evidence)
 
         return CriterionResult(
             criterion=criterion,
             passed=False,
+            status="fail",
             evidence=(
                 "unsupported criterion; use 'file exists: ', 'file contains: ', "
                 "'file contains exactly: ', 'command succeeds: ' or enable "
@@ -147,8 +198,42 @@ class FinalVerifier:
             ),
         )
 
-    def _judge_criterion(self, criterion: str, state: AgentState, diff: str) -> CriterionResult:
+    def _judge_criterion(
+        self,
+        criterion: str,
+        state: AgentState,
+        diff: str,
+        evidence: list[EvidenceRecord],
+    ) -> CriterionResult:
+        """A criterion the runtime cannot check deterministically: the ledger decides first.
+
+        No evidence at all -> INSUFFICIENT (the task is not complete).  Contradicting
+        evidence without support -> FAIL.  Otherwise the judge rules on the evidence bundle,
+        and fails closed on any provider error or empty citation.
+        """
         assert self.judge is not None
+        supporting, contradicting = self._matching(evidence, criterion)
+        if not supporting and not contradicting:
+            return CriterionResult(
+                criterion=criterion,
+                passed=False,
+                status="insufficient",
+                evidence=(
+                    "no evidence in the ledger speaks to this criterion; the task is not "
+                    "complete until something observable supports it"
+                ),
+            )
+        if contradicting and not supporting:
+            cited = ", ".join(
+                f"E{record.id} ({record.summary[:80]})" for record in contradicting[:3]
+            )
+            return CriterionResult(
+                criterion=criterion,
+                passed=False,
+                status="fail",
+                evidence=f"contradicted by evidence: {cited}",
+                evidence_ids=[record.id for record in contradicting if record.id is not None],
+            )
         validation = state.latest_validation
         names: list[str] = []
         if validation is not None:
@@ -165,6 +250,17 @@ class FinalVerifier:
                     samples[name] = path.read_text(encoding="utf-8", errors="replace")[:2000]
             except OSError:
                 continue
+        cited_records = [
+            {
+                "id": record.id,
+                "kind": str(record.kind),
+                "claim": record.claim_or_subject[:160],
+                "source": record.source_reference[:160],
+                "summary": record.summary[:300],
+                "contradicts": record.contradicts[:3],
+            }
+            for record in [*supporting[:6], *contradicting[:3]]
+        ]
         evidence_bundle = {
             "objective": state.objective,
             "accepted_commit": state.accepted_commit,
@@ -181,6 +277,7 @@ class FinalVerifier:
                 for result in (validation.command_results if validation is not None else [])
             ],
             "worktree_samples": samples,
+            "ledger_evidence": cited_records,
         }
         schema = json.dumps(CriterionJudgement.model_json_schema(), separators=(",", ":"))
         prompt = (
@@ -204,7 +301,14 @@ class FinalVerifier:
             )
         passed = judgement.passed and bool(judgement.evidence.strip())
         verdict = judgement.evidence.strip() or "judge returned no evidence"
-        return CriterionResult(criterion=criterion, passed=passed, evidence=verdict)
+        supporting_ids = [record.id for record in supporting if record.id is not None]
+        return CriterionResult(
+            criterion=criterion,
+            passed=passed,
+            status="pass" if passed else "fail",
+            evidence=verdict,
+            evidence_ids=supporting_ids,
+        )
 
     @staticmethod
     def _hygiene(worktree: Path) -> bool:

@@ -425,6 +425,34 @@ def script(runtime: Runtime, stop: threading.Event) -> None:
         RunPhase.EXECUTE,
         "step-1",
     )
+    # the runtime records evidence for every command; supporting evidence stays in the logs
+    # while a contradictory observation gets a semantic timeline line
+    emit(
+        "evidence_recorded",
+        {
+            "id": 2,
+            "kind": "command_result",
+            "claim": "the parser reports its chunk handling",
+            "supports": ["the parser reports its chunk handling"],
+            "contradicts": [],
+            "summary": "parsed 42 rows",
+        },
+        RunPhase.EXECUTE,
+        "step-1",
+    )
+    emit(
+        "evidence_recorded",
+        {
+            "id": 3,
+            "kind": "observation",
+            "claim": "the parser reports its chunk handling",
+            "supports": [],
+            "contradicts": ["the parser reports its chunk handling"],
+            "summary": "failure signal observed: misplaced quote",
+        },
+        RunPhase.EXECUTE,
+        "step-1",
+    )
 
     # real acceptance: the fix (and its test) is committed as a checkpoint
     (worktree / "tests").mkdir(exist_ok=True)

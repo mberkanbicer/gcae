@@ -330,9 +330,36 @@ def timeline_entry(
             return None
         if decision == "replan":
             return ("↻", f"replan · {reason}", "warning")
+        if decision == "repair":
+            return ("↻", f"repair · {reason}", "warning")
         if decision == "finish_candidate":
             return ("→", f"finish candidate · {reason}", "accent")
         return ("·", f"continue · {reason}", "muted")
+    if event_type == "trajectory_step_completed":
+        status = str(payload.get("status"))
+        goal = elide(str(payload.get("semantic_goal") or ""), 60)
+        reason = elide(str(payload.get("decision_reason") or ""), 70)
+        if status == "accepted":
+            return ("✓", f"trajectory accepted · {goal}", "success")
+        if status == "rejected":
+            return ("×", f"candidate rejected · {reason or goal}", "error")
+        if status == "repaired":
+            return ("↻", f"repair · {reason or goal}", "warning")
+        if status == "replanned":
+            return ("↻", f"trajectory replanned · {reason or goal}", "warning")
+        if status == "blocked":
+            return ("!", f"trajectory blocked · {reason or goal}", "warning")
+        return None
+    if event_type == "evidence_recorded":
+        # supporting evidence is routine (every command adds one); only contradiction and
+        # user-level confirmation deserve a semantic timeline line
+        if payload.get("contradicts"):
+            claim = elide(str(payload.get("claim") or "the expectation"), 60)
+            return ("!", f"evidence contradicts · {claim}", "warning")
+        if payload.get("kind") == "user_confirmation":
+            summary = elide(str(payload.get("summary") or ""), 60)
+            return ("i", f"user confirmation · {summary}", "accent")
+        return None
     if event_type == "rollback_completed":
         discarded = payload.get("discarded") or []
         reason = elide(str(payload.get("reason") or ""), 60)

@@ -1,8 +1,24 @@
 from pathlib import Path
 
-from gcae.models import AgentState, ValidationResult
+from gcae.models import AgentState, EvidenceKind, EvidenceRecord, ValidationResult
 from gcae.providers import FakeProvider
 from gcae.verifier import FinalVerifier
+
+
+def supporting(criterion: str) -> EvidenceRecord:
+    """One ledger record speaking for a criterion, as the runtime would have written it."""
+    # the verifier always receives ledger records, which carry their ids
+    return EvidenceRecord(
+        id=1,
+        run_id="r",
+        trajectory_step_id="trajectory-step-1-1",
+        kind=EvidenceKind.TEST_RESULT,
+        claim_or_subject=criterion,
+        source_type="test",
+        source_reference="test_restart",
+        summary="test_restart passed",
+        supports=[criterion],
+    )
 
 
 def test_verifier_checks_file_content_and_command(tmp_path: Path) -> None:
@@ -76,28 +92,46 @@ def test_hybrid_verifier_judges_unsupported_criterion(tmp_path: Path) -> None:
     judge = FakeProvider(
         [{"passed": True, "evidence": "answer.txt contains the expected output"}]
     )
+    criterion = "the implementation is correct"
     report = FinalVerifier(judge).verify(
-        make_state(tmp_path, "the implementation is correct")
+        make_state(tmp_path, criterion), evidence=[supporting(criterion)]
     )
     assert report.passed
     assert report.criteria[0].evidence == "answer.txt contains the expected output"
+    assert report.criteria[0].status == "pass"
+    assert report.criteria[0].evidence_ids == [1]
 
 
 def test_hybrid_verifier_requires_evidence(tmp_path: Path) -> None:
+    """A criterion nothing in the ledger speaks to is INSUFFICIENT, not judged."""
     judge = FakeProvider([{"passed": True, "evidence": "   "}])
     report = FinalVerifier(judge).verify(
         make_state(tmp_path, "the implementation is correct")
     )
     assert not report.passed
+    assert report.criteria[0].status == "insufficient"
+    assert "no evidence in the ledger" in report.criteria[0].evidence
+    assert judge.calls == 0, "the judge must not be asked to invent evidence"
+
+    # with ledger evidence, a blank citation still fails closed
+    judge = FakeProvider([{"passed": True, "evidence": "   "}])
+    criterion = "the implementation is correct"
+    report = FinalVerifier(judge).verify(
+        make_state(tmp_path, criterion), evidence=[supporting(criterion)]
+    )
+    assert not report.passed
+    assert report.criteria[0].status == "fail"
     assert "no evidence" in report.criteria[0].evidence
 
 
 def test_hybrid_verifier_fails_closed_on_provider_error(tmp_path: Path) -> None:
     judge = FakeProvider([], repair_limit=0)
+    criterion = "the implementation is correct"
     report = FinalVerifier(judge).verify(
-        make_state(tmp_path, "the implementation is correct")
+        make_state(tmp_path, criterion), evidence=[supporting(criterion)]
     )
     assert not report.passed
+    assert report.criteria[0].status == "fail"
     assert "judge unavailable" in report.criteria[0].evidence
 
 
@@ -120,7 +154,8 @@ class PromptCapture:
 
 def test_hybrid_verifier_receives_worktree_samples(tmp_path: Path) -> None:
     (tmp_path / "note.txt").write_text("hybrid ok")
-    state = make_state(tmp_path, "note.txt contains the requested text")
+    criterion = "note.txt contains the requested text"
+    state = make_state(tmp_path, criterion)
     state.latest_validation = ValidationResult(
         passed=True,
         changed_files=["note.txt"],
@@ -129,10 +164,11 @@ def test_hybrid_verifier_receives_worktree_samples(tmp_path: Path) -> None:
     capture = PromptCapture(
         {"passed": True, "evidence": "note.txt contains 'hybrid ok'"}
     )
-    report = FinalVerifier(capture).verify(state)
+    report = FinalVerifier(capture).verify(state, evidence=[supporting(criterion)])
     assert report.passed
     assert "hybrid ok" in capture.prompts[0]
     assert "worktree_samples" in capture.prompts[0]
+    assert "ledger_evidence" in capture.prompts[0]
 
 
 def test_hygiene_is_measured_before_criterion_commands_run(tmp_path: Path) -> None:

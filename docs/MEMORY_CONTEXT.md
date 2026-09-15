@@ -4,11 +4,15 @@
 
 `memory.db` lives at the runtime-state root and is shared by all runs. Records are typed
 (`user_instruction`, `fact`, `decision`, `failure`, `observation`, `artifact`) and carry provenance:
-`id`, `run_id`, `step_id`, `source`, `commit_sha`, `created_at`, `importance`, `immutable`.
+`id`, `run_id`, `source_repo`, `step_id`, `source`, `commit_sha`, `created_at`, `importance`,
+`immutable`. The same database holds the **evidence ledger** (`evidence` table), one record per
+command result, validation, interactive session and criterion verdict (docs/EVIDENCE_LEDGER.md).
 
 - Immutable records (original request, constraints, success criteria, user overrides) cannot be
   edited; `MemoryStore.update` refuses them.
-- Retrieval uses SQLite FTS5 with punctuation-safe tokenization. No embeddings, no vector store.
+- Retrieval uses SQLite FTS5 with punctuation-safe tokenization, scoped to `source_repo`: a
+  lesson learned in one project never enters another project's decision context. No embeddings,
+  no vector store.
 - Rollback never deletes knowledge: failure lessons from rejected trajectories stay and are
   retrieved by later runs, so the same failed strategy is not repeated without new evidence.
 - Evaluators may promote `memories_to_promote`; the runtime owns their provenance fields.

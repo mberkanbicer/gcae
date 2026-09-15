@@ -732,6 +732,7 @@ class ValidationPanel(Panel):
         width = self.content_width
         validation = ui.validation
         verification = ui.verification
+        evidence = ui.evidence
         # (priority, row): 0 failure, 1 gate/warning, 2 pass, 3 note
         rows: list[tuple[int, Text]] = []
         running = not ui.agent_done and ui.phase == "validate"
@@ -802,6 +803,22 @@ class ValidationPanel(Panel):
                 rows.append(
                     (1 if ok else 0, self._check_row(ok, str(item.get("criterion")), item, width))
                 )
+        if evidence.get("total"):
+            style = STYLES["warning"] if evidence.get("contradicting") else STYLES["muted"]
+            rows.append(
+                (
+                    3,
+                    _row(
+                        "evidence",
+                        Text(
+                            f"{evidence.get('supporting', 0)} supporting · "
+                            f"{evidence.get('contradicting', 0)} contradicting · "
+                            f"{evidence.get('total', 0)} records",
+                            style=style,
+                        ),
+                    ),
+                )
+            )
         # Failures first, then the gate, then passing checks and notes: a short panel must
         # never hide the check that actually failed.
         budget = self.row_budget(self.max_rows)

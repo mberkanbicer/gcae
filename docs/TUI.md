@@ -127,6 +127,15 @@ the event log. The timeline carries the adaptive story: `obstacle · interactive
 `interactive input detected · <prompt>`, `strategy ineffective after N attempts`, `execution evidence
 required`, and `blocked · …` when no safe autonomous path remains.
 
+## Trajectory and evidence
+
+The dashboard is a live trajectory inspector. Each semantic attempt appears on the timeline with
+its verdict — `trajectory accepted · <goal>`, `candidate rejected · <reason>`,
+`repair · <reason>`, `trajectory replanned · <reason>`, `trajectory blocked · <reason>` — and the
+validation panel carries the running evidence counts (`3 supporting · 1 contradicting · 9 records`).
+Contradictory evidence gets a timeline line of its own (`! evidence contradicts · <claim>`);
+routine supporting evidence stays in the logs, where the streaming telemetry also lives.
+
 ## Trusted versus candidate
 
 The CHECKPOINT panel is the run's identity: it shows the trusted commit (a verified tree) and the

@@ -2212,3 +2212,118 @@ def test_the_input_modal_sends_the_answer_to_the_runtime(tmp_path: Path) -> None
     asyncio.run(scenario())
     assert submitted == ["secret-value"], "the modal value must reach submit_process_input"
     assert runtime.state.pending_input is not None, "the caller decides what happens next"
+
+
+# ==================================================== trajectory and evidence
+# The dashboard is a live trajectory inspector: trusted past, speculative present,
+# adaptive future — with evidence visible and verdicts in the timeline.
+
+
+def test_a_trajectory_step_sets_the_goal_and_expectation() -> None:
+    ui = UiState()
+    ui.apply(
+        event(
+            "trajectory_step_started",
+            {
+                "id": "trajectory-step-1-1",
+                "semantic_goal": "verify restart behavior",
+                "parent_plan_step_id": "step-1",
+                "expectation": "a second game starts after 'y'",
+                "expected_evidence": ["the second 'Guess:' prompt appears"],
+                "failure_signals": ["the process exits after 'y'"],
+                "status": "executing",
+                "candidate_base_commit": "abc123",
+            },
+            step_id="step-1",
+        )
+    )
+    assert ui.trajectory is not None
+    assert ui.trajectory["semantic_goal"] == "verify restart behavior"
+    assert ui.trajectory["expectation"] == "a second game starts after 'y'"
+    assert ui.trajectory["failure_signals"] == ["the process exits after 'y'"]
+    assert ui.trajectory["candidate_base_commit"] == "abc123"
+
+
+def test_trajectory_verdicts_reach_the_timeline() -> None:
+    ui = UiState()
+    for status, _expected in (
+        ("accepted", "trajectory accepted"),
+        ("rejected", "candidate rejected"),
+        ("repaired", "repair"),
+        ("replanned", "trajectory replanned"),
+        ("blocked", "trajectory blocked"),
+    ):
+        ui.apply(
+            event(
+                "trajectory_step_completed",
+                {
+                    "status": status,
+                    "decision": status,
+                    "decision_reason": "the why",
+                    "semantic_goal": "the goal",
+                },
+                step_id="step-1",
+            )
+        )
+    timeline = [row.text for row in ui.timeline]
+    for expected in (
+        "trajectory accepted",
+        "candidate rejected",
+        "repair",
+        "trajectory replanned",
+        "trajectory blocked",
+    ):
+        assert any(expected in text for text in timeline), expected
+    assert ui.trajectory is None, "the completed attempt leaves the active slot"
+    assert ui.last_trajectory["decision"] == "blocked"
+
+
+def test_evidence_counts_accumulate_and_render(tmp_path: Path) -> None:
+    ui = UiState()
+    ui.apply(
+        event(
+            "evidence_recorded",
+            {"id": 1, "kind": "command_result", "claim": "the claim",
+             "supports": ["the claim"], "contradicts": [], "summary": "exit 0"},
+        )
+    )
+    ui.apply(
+        event(
+            "evidence_recorded",
+            {"id": 2, "kind": "observation", "claim": "the claim",
+             "supports": [], "contradicts": ["the claim"],
+             "summary": "failure signal observed"},
+        )
+    )
+    assert ui.evidence["total"] == 2
+    assert ui.evidence["supporting"] == 1
+    assert ui.evidence["contradicting"] == 1
+
+    app = GcaeApp(make_runtime(tmp_path, start=False), auto_run=False)
+    body = _rendered(app, ValidationPanel, ui)
+    assert "1 supporting" in body
+    assert "1 contradicting" in body
+    assert "2 records" in body
+
+
+def test_contradicting_evidence_gets_a_timeline_line() -> None:
+    ui = UiState()
+    ui.apply(
+        event(
+            "evidence_recorded",
+            {"id": 1, "kind": "observation", "claim": "restart works",
+             "supports": [], "contradicts": ["restart works"],
+             "summary": "failure signal observed"},
+        )
+    )
+    assert any("evidence contradicts" in row.text for row in ui.timeline)
+    # supporting evidence is routine: it must not flood the semantic timeline
+    ui = UiState()
+    ui.apply(
+        event(
+            "evidence_recorded",
+            {"id": 2, "kind": "command_result", "claim": "x",
+             "supports": ["x"], "contradicts": [], "summary": "exit 0"},
+        )
+    )
+    assert not any("evidence" in row.text for row in ui.timeline)

@@ -38,6 +38,12 @@ user's working tree is never modified; a dirty source repository is refused.
 
 ## Semantic-step loop
 
+The plan is structured trajectory state with three stability regions: a locked verified
+prefix (completed steps with checkpoint linkage), the current step, and an adaptive future
+suffix. Replans are deterministic patches to the affected region — never full rewrites;
+completed steps keep stable IDs and require evidence to invalidate (see
+docs/PLAN_HISTORY.md).
+
 ```
 load state ──► current plan step
       │

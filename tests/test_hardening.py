@@ -577,3 +577,76 @@ def test_runtime_backfills_legacy_memory_on_start(tmp_path: Path) -> None:
     assert runtime.memory is not None
     found = runtime.memory.search("xyzzy", source_repo=str(source))
     assert [r.record.run_id for r in found] == ["legacy-run"]
+
+
+# ============================================================ memory isolation
+# A snake-game run must not inherit Fibonacci/ant-simulator/number-guessing history.
+
+
+def _history_run(store: MemoryStore, run_id: str, repo: str, topic: str) -> None:
+    store.add(
+        MemoryRecord(
+            kind="decision", content=f"{topic} approach chosen", run_id=run_id,
+            source_repo=repo,
+        )
+    )
+
+
+def test_unrelated_project_history_never_enters_context(tmp_path: Path) -> None:
+    """Required isolation: Fibonacci, ant simulator and number-guessing records stay
+    out of a snake-game run's reconstructed context."""
+    store = MemoryStore(tmp_path / "memory.db")
+    _history_run(store, "run-fib", "/repo/fib", "Fibonacci script")
+    _history_run(store, "run-ant", "/repo/ant", "ant simulator")
+    _history_run(store, "run-guess", "/repo/guess", "number guessing game")
+    _history_run(store, "run-snake-old", "/repo/snake", "snake game loop")
+    state = AgentState(
+        run_id="run-snake", source_repo="/repo/snake", worktree="/w", branch="b",
+        objective="build a snake game with curses", original_request="build a snake game",
+    )
+    context = ContextBuilder(store).build(state, SemanticStep(id="s", goal="game loop"))
+    assert "snake game loop" in context.text
+    assert "Fibonacci" not in context.text
+    assert "ant simulator" not in context.text
+    assert "number guessing" not in context.text
+
+
+def test_retrieval_tiers_run_first_then_project_then_global(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path / "memory.db")
+    store.add(MemoryRecord(kind="fact", content="shared snake engine fact",
+                           run_id="other-run", source_repo="/repo/snake"))
+    store.add(MemoryRecord(kind="fact", content="global curses lesson",
+                           run_id="any-run", source_repo="/repo/other", scope="global"))
+    store.add(MemoryRecord(kind="fact", content="other project curses note",
+                           run_id="third-run", source_repo="/repo/other"))
+    state = AgentState(
+        run_id="this-run", source_repo="/repo/snake", worktree="/w", branch="b",
+        objective="curses snake engine", original_request="curses",
+    )
+    context = ContextBuilder(store).build(state, SemanticStep(id="s", goal="engine"))
+    assert "shared snake engine fact" in context.text
+    assert "global curses lesson" in context.text
+    assert "other project curses note" not in context.text
+
+
+def test_duplicate_memories_are_gated_not_repeated(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path / "memory.db")
+    for _ in range(3):
+        store.add(MemoryRecord(kind="decision", content="step completed: write loop",
+                               run_id="r", source_repo="/s"))
+    state = AgentState(
+        run_id="r", source_repo="/s", worktree="/w", branch="b",
+        objective="write loop", original_request="write loop",
+    )
+    context = ContextBuilder(store).build(state, SemanticStep(id="s", goal="loop"))
+    assert context.text.count("step completed: write loop") == 1
+    assert context.dropped_duplicates == 2
+
+
+def test_context_warning_reports_memory_pressure() -> None:
+    from gcae.context import Context
+
+    context = Context(text="x", pinned_ids=(), memory_share=0.44, dropped_duplicates=0)
+    assert context.memory_share > 0.4
+    calm = Context(text="x", pinned_ids=())
+    assert calm.memory_share == 0.0 and calm.dropped_duplicates == 0

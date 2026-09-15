@@ -33,9 +33,10 @@ from .screens import (
     ContextScreen,
     DiffScreen,
     EvaluationScreen,
+    HealthScreen,
     LogsScreen,
     MemoryScreen,
-    PlanScreen,
+    TrajectoryScreen,
 )
 from .state import PANELS, UiState
 from .widgets import (
@@ -44,6 +45,7 @@ from .widgets import (
     CheckpointPanel,
     EvaluationPanel,
     FooterBar,
+    HealthPanel,
     MetricsPanel,
     ObjectivePanel,
     PlanPanel,
@@ -74,7 +76,8 @@ class GcaeApp(App[None]):
         Binding("m", "memory", "Memory"),
         Binding("c", "context", "Context"),
         Binding("e", "evaluation", "Evaluation"),
-        Binding("t", "plan_detail", "Plan"),
+        Binding("t", "trajectory", "Trajectory"),
+        Binding("h", "health", "Health"),
         Binding("i", "instruction", "Instruct"),
         Binding("M", "merge_run", "Merge"),
         Binding("question_mark", "help", "Help"),
@@ -108,6 +111,7 @@ class GcaeApp(App[None]):
         self.focus_order = [
             "plan",
             "activity",
+            "health",
             "checkpoint",
             "evaluation",
             "validation",
@@ -132,6 +136,7 @@ class GcaeApp(App[None]):
                 yield PlanPanel()
             with Vertical(id="column-right"):
                 yield ActivityPanel()
+                yield HealthPanel()
                 yield CheckpointPanel()
                 yield ValidationPanel()
                 yield EvaluationPanel()
@@ -147,6 +152,7 @@ class GcaeApp(App[None]):
         state = self.runtime.state
         if state is not None:
             self.ui.seed_from_state(state)
+            self._replay_history()
         self.set_interval(0.5, self._tick)
         self._apply_responsive()
         self._refresh_panels(set(PANELS))
@@ -210,6 +216,26 @@ class GcaeApp(App[None]):
             rule_widget.update(Text(rule, style=formatters.STYLES["rule"]))
 
     # ------------------------------------------------------------------ agent worker
+
+    def _replay_history(self, limit: int = 400) -> None:
+        """Restore semantic progress history when reopening a run.
+
+        The feed rebuilds the same grouped lines from the persisted event log, so a
+        resumed dashboard shows what already happened — not only new events.
+        Corrupt lines are skipped; a broken log never blanks the history.
+        """
+        try:
+            path = self.runtime.events.path if self.runtime.events is not None else None
+            if path is None:
+                return
+            lines = path.read_text(encoding="utf-8").splitlines()[-limit:]
+        except OSError:
+            return
+        for line in lines:
+            try:
+                self.ui.apply(Event.model_validate_json(line))
+            except Exception:  # noqa: BLE001 - history replay never breaks mounting
+                continue
 
     def _launch_agent(self) -> None:
         self.agent_done = False
@@ -301,7 +327,10 @@ class GcaeApp(App[None]):
 
     def _tick(self) -> None:
         self._refresh_panels(
-            {"status", "activity", "checkpoint", "metrics", "timeline", "banner", "footer"}
+            {
+                "status", "activity", "health", "checkpoint",
+                "metrics", "timeline", "banner", "footer",
+            }
         )
 
     def _refresh_panels(self, panels: set[str]) -> None:
@@ -331,6 +360,8 @@ class GcaeApp(App[None]):
             self.query_one(PlanPanel).render_state(state, ui)
         elif name == "activity":
             self.query_one(ActivityPanel).render_state(state, ui, model=self._model_label())
+        elif name == "health":
+            self.query_one(HealthPanel).render_state(state, ui)
         elif name == "checkpoint":
             self.query_one(CheckpointPanel).render_state(
                 state, ui, subject=self._checkpoint_subject()
@@ -381,7 +412,7 @@ class GcaeApp(App[None]):
             merge_keys = "[M] Merge accepted work  " if self._mergeable(state) else ""
             keys = (
                 f"[i] New task  {merge_keys}[d] Diff  [l] Logs  [m] Memory  [c] Context  "
-                "[e] Evaluation  [t] Plan  [?] Help  [q] Quit"
+                "[e] Evaluation  [t] Trajectory  [h] Health  [?] Help  [q] Quit"
             )
         elif self.ui.pending_input is not None:
             keys = "[i] Send input  [s] Stop  [l] Logs  [?] Help  [q] Quit"
@@ -605,7 +636,79 @@ class GcaeApp(App[None]):
     def action_plan_detail(self) -> None:
         state = self.runtime.state
         steps = state.plan if state is not None else []
-        self.push_screen(PlanScreen(steps, self.ui.plan_reason))
+        trajectory = state.trajectory if state is not None else []
+        self.push_screen(TrajectoryScreen(steps, trajectory, self.ui.feed.events))
+
+
+    def _health_checks(self) -> list[tuple[str, str, str]]:
+        """One honest row per subsystem, from live probes — never painted green."""
+        import time
+
+        state = self.runtime.state
+        run_id = state.run_id if state is not None else ""
+        now = time.monotonic()
+        checks: list[tuple[str, str, str]] = []
+        health = self.ui.health or {}
+        checks.append((
+            "runtime",
+            str(health.get("state") or "healthy"),
+            str(health.get("reason") or "supervision active"),
+        ))
+        try:
+            model = self._model_label()
+            last = self.runtime.guardian.heartbeat.last_model_ok
+            age = f"{now - last:.0f}s ago" if last else "no request yet"
+            model_state = "ok" if last or not state else "idle"
+            checks.append(("model", model_state, f"{model} · last request {age}"))
+        except Exception as exc:  # noqa: BLE001 - health screen never crashes
+            checks.append(("model", "unknown", str(exc)[:80]))
+        try:
+            assert self.runtime.repo is not None
+            dirty = self.runtime.repo.status()
+            head = self.runtime.repo.current_commit()[:7]
+            trusted = state.accepted_commit[:7] if state and state.accepted_commit else "-"
+            tree_state = f"{'dirty' if dirty else 'clean'} at {head}"
+            tree_state += f" · trusted {trusted}"
+            checks.append(("worktree", "ok", tree_state))
+        except Exception as exc:  # noqa: BLE001 - health screen never crashes
+            checks.append(("worktree", "error", str(exc)[:80]))
+        try:
+            assert self.runtime.memory is not None
+            counts = self.runtime.memory.counts(run_id)
+            total = sum(counts.values())
+            checks.append(("memory", "ok", f"SQLite responsive · {total} records"))
+        except Exception as exc:  # noqa: BLE001 - health screen never crashes
+            checks.append(("memory", "error", str(exc)[:80]))
+        try:
+            path = self.runtime.events.path if self.runtime.events is not None else None
+            if path is not None and path.exists():
+                ago = now - self.runtime._last_event_write if self.runtime._last_event_write else -1
+                detail = f"last write {ago:.0f}s ago" if ago >= 0 else "no writes yet"
+                checks.append(("events", "ok", f"{path.name} · {detail}"))
+            else:
+                checks.append(("events", "degraded", "event file missing"))
+        except Exception as exc:  # noqa: BLE001 - health screen never crashes
+            checks.append(("events", "error", str(exc)[:80]))
+        live = self.runtime._live_tools
+        pending = live.pending_process if live is not None else None
+        if pending is None:
+            checks.append(("process", "ok", "no live child"))
+        else:
+            try:
+                alive = pending.poll() is None
+            except (OSError, ValueError):
+                alive = False
+            checks.append(("process", "ok" if alive else "degraded",
+                           "awaiting user input" if alive else "exited handle pending cleanup"))
+        if self.ui.last_recovery:
+            checks.append(("recovery", "ok", self.ui.last_recovery[:80]))
+        return checks
+
+    def action_trajectory(self) -> None:
+        self.action_plan_detail()
+
+    def action_health(self) -> None:
+        self.push_screen(HealthScreen(self._health_checks()))
 
     def action_help(self) -> None:
         self.push_screen(HelpModal())

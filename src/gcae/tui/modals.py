@@ -20,7 +20,8 @@ GCAE keys
   m            memory inspector (facts, decisions, failures)
   c            context inspector (what the model receives)
   e            latest evaluation and verification evidence
-  t            full plan with goals and validation requirements
+   t            trajectory: plan steps with attempts, verdicts and knowledge
+   h            guardian health per subsystem, from live checks
   Enter        open the detail view for the focused panel
   Tab / j / k  move focus between panels
   ?            this help · Esc closes

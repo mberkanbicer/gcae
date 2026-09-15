@@ -4,6 +4,50 @@ All notable changes to GCAE are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] — 2026-09-14
+
+### Added
+
+- **Stable plan history and partial replanning.** The plan is trajectory state with a
+  locked verified prefix, the current step and an adaptive future suffix. Completed steps
+  keep stable IDs, checkpoint linkage and locks across replans; replans are deterministic
+  `ReplanPatch`es to the affected region (validated: base version, locked-step evidence,
+  no duplicates, criteria coverage preserved); invalidation needs recorded reason plus
+  ledger evidence and follows `depends_on`; rollback to an older checkpoint invalidates
+  exactly the steps that no longer survive it (ancestry-checked); every revision bumps
+  `plan_version` with a persisted `PlanVersion` record. (docs/PLAN_HISTORY.md)
+- **Runtime Guardian** (`src/gcae/guardian.py`): deterministic in-process supervision —
+  pre/during/post checks for every model call and tool operation, step-boundary integrity
+  checks, heartbeat with soft/hard stall detection, bounded recovery budgets, stale-state
+  repair, and plan-health review. Decides recoveries; the runtime executes them. No LLM,
+  no second agent. (docs/RUNTIME_GUARDIAN.md)
+- **Three presentation levels.** `ProgressEvent` (`src/gcae/progress.py`) drives the main
+  timeline as an engineering journal (grouped reads, in-place outcomes, categories);
+  Active shows Goal/Doing/Last result/Next with the execution phase; a compact Health
+  panel plus `[h]` detail screen show one primary state; `[t]` is now the trajectory
+  view; Logs defaults to the semantic filter with raw telemetry one key away.
+  (docs/PROGRESS_MODEL.md)
+- **Memory isolation tiers.** Retrieval is run-first, then same-project, then explicitly
+  global-only, with duplicate gating and anomaly warnings; the context screen shows the
+  tiers inline (`Memory[id|kind|tier]`).
+
+### Fixed
+
+- A blocked run no longer keeps executing behind the block: the loop halts on `blocked`.
+- `current_step_id` advances on every replan/accept path, so plan-health checks see the
+  real current step.
+- An explicit contradiction never counts as support via claim matching.
+
+### Tests
+
+331 pass. New: `tests/test_plan_history.py` (§60–67: prefix preservation, earlier
+invalidation with dependents, unrelated protection, replan-without-rollback,
+rollback-without-replan, user override, stale rejection, locked rewrite, resume),
+`tests/test_guardian.py` (failure checks, budgets, stalls, health priority, hang
+termination, ladder recovery), `tests/test_progress.py` (incl. the §71
+engineering-journal test), plus TUI story tests (Goal/Doing/Last/Next, health,
+trajectory screen, replay, plan history).
+
 ## [0.4.1] — 2026-09-14
 
 ### Added

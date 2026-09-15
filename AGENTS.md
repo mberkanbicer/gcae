@@ -69,6 +69,13 @@ RECONSTRUCT → ACT → OBSERVE → JUDGE → COMMIT OR REVERT → LEARN → (re
     to ledger evidence; no evidence means INSUFFICIENT, contradiction means FAIL. The
     evaluator may say *repair* (keep the candidate, fix it) instead of rollback, and *replan*
     when the path is invalid — the four transitions are distinct.
+11. **The plan is trajectory state, not disposable text.** Verified completed steps keep
+    stable IDs, checkpoint linkage and locks across replans; replans are deterministic
+    partial patches to the affected region (current + future by default), never full
+    rewrites. A completed step is reopened only as `invalidated` with a recorded reason
+    and ledger evidence, and dependents follow. Rollback to an older checkpoint
+    invalidates exactly the steps that no longer survive it. Tested:
+    `tests/test_plan_history.py`. See `docs/PLAN_HISTORY.md`.
 11. **Context is reconstructed per call** from persistent state — never a growing
     conversation, never summarized summaries. Pinned data (request, constraints, criteria,
     current goal, expectation, accepted commit, latest user instructions, last 8 failure
@@ -108,9 +115,10 @@ docs/              architecture and subsystem documentation
 ```
 
 Run all three before considering any change complete. Add tests for behavior changes:
-`tests/test_integration_rollback.py`, `tests/test_adaptive_trajectory.py` and
-`tests/test_hardening.py` (invariants A–J and trajectory tests 3, 4, 6) must keep passing,
-and TUI changes must keep `tests/test_tui.py` passing.
+`tests/test_integration_rollback.py`, `tests/test_adaptive_trajectory.py`,
+`tests/test_hardening.py` (invariants A–J and trajectory tests 3, 4, 6) and
+`tests/test_plan_history.py` (stable prefix, invalidation, resume, TUI history) must keep
+passing, and TUI changes must keep `tests/test_tui.py` passing.
 
 ## Hygiene rules for your own changes
 

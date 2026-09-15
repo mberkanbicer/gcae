@@ -26,6 +26,7 @@ class MemoryStore:
                 content TEXT NOT NULL,
                 run_id TEXT NOT NULL,
                 source_repo TEXT NOT NULL DEFAULT '',
+                scope TEXT NOT NULL DEFAULT 'run',
                 step_id TEXT,
                 source TEXT NOT NULL,
                 commit_sha TEXT,
@@ -71,19 +72,24 @@ class MemoryStore:
             self.connection.execute(
                 "ALTER TABLE memory ADD COLUMN source_repo TEXT NOT NULL DEFAULT ''"
             )
+        if "scope" not in columns:
+            self.connection.execute(
+                "ALTER TABLE memory ADD COLUMN scope TEXT NOT NULL DEFAULT 'run'"
+            )
         self.connection.commit()
 
     def add(self, record: MemoryRecord) -> MemoryRecord:
         with self._lock:
             cursor = self.connection.execute(
-                """INSERT INTO memory(kind, content, run_id, source_repo, step_id, source,
+                """INSERT INTO memory(kind, content, run_id, source_repo, scope, step_id, source,
                    commit_sha, created_at, importance, immutable)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     record.kind,
                     record.content,
                     record.run_id,
                     record.source_repo,
+                    record.scope,
                     record.step_id,
                     record.source,
                     record.commit_sha,
@@ -198,6 +204,7 @@ class MemoryStore:
         return MemoryRecord(
             id=row["id"], kind=row["kind"], content=row["content"], run_id=row["run_id"],
             source_repo=row["source_repo"] if "source_repo" in row.keys() else "",
+            scope=row["scope"] if "scope" in row.keys() and row["scope"] else "run",
             step_id=row["step_id"], source=row["source"], commit_sha=row["commit_sha"],
             created_at=row["created_at"],
             importance=row["importance"],

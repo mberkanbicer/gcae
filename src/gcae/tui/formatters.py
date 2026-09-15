@@ -46,6 +46,8 @@ PLAN_MARKERS: dict[str, tuple[str, str]] = {
     "pending": ("○", "pending"),
     "failed": ("×", "error"),
     "skipped": ("–", "muted"),
+    "invalidated": ("×", "error"),
+    "replaced": ("↻", "warning"),
 }
 
 RUN_BADGES: dict[str, tuple[str, str]] = {
@@ -126,6 +128,35 @@ def run_state(status: str, phase: str | None, paused: bool) -> tuple[str, str]:
         if label:
             return (label, "accent")
     return RUN_BADGES.get(head, (head.upper() or "UNKNOWN", status_style(status)))
+
+
+def primary_status(
+    status: str,
+    phase: str | None,
+    paused: bool,
+    *,
+    health: str = "",
+    waiting_for_input: bool = False,
+    blocked: bool = False,
+) -> tuple[str, str]:
+    """One primary runtime state for the top bar. Priority, highest first:
+
+    FATAL → terminal (complete/failed/stopped) → BLOCKED → WAITING → RECOVERING →
+    ROLLBACK/phase. Secondary state belongs in Active/Health, never beside the badge.
+    """
+    state = (health or "").lower()
+    if state == "fatal":
+        return ("FATAL", "error")
+    head = status.split(":", 1)[0].strip().lower()
+    if head in {"complete", "failed", "stopped"}:
+        return run_state(status, phase, paused)
+    if blocked or state == "blocked":
+        return ("BLOCKED", "warning")
+    if waiting_for_input or head == "waiting_for_user" or state == "waiting":
+        return ("WAITING FOR USER", "accent")
+    if state == "recovering":
+        return ("RECOVERING", "accent")
+    return run_state(status, phase, paused)
 
 
 def short_id(value: str | None, length: int = 7) -> str:
@@ -291,12 +322,22 @@ def timeline_entry(
         return ("!", str(payload.get("message") or "repository notice"), "warning")
     if event_type == "plan_updated":
         reason = str(payload.get("reason") or "plan updated")
+        version = payload.get("version")
+        prefix = f"v{version} " if isinstance(version, int) and version > 1 else ""
+        diff = payload.get("diff") if isinstance(payload.get("diff"), dict) else {}
+        scope = ""
+        if diff:
+            kept = len(diff.get("preserved") or [])
+            changed = len(diff.get("replaced") or []) + len(diff.get("invalidated") or [])
+            added = len(diff.get("inserted") or [])
+            scope = f" · preserved {kept} · replaced {changed} · added {added}"
         if reason == "initial plan":
             return ("●", f"plan created · {len(payload.get('steps') or [])} steps", "accent")
         if payload.get("replaced"):
             outcome = "failed" if payload.get("failed") else "replaced"
-            return ("↻", f"plan updated · {payload['replaced']} {outcome} · {reason}", "warning")
-        return ("↻", f"plan updated · {reason}", "warning")
+            text = f"{prefix}plan updated · {payload['replaced']} {outcome} · {reason}{scope}"
+            return ("↻", text, "warning")
+        return ("↻", f"{prefix}plan updated · {reason}{scope}", "warning")
     if event_type == "step_started":
         index = payload.get("index")
         total = payload.get("total")
@@ -485,7 +526,7 @@ def log_line(event_type: str, phase: str | None, payload: dict[str, Any]) -> str
     if event_type == "decision":
         tool = payload.get("tool")
         name = tool.get("name") if isinstance(tool, dict) else "-"
-        return f"[decision]{phase_part} {payload.get('action')} tool={name}"
+        return f"[model] decision{phase_part} {payload.get('action')} tool={name}"
     if event_type in {
         "provider_started",
         "provider_first_token",

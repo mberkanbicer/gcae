@@ -282,6 +282,22 @@ class GitRepository:
     def branch_head(self, branch: str) -> str:
         return self._run("rev-parse", f"refs/heads/{branch}")
 
+    def is_ancestor(self, commit: str, descendant: str) -> bool:
+        """True when ``commit`` is an ancestor of ``descendant`` (or equal).
+
+        Used to reconcile plan history with rollback targets: steps completed at
+        checkpoints that remain reachable stay valid; the rest are affected.
+        """
+        if not commit or not descendant:
+            return False
+        if commit == descendant:
+            return True
+        try:
+            self._run("merge-base", "--is-ancestor", commit, descendant)
+        except GitError:
+            return False
+        return True
+
     def current_branch(self) -> str:
         return self._run("rev-parse", "--abbrev-ref", "HEAD")
 

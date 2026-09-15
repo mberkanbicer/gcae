@@ -12,6 +12,13 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from ..models import Event
+from ..progress import (
+    CATEGORY_ICON,
+    ProgressCategory,
+    ProgressEvent,
+    ProgressFeed,
+    suggest_next,
+)
 from . import formatters
 
 PANELS = (
@@ -26,6 +33,7 @@ PANELS = (
     "timeline",
     "banner",
     "footer",
+    "health",
 )
 
 LOG_HISTORY = 2000
@@ -39,6 +47,12 @@ class TimelineRow:
     icon: str
     text: str
     style: str
+    #: progress-feed identity (empty for UI notes and legacy rows)
+    pid: str = ""
+    category: str = ""
+    result: str = ""
+    expandable: bool = False
+    detail: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -96,8 +110,22 @@ class UiState:
     )
     #: the verdict of the last completed trajectory attempt (for the transition display)
     last_trajectory: dict[str, Any] | None = None
+    #: latest meaningful outcome, rendered as Active → Last result
+    last_result: str = ""
+    #: explicit operational next step, rendered as Active → Next
+    next_intent: str = ""
+    #: tool currently executing (for the phase label); cleared semantics: last known
+    active_tool: str = ""
+    #: guardian health: {"state": ..., "reason": ...}; exactly one is shown
+    health: dict[str, str] = field(default_factory=lambda: {"state": "healthy", "reason": ""})
+    #: latest recovery outcome, one line ("root cause → correction")
+    last_recovery: str = ""
     #: the goal the run was last working on (the objective box keeps it after completion)
     last_goal: str = ""
+    #: active plan revision (PLAN vN in the plan panel)
+    plan_version: int = 1
+    #: latest replan scope: preserved/invalidated/replaced/inserted step ids
+    plan_diff: dict[str, list[str]] = field(default_factory=dict)
     #: how the current command runs and how many answers it was given
     execution_mode: str = ""
     stdin_lines: int = 0
@@ -111,6 +139,9 @@ class UiState:
     rollback_at: datetime | None = None
     rollbacks: int = 0
     replans: int = 0
+    #: structured progress feed: grouping, categories and outcomes. The row wording
+    #: still comes from formatters.timeline_entry; the feed adds structure.
+    feed: ProgressFeed = field(default_factory=ProgressFeed)
     work_files: list[str] = field(default_factory=list)
     timeline: list[TimelineRow] = field(default_factory=list)
     logs: list[str] = field(default_factory=list)
@@ -204,13 +235,34 @@ class UiState:
         changed.add("logs")
 
         succeeded = payload.get("success") if "success" in payload else None
-        entry = formatters.timeline_entry(
+        legacy = formatters.timeline_entry(
             event.event_type, payload, succeeded=succeeded if isinstance(succeeded, bool) else None
         )
-        if entry is not None:
-            icon, text, style = entry
-            self._add_timeline(event.timestamp, icon, text, style)
+        for progress_event in self.feed.push(
+            event.event_type, payload, phase or "", event.step_id or "", event.timestamp
+        ):
+            self._add_progress(progress_event, legacy)
             changed.add("timeline")
+        suggestion = suggest_next(event.event_type, payload)
+        if suggestion:
+            self.next_intent = suggestion
+            changed.add("activity")
+        elif event.event_type == "decision":
+            # a new action starts: the previous next-step was taken
+            if self.next_intent:
+                self.next_intent = ""
+                changed.add("activity")
+        if event.event_type == "tool_result":
+            resolved = self.feed.resolve(
+                str(payload.get("tool") or ""),
+                event.step_id or "",
+                bool(payload.get("success")),
+                self._tool_result_summary(payload),
+                event.timestamp,
+            )
+            if resolved is not None:
+                self._update_progress(resolved)
+                changed.add("timeline")
 
         handler = getattr(self, f"_on_{event.event_type}", None)
         if handler is not None:
@@ -244,6 +296,104 @@ class UiState:
         self.timeline.append(TimelineRow(at=at, icon=icon, text=text, style=style))
         self.timeline = self.timeline[-TIMELINE_HISTORY:]
 
+    def _add_progress(
+        self,
+        progress_event: ProgressEvent,
+        legacy: tuple[str, str, str] | None,
+    ) -> None:
+        """One feed line becomes a timeline row.
+
+        Wording stays in ``formatters.timeline_entry``; the feed contributes grouping
+        (merged file reads), categories and expandable detail.
+        """
+        if progress_event.detail.get("grouped_reads"):
+            text = progress_event.title
+            if progress_event.summary:
+                text = f"{text} · {progress_event.summary}"
+            self.timeline.append(
+                TimelineRow(
+                    at=progress_event.timestamp,
+                    icon=CATEGORY_ICON.get(progress_event.category, "·"),
+                    text=text,
+                    style="muted",
+                    pid=progress_event.id,
+                    category=progress_event.category.value,
+                    expandable=True,
+                    detail=dict(progress_event.detail),
+                )
+            )
+            self.timeline = self.timeline[-TIMELINE_HISTORY:]
+            return
+        if legacy is not None:
+            icon, text, style = legacy
+            self.timeline.append(
+                TimelineRow(
+                    at=progress_event.timestamp,
+                    icon=icon,
+                    text=text,
+                    style=style,
+                    pid=progress_event.id,
+                    category=progress_event.category.value,
+                    expandable=bool(progress_event.detail),
+                    detail=dict(progress_event.detail),
+                )
+            )
+            self.timeline = self.timeline[-TIMELINE_HISTORY:]
+            return
+        text = progress_event.title
+        if progress_event.summary:
+            text = f"{text} · {progress_event.summary}"
+        if progress_event.severity == "error" or progress_event.status.value == "fail":
+            style = "error"
+        elif progress_event.severity == "warning":
+            style = "warning"
+        elif progress_event.status.value == "ok":
+            style = "success"
+        elif progress_event.category in {
+            ProgressCategory.PLAN,
+            ProgressCategory.USER,
+            ProgressCategory.VERIFY,
+        }:
+            style = "accent"
+        else:
+            style = "muted"
+        self.timeline.append(
+            TimelineRow(
+                at=progress_event.timestamp,
+                icon=CATEGORY_ICON.get(progress_event.category, "·"),
+                text=text,
+                style=style,
+                pid=progress_event.id,
+                category=progress_event.category.value,
+                expandable=bool(progress_event.detail),
+                detail=dict(progress_event.detail),
+            )
+        )
+        self.timeline = self.timeline[-TIMELINE_HISTORY:]
+
+    def _update_progress(self, progress_event: ProgressEvent) -> None:
+        """Attach an outcome to its line instead of adding a new one."""
+        for row in self.timeline:
+            if row.pid and row.pid == progress_event.id:
+                if progress_event.result and progress_event.result not in row.text:
+                    row.text = f"{row.text} · {progress_event.result}"
+                row.result = progress_event.result
+                if progress_event.status.value == "fail":
+                    row.style = "error"
+                return
+
+    @staticmethod
+    def _tool_result_summary(payload: dict[str, Any]) -> str:
+        if payload.get("success"):
+            return f"PASSED · {_first_line(payload.get('output'), 60)}".rstrip(" ·")
+        detail = ""
+        if payload.get("exit_code") is not None:
+            detail = f"exit {payload['exit_code']}"
+        message = _first_line(payload.get("error") or payload.get("output"), 60)
+        if message:
+            detail = f"{detail} · {message}" if detail else message
+        return f"FAILED · {detail}" if detail else "FAILED"
+
     # ------------------------------------------------------------------ handlers
 
     def _on_trajectory_step_started(self, event: Event, payload: dict[str, Any]) -> set[str]:
@@ -266,6 +416,10 @@ class UiState:
             "decision_reason": payload.get("decision_reason"),
             "semantic_goal": payload.get("semantic_goal"),
         }
+        status = str(payload.get("status") or "")
+        reason = str(payload.get("decision_reason") or "")
+        if status in {"accepted", "rejected"}:
+            self.last_result = f"{status.upper()} · {reason}" if reason else status.upper()
         return {"activity", "status"}
 
     def _on_evidence_recorded(self, event: Event, payload: dict[str, Any]) -> set[str]:
@@ -280,6 +434,14 @@ class UiState:
         self.plan = list(payload.get("steps") or [])
         self.plan_reason = str(payload.get("reason") or "")
         self.completed_steps = int(payload.get("completed") or 0)
+        if isinstance(payload.get("version"), int):
+            self.plan_version = payload["version"]
+        diff = payload.get("diff")
+        if isinstance(diff, dict):
+            self.plan_diff = {
+                key: list(diff.get(key) or [])
+                for key in ("preserved", "invalidated", "replaced", "inserted")
+            }
         if payload.get("replaced"):
             self.replans += 1
             self.rollback = None
@@ -306,8 +468,16 @@ class UiState:
         )
         return {"plan", "activity", "objective"}
 
+    def _on_health_changed(self, event: Event, payload: dict[str, Any]) -> set[str]:
+        self.health = {
+            "state": str(payload.get("to") or "healthy"),
+            "reason": str(payload.get("reason") or ""),
+        }
+        return {"status", "activity"}
+
     def _on_decision(self, event: Event, payload: dict[str, Any]) -> set[str]:
         tool = payload.get("tool")
+        self.active_tool = str(tool.get("name") or "") if isinstance(tool, dict) else ""
         if isinstance(tool, dict):
             arguments = tool.get("arguments") or {}
             self.execution_mode = str(arguments.get("mode") or "")
@@ -372,6 +542,12 @@ class UiState:
             expected=previous.expected if previous else "",
             detail=detail,
         )
+        self.last_result = (
+            f"PASSED · {detail}" if success and detail
+            else "PASSED" if success
+            else f"FAILED · {detail}" if detail
+            else "FAILED"
+        )
         return {"activity"}
 
     def _on_candidate_state(self, event: Event, payload: dict[str, Any]) -> set[str]:
@@ -416,6 +592,11 @@ class UiState:
     def _on_evaluation(self, event: Event, payload: dict[str, Any]) -> set[str]:
         self.evaluation = payload
         decision = str(payload.get("decision"))
+        reason = str(payload.get("reason") or "")
+        if decision == "accept":
+            self.last_result = f"ACCEPTED · {reason}" if reason else "ACCEPTED"
+        elif decision in {"rollback", "replan", "repair"}:
+            self.last_result = f"{decision.upper()} · {reason}" if reason else decision.upper()
         if decision == "rollback":
             self.rollbacks += 1
         if decision == "replan":
@@ -446,6 +627,13 @@ class UiState:
 
     def _on_verification_completed(self, event: Event, payload: dict[str, Any]) -> set[str]:
         self.verification = payload
+        passed = bool(payload.get("passed"))
+        criteria = payload.get("criteria") or []
+        open_count = len([c for c in criteria if isinstance(c, dict) and not c.get("passed")])
+        self.last_result = (
+            f"VERIFIED · {len(criteria)} criteria" if passed
+            else f"NOT VERIFIED · {open_count} open"
+        )
         self.action = ActionView(
             label="verification",
             lines=[],
@@ -551,6 +739,10 @@ class UiState:
         return {"activity"}
 
     def _on_recovery_completed(self, event: Event, payload: dict[str, Any]) -> set[str]:
+        cause = str(payload.get("root_cause") or "")
+        fix = str(payload.get("corrective_instruction") or "")
+        self.last_result = f"RECOVERED · {cause}" if cause else "RECOVERED"
+        self.last_recovery = f"{cause} → {fix}" if cause and fix else cause or fix
         self.action = ActionView(
             label="recovery",
             lines=[

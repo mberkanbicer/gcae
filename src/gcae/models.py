@@ -44,7 +44,23 @@ class PlanStep(BaseModel):
     failure_signals: list[str] = Field(default_factory=list)
     intended_scope: list[str] = Field(default_factory=list)
     validation_requirements: list[str] = Field(default_factory=list)
-    status: Literal["pending", "active", "completed", "failed", "skipped"] = "pending"
+    status: Literal[
+        "pending", "active", "completed", "failed", "skipped",
+        "invalidated", "replaced",
+    ] = "pending"
+    #: step IDs this step builds on; used to compute the minimum affected region
+    depends_on: list[str] = Field(default_factory=list)
+    #: accepted commit associated with this step at completion (or the trusted commit
+    #: then current, for read-only steps that create no checkpoint)
+    checkpoint: str | None = None
+    #: a completed step with a checkpoint is locked: only explicit invalidation with
+    #: evidence may reopen it, never a casual rewrite
+    locked: bool = False
+    #: id of the step that replaces this one, when status is "replaced"
+    replaced_by: str = ""
+    #: invalidation record: why, on what evidence (empty unless invalidated)
+    invalidated_reason: str = ""
+    invalidated_evidence_ids: list[int] = Field(default_factory=list)
 
 
 class InitialPlan(BaseModel):
@@ -66,6 +82,54 @@ class SemanticStep(BaseModel):
     failure_signals: list[str] = Field(default_factory=list)
     intended_scope: list[str] = Field(default_factory=list)
     validation_requirements: list[str] = Field(default_factory=list)
+
+
+class StepInvalidation(BaseModel):
+    """One completed step reopened — only with recorded reason and evidence."""
+
+    model_config = ConfigDict(extra="forbid")
+    step_id: str
+    reason: str = ""
+    evidence_ids: list[int] = Field(default_factory=list)
+
+
+class ReplanPatch(BaseModel):
+    """A structured, bounded plan change: the affected segment only.
+
+    The model proposes replacements for the affected region; the runtime validates
+    and applies them deterministically. Unchanged steps are never resent."""
+
+    model_config = ConfigDict(extra="forbid")
+    base_plan_version: int = 1
+    reason: str = ""
+    reason_category: Literal[
+        "invalid_assumption", "failure", "new_evidence", "user_override",
+        "dependency_invalidated", "blocked_path", "requirement_change",
+        "verified_better_route",
+    ] = "failure"
+    affected_from_step_id: str = ""
+    preserve_step_ids: list[str] = Field(default_factory=list)
+    invalidate: list[StepInvalidation] = Field(default_factory=list)
+    replace_step_ids: list[str] = Field(default_factory=list)
+    new_steps: list[PlanStep] = Field(default_factory=list)
+    skip_step_ids: list[str] = Field(default_factory=list)
+    rollback_required: bool = False
+    rollback_target_checkpoint: str | None = None
+    success_criteria_coverage: list[str] = Field(default_factory=list)
+
+
+class PlanVersion(BaseModel):
+    """One persisted plan revision: what stayed, what changed, and why."""
+
+    model_config = ConfigDict(extra="forbid")
+    version: int
+    reason: str = ""
+    reason_category: str = "failure"
+    preserved: list[str] = Field(default_factory=list)
+    invalidated: list[str] = Field(default_factory=list)
+    replaced: list[str] = Field(default_factory=list)
+    inserted: list[str] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=now_utc)
 
 
 class ToolCall(BaseModel):
@@ -228,6 +292,9 @@ class Decision(BaseModel):
     reason_summary: str
     tool: ToolCall | None = None
     expected_result: str = ""
+    #: the controller believes the trajectory itself must change. The flag only
+    #: *requests* a replan; the dedicated replanning mechanism mutates the plan.
+    replan_required: bool = False
 
 
 class ValidationResult(BaseModel):
@@ -255,6 +322,9 @@ class MemoryRecord(BaseModel):
     #: the repository the knowledge came from; retrieval is scoped to it, so lessons from
     #: one project never leak into another project's decision context
     source_repo: str = ""
+    #: visibility tier: "run" (this run only), "project" (same repository), "global"
+    #: (explicitly reusable across projects — nothing is global unless marked so)
+    scope: Literal["run", "project", "global"] = "run"
     step_id: str | None = None
     source: str = "runtime"
     commit_sha: str | None = None
@@ -276,6 +346,11 @@ class Evaluation(BaseModel):
     progress_score: float = 0.0
     next_goal: str | None = None
     memories_to_promote: list[MemoryCandidate] = Field(default_factory=list)
+    #: replan request detail: which step is affected, which assumption died, on what evidence.
+    #: The evaluator requests; only the replanning mechanism rewrites the plan.
+    affected_step_id: str = ""
+    invalidated_assumption: str = ""
+    evidence_ids: list[int] = Field(default_factory=list)
 
 
 class EvaluationInput(BaseModel):
@@ -373,6 +448,12 @@ class AgentState(BaseModel):
     success_criteria: list[str] = Field(default_factory=list)
     assumptions: list[str] = Field(default_factory=list)
     plan: list[PlanStep] = Field(default_factory=list)
+    #: active plan revision; every replan bumps it and records a PlanVersion
+    plan_version: int = 1
+    #: bounded audit trail of plan revisions (newest last)
+    plan_history: list[PlanVersion] = Field(default_factory=list)
+    #: success criteria verified against evidence and unaffected since
+    verified_criteria: list[str] = Field(default_factory=list)
     current_step_id: str | None = None
     accepted_commit: str | None = None
     phase: RunPhase = RunPhase.ANALYZE

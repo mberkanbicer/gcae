@@ -15,6 +15,7 @@ from rich.text import Text
 from textual.widgets import Static
 
 from ..models import AgentState
+from ..progress import phase_label
 from . import formatters
 from .formatters import STYLES, duration, elide, short_id
 from .state import UiState
@@ -125,13 +126,17 @@ class StatusBar(Panel):
         width = self.content_width
         status = state.status if state is not None else "starting"
         phase = state.phase.value if state is not None else None
-        badge, badge_style = formatters.run_state(status, phase, paused)
+        badge, badge_style = formatters.primary_status(
+            status,
+            phase,
+            paused,
+            health=str(ui.health.get("state") or ""),
+            waiting_for_input=ui.pending_input is not None,
+            blocked=ui.blocked is not None,
+        )
         row = Text("GCAE", style="bold")
         row.append(" │ ", style=STYLES["muted"])
         row.append(badge, style=f"bold {STYLES[badge_style]}")
-        active = state is None or not str(status).startswith(("complete", "failed", "stopped"))
-        if ui.rollback_active() and active:
-            row.append(" │ ROLLBACK", style=f"bold {STYLES['warning']}")
         if paused:
             row.append(" │ paused · no new model or tool action", style=STYLES["warning"])
         if degraded and ui.degradations:
@@ -412,7 +417,9 @@ class PlanPanel(Panel):
             done, total = accepted, accepted + len(steps)
         else:
             done, total = ui.plan_position()
-        meta = f"{done}/{total} steps" if total or steps else ""
+        version = f"v{ui.plan_version} · " if ui.plan_version > 1 else ""
+        verified = sum(1 for step in steps if step.get("status") == "completed")
+        meta = f"{version}{verified}/{len(steps)} verified" if steps else ""
         if not steps:
             message = "no open steps" if ui.agent_done else "planning…"
             self.render_block(meta, [Text(message, style=STYLES["muted"])])
@@ -433,6 +440,10 @@ class PlanPanel(Panel):
         for index, step in visible:
             marker, style = formatters.plan_marker(str(step.get("status")))
             goal = str(step.get("goal") or "")
+            if step.get("status") == "invalidated" and step.get("invalidated_reason"):
+                goal = f"{goal} · invalidated: {step['invalidated_reason']}"
+            elif step.get("status") == "replaced" and step.get("replaced_by"):
+                goal = f"{goal} · replaced by {step['replaced_by']}"
             wrapped = active_rows if index == active else _wrap(goal, goal_width, 1)
             for row_index, chunk in enumerate(wrapped):
                 row = Text(f"{marker} " if row_index == 0 else "  ", style=STYLES[style])
@@ -536,6 +547,20 @@ class ActivityPanel(Panel):
                 rows.append(
                     _row("", Text(elide(model, width - LABEL_WIDTH), style=STYLES["muted"]))
                 )
+            if ui.last_result:
+                rows.append(
+                    _row(
+                        "last",
+                        Text(elide(ui.last_result, width - LABEL_WIDTH), style=STYLES["value"]),
+                    )
+                )
+            if ui.next_intent:
+                rows.append(
+                    _row(
+                        "next",
+                        Text(elide(ui.next_intent, width - LABEL_WIDTH), style=STYLES["accent"]),
+                    )
+                )
             if action.expected:
                 rows.append(
                     _row(
@@ -571,15 +596,10 @@ class ActivityPanel(Panel):
                         Text(elide(action.target, width - LABEL_WIDTH), style=STYLES["value"]),
                     )
                 )
-            if action.expected:
-                rows.append(
-                    _row(
-                        "expected",
-                        Text(elide(action.expected, width - LABEL_WIDTH), style=STYLES["muted"]),
-                    )
-                )
+            phase_now = phase_label(ui.phase, ui.active_tool)
+            running_text = f"{phase_now} · RUNNING · {duration(ui.action_elapsed())}"
             state_text, style = {
-                "running": (f"RUNNING · {duration(ui.action_elapsed())}", "accent"),
+                "running": (running_text, "accent"),
                 "done": (
                     f"DONE · {action.duration_ms / 1000:.1f}s" if action.duration_ms else "DONE",
                     "success",
@@ -588,6 +608,27 @@ class ActivityPanel(Panel):
                 "recovered": ("RECOVERED · the runtime corrected its own approach", "accent"),
             }.get(action.state, (action.state.upper(), "muted"))
             rows.append(_row("state", Text(state_text, style=STYLES[style])))
+            if ui.last_result:
+                rows.append(
+                    _row(
+                        "last",
+                        Text(elide(ui.last_result, width - LABEL_WIDTH), style=STYLES["value"]),
+                    )
+                )
+            if ui.next_intent:
+                rows.append(
+                    _row(
+                        "next",
+                        Text(elide(ui.next_intent, width - LABEL_WIDTH), style=STYLES["accent"]),
+                    )
+                )
+            if action.expected:
+                rows.append(
+                    _row(
+                        "expected",
+                        Text(elide(action.expected, width - LABEL_WIDTH), style=STYLES["muted"]),
+                    )
+                )
             detail = action.detail or (action.lines[0] if action.lines else "")
             if detail:
                 rows.append(
@@ -609,6 +650,39 @@ class ActivityPanel(Panel):
             rows.append(_row("state", Text("idle · waiting for the agent", style=STYLES["muted"])))
 
         self.render_block("", rows[:budget])
+
+
+class HealthPanel(Panel):
+    """Guardian health in three rows or fewer: state, reason, last recovery.
+
+    Healthy is one calm line. Anything else names what is wrong and what happens
+    next; the Health screen ([h]) carries the full component breakdown.
+    """
+
+    max_rows: int = 3
+
+    def __init__(self) -> None:
+        super().__init__("health", id="health")
+
+    def render_state(self, state: AgentState | None, ui: UiState) -> None:
+        width = self.content_width
+        health = ui.health or {}
+        current = str(health.get("state") or "healthy")
+        reason = str(health.get("reason") or "")
+        marker, style = {
+            "healthy": ("✓", "success"),
+            "degraded": ("!", "warning"),
+            "recovering": ("↻", "accent"),
+            "waiting": ("…", "accent"),
+            "blocked": ("!", "warning"),
+            "fatal": ("×", "error"),
+        }.get(current, ("·", "muted"))
+        rows = [Text(f"{marker} {current.upper()}", style=f"bold {STYLES[style]}")]
+        if reason and current != "healthy":
+            rows.append(_row("why", Text(elide(reason, width - LABEL_WIDTH))))
+        if ui.last_recovery and current in {"recovering", "healthy"} and reason == "":
+            rows.append(_row("last", Text(elide(ui.last_recovery, width - LABEL_WIDTH))))
+        self.render_block("", rows[: self.row_budget(self.max_rows)])
 
 
 class CheckpointPanel(Panel):
@@ -972,6 +1046,8 @@ class TimelinePanel(Panel):
         for entry in entries:
             row = Text(entry.at.astimezone().strftime("%H:%M:%S") + " ", style=STYLES["muted"])
             row.append(f"{entry.icon} ", style=STYLES[entry.style])
+            if entry.category:
+                row.append(f"{entry.category.upper()}  ", style=STYLES["muted"])
             row.append(elide(entry.text, max(10, width - 14)), style=STYLES["value"])
             lines.append(row)
         if not entries:

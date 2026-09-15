@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Protocol
 
-from .models import AgentState, InitialPlan, PlanStep
+from .models import AgentState, InitialPlan, PlanStep, ReplanPatch
 from .providers import Provider, ProviderOutputError
 
 
@@ -81,6 +81,46 @@ def build_planner_prompt(state: AgentState) -> str:
     )
 
 
+def build_replan_prompt(
+    state: AgentState,
+    affected_from_step_id: str,
+    reason: str,
+    invalidated: list[dict[str, object]],
+) -> str:
+    """Prompt for a partial replan: the model patches the affected region only."""
+    schema = json.dumps(ReplanPatch.model_json_schema(), separators=(",", ":"))
+    locked = [
+        {"id": step.id, "goal": step.goal}
+        for step in state.plan
+        if step.status == "completed"
+    ]
+    affected = [
+        {"id": step.id, "goal": step.goal, "status": step.status}
+        for step in state.plan
+        if step.id == affected_from_step_id
+        or step.status in {"pending", "active", "failed", "skipped"}
+    ]
+    return (
+        "You are the replanner of GCAE, a reversible coding runtime. "
+        "Reply with exactly one JSON object and no other text.\n"
+        "Do not rewrite verified completed plan history. "
+        "Preserve every completed verified step below unless the supplied evidence "
+        "explicitly marks it as invalidated. "
+        "Modify only the minimum affected current/future plan region. "
+        "If an earlier completed step must be revisited, identify the exact step, "
+        "the evidence that invalidates it, the rollback boundary, and the dependent "
+        "steps. Do not restart the plan merely because a later step failed.\n"
+        f"LOCKED VERIFIED HISTORY — DO NOT MODIFY: {json.dumps(locked)}\n"
+        f"CURRENT AFFECTED REGION (replace from here): {json.dumps(affected)}\n"
+        f"REPLAN REASON: {reason}\n"
+        f"INVALIDATED ASSUMPTIONS WITH EVIDENCE: {json.dumps(invalidated)}\n"
+        f"PLAN VERSION (echo it back as base_plan_version): {state.plan_version}\n"
+        f"SUCCESS CRITERIA (every unresolved one must stay covered): "
+        f"{json.dumps(state.success_criteria)}\n"
+        f"ReplanPatch JSON schema: {schema}\n"
+    )
+
+
 class LLMPlanner:
     """Model-backed planner returning a validated InitialPlan."""
 
@@ -110,3 +150,14 @@ class LLMPlanner:
 
     def replan(self, state: AgentState, reason: str) -> list[PlanStep]:
         return next_step(state, reason)
+
+    def replan_patch(
+        self,
+        state: AgentState,
+        affected_from_step_id: str,
+        reason: str,
+        invalidated: list[dict[str, object]],
+    ) -> ReplanPatch:
+        """Ask the model for a structured patch of the affected region only."""
+        prompt = build_replan_prompt(state, affected_from_step_id, reason, invalidated)
+        return self.provider.complete(prompt, ReplanPatch)

@@ -28,9 +28,10 @@ from gcae.tui.screens import (
     ContextScreen,
     DiffScreen,
     EvaluationScreen,
+    HealthScreen,
     LogsScreen,
     MemoryScreen,
-    PlanScreen,
+    TrajectoryScreen,
 )
 from gcae.tui.state import UiState
 from gcae.tui.widgets import (
@@ -281,7 +282,7 @@ def test_plan_events_update_the_plan_panel(tmp_path: Path) -> None:
                 )
             )
             plan = str(app.query_one(PlanPanel).body.plain)
-            assert "1/3 steps" in plan
+            assert "0/2 verified" in plan
             assert "● fix quote handling" in plan
             assert "○ run regression tests" in plan
 
@@ -350,14 +351,15 @@ def test_step_and_tool_events_update_activity(tmp_path: Path) -> None:
                         "error": "2 failed, 10 passed",
                     },
                     phase=RunPhase.EXECUTE,
-                )
+                    step_id="step-2",
+                ),
             )
             activity = str(app.query_one(ActivityPanel).body.plain)
             assert "FAILED" in activity
             assert "exit 1" in activity
             assert "2 failed, 10 passed" in activity
             timeline = str(app.query_one(TimelinePanel).body.plain)
-            assert "run_command failed" in timeline
+            assert "FAILED" in timeline
 
     asyncio.run(scenario())
 
@@ -496,7 +498,10 @@ def test_rollback_is_prominent_then_fades(tmp_path: Path) -> None:
             assert "a31fc42" in panel
             assert "public API changed unnecessarily" in panel
             status = str(app.query_one(StatusBar).body.plain)
-            assert "ROLLBACK" in status
+            # the top bar shows exactly one primary state: the rollback itself stays
+            # prominent in the checkpoint panel and the timeline, never beside the badge
+            assert "ROLLBACK" not in status
+            assert "│" in status
             timeline = str(app.query_one(TimelinePanel).body.plain)
             assert "rollback" in timeline
             assert app.ui.rollbacks >= 0
@@ -617,7 +622,7 @@ def test_enter_opens_the_focused_panel_detail(tmp_path: Path) -> None:
             app.query_one(PlanPanel).focus()
             await pilot.press("enter")
             await pilot.pause()
-            assert isinstance(app.screen, PlanScreen)
+            assert isinstance(app.screen, TrajectoryScreen)
             await pilot.press("escape")
             await pilot.pause()
             app.query_one(CheckpointPanel).focus()
@@ -907,13 +912,16 @@ def test_logs_screen_filters(tmp_path: Path) -> None:
             await pilot.press("l")
             await pilot.pause()
             assert isinstance(app.screen, LogsScreen)
-            assert app.screen.viewer_title == "logs · all events"
+            assert app.screen.viewer_title == "logs · semantic"
+            await pilot.press("f")
+            await pilot.pause()
+            assert app.screen.viewer_title == "logs · all"
             await pilot.press("f")
             await pilot.pause()
             title = app.screen.viewer_title
             assert "model" in title
             body = str(app.screen.body.plain)
-            assert "[decision]" in body
+            assert "[model] decision" in body
             await pilot.press("escape")
 
     asyncio.run(scenario())
@@ -998,7 +1006,7 @@ def test_memory_context_evaluation_plan_screens(tmp_path: Path) -> None:
 
             await pilot.press("t")
             await pilot.pause()
-            assert isinstance(app.screen, PlanScreen)
+            assert isinstance(app.screen, TrajectoryScreen)
             body = str(app.screen.body.plain)
             assert "step-1" in body
             assert "requested" in body
@@ -2327,3 +2335,201 @@ def test_contradicting_evidence_gets_a_timeline_line() -> None:
         )
     )
     assert not any("evidence" in row.text for row in ui.timeline)
+
+
+# ==================================================== operational progress story
+# The main screen answers WHAT / DOING / RESULT / HEALTH / NEXT without raw telemetry.
+
+
+def test_active_shows_goal_doing_last_result_and_next(tmp_path: Path) -> None:
+    ui = UiState()
+    ui.apply(
+        event("step_started", {"goal": "enter the game loop"}, step_id="s1")
+    )
+    ui.apply(
+        event(
+            "decision",
+            {
+                "action": "execute_tool",
+                "reason_summary": "generate the loop",
+                "tool": {"name": "write_file", "arguments": {"path": "game.py"}},
+            },
+            step_id="s1",
+        )
+    )
+    ui.apply(
+        event(
+            "tool_result",
+            {"tool": "write_file", "success": True, "output": "written"},
+            step_id="s1",
+        )
+    )
+    ui.apply(event("strategy_ineffective", {"attempts": 2, "lesson": "same command fails"}))
+    assert ui.last_result.startswith("PASSED")
+    assert ui.next_intent == "Change the method; the same approach already failed"
+    app = GcaeApp(make_runtime(tmp_path, start=False), auto_run=False)
+    body = _rendered(app, ActivityPanel, ui)
+    assert "enter the game loop" in body
+    assert "PASSED" in body
+    assert "Change the method" in body
+
+
+def test_streaming_updates_never_touch_progress_or_timeline() -> None:
+    ui = UiState()
+    before = len(ui.timeline)
+    for chars in (43772, 44088, 44334):
+        ui.apply(
+            event(
+                "provider_progress",
+                {"role": "controller", "characters": 0, "reasoning_characters": chars},
+            )
+        )
+    assert len(ui.timeline) == before
+    assert ui.next_intent == "" and ui.last_result == ""
+
+
+def test_failure_and_recovery_explain_themselves() -> None:
+    ui = UiState()
+    ui.apply(
+        event(
+            "trajectory_step_completed",
+            {
+                "status": "rejected",
+                "decision": "rollback",
+                "decision_reason": "batch waited for stdin",
+                "semantic_goal": "run the game",
+            },
+            step_id="step-1",
+        )
+    )
+    assert ui.last_result == "REJECTED · batch waited for stdin"
+    ui.apply(
+        event(
+            "recovery_completed",
+            {
+                "root_cause": "empty controller output",
+                "corrective_instruction": "retry with compact context",
+                "strategy": "replan",
+            },
+        )
+    )
+    assert ui.last_result == "RECOVERED · empty controller output"
+    assert ui.last_recovery == "empty controller output → retry with compact context"
+
+
+def test_health_panel_reflects_guardian_transitions(tmp_path: Path) -> None:
+    from gcae.tui.widgets import HealthPanel
+
+    ui = UiState()
+    ui.apply(event("health_changed", {"to": "recovering", "reason": "empty output"}))
+    assert ui.health == {"state": "recovering", "reason": "empty output"}
+    app = GcaeApp(make_runtime(tmp_path, start=False), auto_run=False)
+    body = _rendered(app, HealthPanel, ui)
+    assert "RECOVERING" in body
+    assert "empty output" in body
+    ui.apply(event("health_changed", {"from": "recovering", "to": "healthy", "reason": ""}))
+    assert _rendered(app, HealthPanel, ui).count("HEALTHY") >= 1
+
+
+def test_trajectory_and_health_screens_open(tmp_path: Path) -> None:
+    runtime = make_runtime(tmp_path)
+    app = GcaeApp(runtime, auto_run=False)
+
+    async def scenario() -> None:
+        async with app.run_test(size=(130, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("t")
+            await pilot.pause()
+            assert isinstance(app.screen, TrajectoryScreen)
+            await pilot.press("escape")
+            await pilot.pause()
+            await pilot.press("h")
+            await pilot.pause()
+            assert isinstance(app.screen, HealthScreen)
+            assert "runtime" in str(app.screen.body.plain)
+            await pilot.press("escape")
+
+    asyncio.run(scenario())
+
+
+def test_resume_replays_semantic_history(tmp_path: Path) -> None:
+    import json
+
+    runtime = make_runtime(tmp_path)
+    assert runtime.state is not None
+    events_path = Path(runtime.events.path) if runtime.events is not None else None
+    assert events_path is not None
+    rows = [
+        {"run_id": "r", "event_type": "step_started", "phase": "execute", "step_id": "s1",
+         "payload": {"goal": "replay me", "index": 1, "total": 1},
+         "timestamp": "2026-01-01T12:00:00+00:00"},
+        {"run_id": "r", "event_type": "step_accepted", "phase": "checkpoint", "step_id": "s1",
+         "payload": {"goal": "replay me", "changed_files": []},
+         "timestamp": "2026-01-01T12:01:00+00:00"},
+    ]
+    events_path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+    app = GcaeApp(runtime, auto_run=False)
+
+    async def scenario() -> None:
+        async with app.run_test(size=(130, 40)) as pilot:
+            await pilot.pause()
+            texts = [row.text for row in app.ui.timeline]
+            assert any("replay me" in text for text in texts)
+
+    asyncio.run(scenario())
+
+
+def test_plan_panel_keeps_verified_history_across_replans(tmp_path: Path) -> None:
+    """Completed steps never disappear; the panel shows the version and the new current."""
+    ui = UiState()
+    ui.apply(
+        event(
+            "plan_updated",
+            {
+                "reason": "initial plan",
+                "version": 1,
+                "steps": [
+                    {"id": "step-1", "goal": "inspect", "status": "completed"},
+                    {"id": "step-2", "goal": "reproduce", "status": "completed"},
+                    {"id": "step-3", "goal": "fix", "status": "active"},
+                    {"id": "step-4", "goal": "verify", "status": "pending"},
+                ],
+                "completed": 2,
+            },
+        )
+    )
+    ui.apply(
+        event(
+            "plan_updated",
+            {
+                "reason": "S3 approach failed",
+                "version": 2,
+                "steps": [
+                    {"id": "step-1", "goal": "inspect", "status": "completed"},
+                    {"id": "step-2", "goal": "reproduce", "status": "completed"},
+                    {"id": "step-3", "goal": "fix", "status": "replaced",
+                     "replaced_by": "step-5"},
+                    {"id": "step-4", "goal": "verify", "status": "pending"},
+                    {"id": "step-5", "goal": "fix differently", "status": "pending"},
+                ],
+                "completed": 2,
+                "replaced": "step-3",
+                "diff": {
+                    "version": 2,
+                    "preserved": ["step-1", "step-2"],
+                    "invalidated": [],
+                    "replaced": ["step-3"],
+                    "inserted": ["step-5"],
+                },
+            },
+        )
+    )
+    assert ui.plan_version == 2
+    assert ui.plan_diff["preserved"] == ["step-1", "step-2"]
+    app = GcaeApp(make_runtime(tmp_path, start=False), auto_run=False)
+    body = _rendered(app, PlanPanel, ui)
+    assert "v2" in body
+    assert "inspect" in body and "reproduce" in body
+    assert "fix differently" in body
+    timeline = [row.text for row in ui.timeline]
+    assert any("preserved 2" in text for text in timeline)

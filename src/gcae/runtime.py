@@ -13,13 +13,15 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, Any, Literal
 
 from .context import ContextBuilder, estimate_tokens
 from .controller import Controller
 from .evaluator import DeterministicEvaluator, Evaluator
 from .execution import FailureKind, classify_failure, strategy_signature
 from .git import GitError, GitRepository, NothingToMerge
+from .guardian import Guardian, HealthState
+from .guardian import RecoveryAction as GuardianRecovery
 from .memory import EventLog, MemoryStore
 from .models import (
     Action,
@@ -38,9 +40,12 @@ from .models import (
     Observation,
     PendingInput,
     PlanStep,
+    PlanVersion,
     RecoveryRecord,
+    ReplanPatch,
     RunPhase,
     SemanticStep,
+    StepInvalidation,
     ToolCall,
     ToolResult,
     TrajectoryStep,
@@ -396,6 +401,10 @@ class Runtime:
         self.scope_warning_files = scope_warning_files
         self.control = control
         self.machine = StateMachine()
+        # In-process deterministic supervision. The Guardian decides recoveries;
+        # this runtime executes them. It never plans, codes, or judges the task.
+        self.guardian = Guardian()
+        self._last_event_write = 0.0
         self.verifier = verifier or FinalVerifier()
         self.state: AgentState | None = None
         self.repo: GitRepository | None = None
@@ -537,6 +546,15 @@ class Runtime:
             if constraint not in self.state.hard_constraints:
                 self.state.hard_constraints.append(constraint)
         self.state.plan = list(initial_plan.steps)
+        self.state.plan_version = 1
+        self.state.plan_history = [
+            PlanVersion(
+                version=1,
+                reason="initial plan",
+                reason_category="initial",
+                inserted=[step.id for step in self.state.plan],
+            )
+        ]
         numbers = [
             int(step.id.removeprefix("step-"))
             for step in self.state.plan
@@ -595,6 +613,9 @@ class Runtime:
             self._persist()
         self._publish_repository_notices()
         self._event("run_resumed", self.state.phase, payload={"run_id": run_id})
+        # resume restores; it never regenerates: verify the persisted plan against git
+        if not self._plan_health_check():
+            return self.state
         return self.state
 
     def submit_process_input(self, text: str) -> AgentState:
@@ -680,6 +701,7 @@ class Runtime:
                 TrajectoryStepStatus.BLOCKED, "blocked", reason, knowledge=[reason]
             )
         self.state.status = "blocked"
+        self._set_health(HealthState.BLOCKED, reason)
         self.state.blocked_reason = reason
         self.state.unblock_hint = unblock_hint
         self.state.pending_question = None
@@ -699,7 +721,12 @@ class Runtime:
         return PlanStep(id="user-input", goal=pending.goal or "answer the running process")
 
     def inject_user_instruction(self, text: str) -> AgentState:
-        """Record a user override, discard speculative work and replan."""
+        """Record a user override and replan its affected scope.
+
+        Completed verified steps are preserved — an override replaces pending, active
+        and future work, never history. (A completed step the override truly obsoletes
+        is reopened later with evidence, through evaluation, not here.)
+        """
         if self.state is None:
             raise RuntimeError("call start or resume before injecting an instruction")
         self.state.latest_user_instruction = text
@@ -710,17 +737,41 @@ class Runtime:
         self._remember("user_instruction", f"user override: {text}", immutable=True)
         if self.repo is not None and self.repo.worktree is not None and self.repo.status():
             self._rollback(f"user override: {text}")
+        replaced = [
+            plan.id for plan in self.state.plan if plan.status in {"pending", "active"}
+        ]
         for plan in self.state.plan:
             if plan.status in {"pending", "active"}:
                 plan.status = "skipped"
-        self.state.plan = [plan for plan in self.state.plan if plan.status != "skipped"]
-        self.state.plan.extend(next_step(self.state, f"user override: {text}"))
+        new_steps = next_step(self.state, f"user override: {text}")
+        new_ids = [step.id for step in new_steps]
+        for step in new_steps:
+            self.state.plan.append(step)
+        self.state.current_step_id = new_ids[0] if new_ids else None
+        self._plan_bump(
+            reason=f"user override: {text}",
+            category="user_override",
+            preserved=self._completed_ids(),
+            invalidated=[],
+            replaced=replaced,
+            inserted=new_ids,
+        )
         self._reset_working_memory()
         self._transition(RunPhase.PLAN)
-        self._emit_plan(reason=f"user override: {text}")
+        self._emit_plan(
+            reason=f"user override: {text}",
+            diff={
+                "version": self.state.plan_version,
+                "preserved": self._completed_ids(),
+                "invalidated": [],
+                "replaced": replaced,
+                "inserted": new_ids,
+            },
+        )
         self._event("user_override", RunPhase.PLAN, payload={"text": text})
         logger.info("user override: %s", text)
         self._persist()
+        self._plan_health_check()
         return self.state
 
     # ------------------------------------------------------------------ main loop
@@ -737,6 +788,7 @@ class Runtime:
         if self.state.status == "complete":
             return self.state
         assert self.repo is not None and self.memory is not None
+        self._set_health(HealthState.HEALTHY, "run started")
 
         while True:
             try:
@@ -745,6 +797,7 @@ class Runtime:
                 # the one failure recovery must not swallow: diagnosing it would need the same
                 # write that just failed, and continuing would leave resume pointing backwards
                 self._remember("failure", f"unresumable state: {exc}", immutable=True)
+                self._set_health(HealthState.FATAL, "run state could not be written")
                 return self._fail(str(exc), persist=False)
             except Exception as exc:  # noqa: BLE001 - crashes are handled, not swallowed
                 logger.exception("unexpected error in run %s", self.state.run_id)
@@ -764,6 +817,10 @@ class Runtime:
         iterations = 0
         while True:
             if self._pump_control():
+                return self.state
+            if self.state.status == "blocked":
+                # a blocked run stays blocked until a human unblocks it; the loop
+                # must not execute another step behind the blocker's back
                 return self.state
             self.state.iteration += 1
             plan = self._current_plan_step()
@@ -790,8 +847,10 @@ class Runtime:
             iterations += 1
 
             self.state.current_step_id = plan.id
+            step_just_activated = False
             if plan.status == "pending":
                 plan.status = "active"
+                step_just_activated = True
                 self.state.step_tool_calls = 0
                 self.state.step_commands = 0
                 self.repetition = RepetitionGuard(self.repetition_limit)
@@ -818,6 +877,8 @@ class Runtime:
                 )
             if self._trajectory is None:
                 self._begin_trajectory(plan)
+            if step_just_activated and not self._guardian_step_check(plan):
+                return self.state
             self._transition(RunPhase.EXECUTE)
             step = SemanticStep(
                 id=plan.id,
@@ -896,11 +957,22 @@ class Runtime:
                 result = self._refuse_repeat(decision.tool, signature, plan)
             else:
                 result = tools.execute(decision.tool)
+                result = self._guardian_tool_postcheck(result, decision.tool, tools, plan)
             self._save_tool_result(result, plan.id)
             self._observe(result, decision.reason_summary)
             self._record_execution_evidence(result, decision.tool, plan, signature)
             self.state.step_tool_calls += 1
             self._persist()
+
+            if decision.replan_required:
+                # the controller may request a replan, never perform one: plan mutation
+                # goes through the dedicated replanning mechanism only
+                reason = decision.reason_summary or "controller requested replan"
+                if self._replan(plan, reason, failed=False):
+                    stopped = self._handle_stagnation(reason)
+                    if stopped is not None:
+                        return stopped
+                continue
 
             if result.waiting_for_input:
                 # a live process is asking for something only the user has: stop cleanly and ask
@@ -1082,6 +1154,19 @@ class Runtime:
             "pinned": len(context.pinned_ids),
             "omitted": len(context.omitted_ids),
         }
+        if context.memory_share > 0.4 or context.dropped_duplicates > 0:
+            # anomaly warning: retrieved memory is eating the prompt, or the gate
+            # is working hard. Details only — the main screen stays semantic.
+            self._event(
+                "context_warning",
+                RunPhase.EXECUTE,
+                step_id=plan.id,
+                payload={
+                    "memory_share": round(context.memory_share, 2),
+                    "dropped_duplicates": context.dropped_duplicates,
+                    "retrieved": context.retrieved_total,
+                },
+            )
         self.last_context_text = context.text
         self._event(
             "context_built",
@@ -1091,15 +1176,74 @@ class Runtime:
         )
         try:
             controller_provider = self.provider_for("controller")
+            pre = self.guardian.pre_model_check(
+                context_chars=len(context.text),
+                context_budget_tokens=self.context_limit,
+                provider_name=getattr(controller_provider, "model", None)
+                or controller_provider.__class__.__name__,
+                schema_name="Decision",
+            )
+            if not pre.ok:
+                self._guardian_check_event(
+                    "model_request", pre.kind, pre.recovery_action.value,
+                    pre.evidence, plan.id,
+                )
+                if pre.recovery_action is GuardianRecovery.REDUCE_CONTEXT:
+                    context = ContextBuilder(self.memory).build(
+                        self.state,
+                        step,
+                        validation=self.state.latest_validation,
+                        budget=max(512, self.context_limit // 2),
+                        current_diff="",
+                        active_files=self.repo.changed_files(),
+                        observations=self.state.latest_observations,
+                        working=self.state.working_memory,
+                        step_tool_calls=self.state.step_tool_calls,
+                        max_tool_calls=self.max_tool_calls_per_step,
+                        evidence=self._execution_evidence(),
+                    )
+                    self.last_context_info = {
+                        "characters": len(context.text),
+                        "estimated_tokens": estimate_tokens(context.text),
+                        "pinned": len(context.pinned_ids),
+                        "omitted": len(context.omitted_ids),
+                    }
+                    self.last_context_text = context.text
+                else:
+                    self._decision_error = pre.evidence
+                    return None
+            self.guardian.heartbeat.model_in_flight_since = time.monotonic()
+            self.guardian.note_activity()
+            model_started = time.monotonic()
             with self._progress("controller", controller_provider):
                 decision = Controller(
                     DecisionProvider(controller_provider), tools.names()
                 ).decide(context.text)
+            self.guardian.heartbeat.model_in_flight_since = 0.0
+            self.guardian.heartbeat.last_model_ok = time.monotonic()
+            self.guardian.note_activity()
         except ProviderOutputError as exc:
             # not fatal yet: run() lets the recovery advisor read the trace first
             logger.error("provider failure: %s", exc)
             self._remember("failure", f"provider failure: {exc}", immutable=True)
             self._decision_error = str(exc)
+            try:
+                model_check = self.guardian.post_model_check(
+                    output_text="",
+                    elapsed_s=max(0.0, time.monotonic() - model_started),
+                    stall_timeout_s=float(
+                        getattr(controller_provider, "stall_timeout", 0.0) or 0.0
+                    ),
+                    error=str(exc),
+                )
+            except Exception:  # noqa: BLE001 - supervision boundary
+                model_check = None
+            if model_check is not None and not model_check.ok:
+                self._guardian_check_event(
+                    "model:controller", model_check.kind,
+                    model_check.recovery_action.value, model_check.evidence, plan.id,
+                )
+            self._clear_stale_process("controller")
             return None
         self._event(
             "decision",
@@ -1233,7 +1377,21 @@ class Runtime:
                 TrajectoryStepStatus.REPLANNED, "replan", evaluation.reason,
                 knowledge=[f"path invalidated: {evaluation.reason}"],
             )
-            if self._replan(plan, evaluation.reason, failed=False):
+            invalidate: list[StepInvalidation] = []
+            if evaluation.affected_step_id and evaluation.affected_step_id != plan.id:
+                if self._invalidate_step(
+                    evaluation.affected_step_id,
+                    reason=evaluation.invalidated_assumption or evaluation.reason,
+                    evidence_ids=list(evaluation.evidence_ids),
+                ):
+                    invalidate = [
+                        StepInvalidation(
+                            step_id=evaluation.affected_step_id,
+                            reason=evaluation.invalidated_assumption or evaluation.reason,
+                            evidence_ids=list(evaluation.evidence_ids),
+                        )
+                    ]
+            if self._replan(plan, evaluation.reason, failed=False, invalidate=invalidate):
                 if self._handle_stagnation(evaluation.reason) is not None:
                     return True
             return False
@@ -1279,7 +1437,14 @@ class Runtime:
                 knowledge=[f"step accepted: {plan.goal}"],
             )
             plan.status = "completed"
-            self.state.plan = [item for item in self.state.plan if item.id != plan.id]
+            # completed steps stay in the plan as verified history: checkpoint linkage
+            # plus lock. Only explicit invalidation with evidence may reopen them.
+            plan.checkpoint = self.state.accepted_commit
+            plan.locked = True
+            remaining = [
+                item for item in self.state.plan
+                if item.status in {"pending", "active"}
+            ]
             self._settle_working_memory(plan)
             self._event(
                 "step_accepted",
@@ -1290,7 +1455,7 @@ class Runtime:
                     "commit": self.state.accepted_commit,
                     "changed_files": list(validation.changed_files),
                     "accepted_steps": self.state.accepted_steps,
-                    "remaining_steps": len(self.state.plan),
+                    "remaining_steps": len(remaining),
                 },
             )
             self._emit_candidate_state()
@@ -1298,9 +1463,17 @@ class Runtime:
             # worthwhile and the plan advanced. Only rejected attempts and replans
             # signal stagnation (see _handle_stagnation).
             self.stagnation.record(True)
+            self.guardian.note_verified_progress()
+            self.guardian.heartbeat.last_checkpoint = time.monotonic()
+            self._set_health(HealthState.HEALTHY, "step accepted")
             if validation.changed_files or self.repo.worktree_merge_in_progress():
                 self._clear_failure_streak()
             self._persist()
+            open_steps = [
+                item for item in self.state.plan if item.status in {"pending", "active"}
+            ]
+            self.state.current_step_id = open_steps[0].id if open_steps else None
+            self._plan_health_check()
             return False
 
         self._remember("failure", evaluation.reason, immutable=True)
@@ -1423,6 +1596,212 @@ class Runtime:
             return nullcontext()
         return _ProgressReporter(self, role, provider)
 
+    # ------------------------------------------------------------------ guardian
+
+    def _guardian_crash(self, where: str, exc: BaseException) -> AgentState:
+        """The supervisor itself failed: persist the evidence and stop safely."""
+        assert self.state is not None
+        reason = f"guardian failure in {where}: {type(exc).__name__}: {exc}"
+        logger.error("run %s %s", self.state.run_id, reason)
+        self._remember("failure", reason, immutable=True)
+        self._set_health(HealthState.FATAL, reason)
+        return self._fail(reason)
+
+    def _set_health(self, state: HealthState, reason: str = "") -> None:
+        """Publish health transitions; the TUI shows exactly one of these."""
+        try:
+            previous = self.guardian.health
+        except Exception:  # noqa: BLE001 - health bookkeeping never breaks the run
+            return
+        if previous is state:
+            return
+        self.guardian.set_health(state)
+        self._event(
+            "health_changed",
+            self.state.phase if self.state else None,
+            payload={"from": previous.value, "to": state.value, "reason": reason[:160]},
+        )
+
+    def _guardian_check_event(
+        self,
+        subject: str,
+        kind: str,
+        action: str,
+        evidence: str,
+        step_id: str | None = None,
+    ) -> None:
+        """One compact line for a failed mechanism check: what, why, what next."""
+        self._event(
+            "guardian_check",
+            self.state.phase if self.state else None,
+            step_id=step_id,
+            payload={
+                "subject": subject,
+                "kind": kind,
+                "recovery_action": action,
+                "evidence": evidence[:200],
+            },
+        )
+
+    def _guardian_step_check(self, plan: PlanStep) -> bool:
+        """Prove the runtime is intact at a step boundary before the step runs."""
+        assert self.state is not None and self.repo is not None and self.memory is not None
+        try:
+            try:
+                self.state.model_dump_json()
+                serializable = True
+            except Exception:  # noqa: BLE001 - the check is the point
+                serializable = False
+            try:
+                head = self.repo.branch_head(self.state.branch) if self.state.branch else ""
+                commit_exists = bool(head)
+            except (GitError, OSError):
+                commit_exists = False
+            try:
+                self.repo.status()
+                worktree_ok = True
+            except (GitError, OSError):
+                worktree_ok = False
+            try:
+                self.memory.counts(self.state.run_id)
+                memory_ok = True
+            except Exception:  # noqa: BLE001 - any store failure counts
+                memory_ok = False
+            orphans = 0
+            stale = 0
+            live = self._live_tools
+            if live is not None and live.pending_process is not None:
+                handle = live.pending_process
+                try:
+                    if handle.poll() is not None:
+                        stale += 1
+                        live.pending_process = None
+                    elif self.state.pending_input is None:
+                        orphans += 1
+                except (OSError, ValueError):
+                    stale += 1
+                    live.pending_process = None
+            check = self.guardian.step_check(
+                state_serializable=serializable,
+                state_persisted=True,
+                commit_exists=commit_exists,
+                worktree_clean_or_expected_dirty=worktree_ok,
+                memory_responsive=memory_ok,
+                evidence_linked=True,
+                trajectory_consistent=(
+                    self._trajectory is None
+                    or self._trajectory.parent_plan_step_id == plan.id
+                ),
+                orphan_processes=orphans,
+                stale_sessions=stale,
+            )
+        except Exception as exc:  # noqa: BLE001 - supervision boundary
+            return self._guardian_crash("step_check", exc) is not None
+        if check.ok:
+            return True
+        self._guardian_check_event(
+            "step", check.kind, check.recovery_action.value, check.evidence, plan.id
+        )
+        if check.recovery_action is GuardianRecovery.RESTORE_CHECKPOINT:
+            if self.state.accepted_commit:
+                self._rollback(f"guardian: {check.evidence}")
+                self._set_health(HealthState.RECOVERING, check.evidence)
+                return True
+            self._fail(f"guardian: {check.evidence}")
+            return False
+        if check.recovery_action is GuardianRecovery.CLEAN_SPECULATIVE:
+            self._rollback(f"guardian: {check.evidence}")
+            return True
+        if check.recovery_action is GuardianRecovery.TERMINATE_ORPHAN:
+            self._terminate_orphans()
+            return True
+        if check.recovery_action is GuardianRecovery.MARK_BLOCKED:
+            self.block(check.evidence, "resolve the reported inconsistency and resume")
+            return False
+        if check.recovery_action is GuardianRecovery.MARK_FATAL:
+            self._fail(f"guardian: {check.evidence}")
+            return False
+        return True
+
+    def _terminate_orphans(self) -> None:
+        """Terminate a leaked child; the timeout path already owns this mechanism."""
+        if self._live_tools is None or self._live_tools.pending_process is None:
+            return
+        handle = self._live_tools.pending_process
+        try:
+            if handle.poll() is None:
+                handle.terminate(reason="guardian: orphan at step boundary")
+        except (OSError, ValueError):
+            pass
+        finally:
+            self._live_tools.pending_process = None
+
+    def _clear_stale_process(self, role: str) -> None:
+        """Drop an exited process handle so the UI never shows it as active forever."""
+        live = self._live_tools
+        if live is None or live.pending_process is None:
+            return
+        try:
+            exited = live.pending_process.poll() is not None
+        except (OSError, ValueError):
+            exited = True
+        if exited:
+            live.pending_process = None
+            self._event(
+                "guardian_check",
+                self.state.phase if self.state else None,
+                payload={
+                    "subject": f"{role}_process",
+                    "kind": "stale_session",
+                    "recovery_action": "clear",
+                    "evidence": "exited handle cleared after provider failure",
+                },
+            )
+
+    def _guardian_tool_postcheck(
+        self,
+        result: ToolResult,
+        tool: ToolCall,
+        tools: ToolRegistry,
+        plan: PlanStep,
+    ) -> ToolResult:
+        """Post-check every tool result: leaks, worktree sanity, evidence presence."""
+        assert self.state is not None and self.repo is not None
+        try:
+            orphan = (
+                tools.pending_process is not None
+                and not result.waiting_for_input
+                and tools.pending_process.poll() is None
+            )
+        except (OSError, ValueError):
+            orphan = False
+        try:
+            self.repo.status()
+            sane = True
+        except (GitError, OSError):
+            sane = False
+        check = self.guardian.post_tool_check(
+            tool_name=result.tool,
+            exit_code=result.exit_code,
+            timed_out=result.timed_out,
+            waiting_for_input=result.waiting_for_input,
+            interactive_detected=result.interactive_detected,
+            error=result.error or "",
+            orphan_process=orphan,
+            worktree_sane=sane,
+            evidence_produced=bool(result.mode or result.output or result.error or result.artifact),
+        )
+        if check.ok:
+            self.guardian.note_activity()
+            return result
+        self._guardian_check_event(
+            f"tool:{result.tool}", check.kind, check.recovery_action.value,
+            check.evidence, plan.id,
+        )
+        if check.recovery_action is GuardianRecovery.TERMINATE_ORPHAN:
+            self._terminate_orphans()
+        return result
+
     # ------------------------------------------------------------------ recovery
 
     def _failover(self, role: str, reason: str) -> bool:
@@ -1482,6 +1861,7 @@ class Runtime:
         ``UNAVAILABLE`` and leaves the caller's own ladder intact.
         """
         assert self.state is not None and self.memory is not None
+        self._set_health(HealthState.RECOVERING, trigger)
         if self._recoveries >= self.recovery_attempts:
             logger.warning("no recovery attempts left for %s", trigger)
             return RecoveryAction.UNAVAILABLE
@@ -1585,7 +1965,13 @@ class Runtime:
         return RecoveryAction.CONTINUE
 
     def _queue_correction(self, plan: PlanStep | None, instruction: str) -> None:
-        """Discard speculative work and queue the step the advisor prescribed."""
+        """Queue the step the advisor prescribed, preserving verified history.
+
+        When the planner is model-backed, ask for a structured patch of the affected
+        region; anything unusable falls back to the deterministic minimal patch.
+        Recovery firing at all means local repair already failed, so a structural
+        replan is justified here.
+        """
         assert self.state is not None
         if self._trajectory is not None:
             self._end_trajectory(
@@ -1596,17 +1982,49 @@ class Runtime:
             )
         if self.repo is not None and self.repo.worktree is not None and self.repo.status():
             self._rollback(f"recovery: {instruction}")
-        plan = plan or self._current_plan_step()
-        if plan is not None:
-            plan.status = "failed"
-            self.state.plan = [item for item in self.state.plan if item.id != plan.id]
-        self.state.plan.extend(next_step(self.state, instruction))
+        current_source = self._current_plan_step() if plan is None else plan
+        current = (
+            current_source
+            if current_source is not None and current_source.status in {"pending", "active"}
+            else None
+        )
+        if current is not None:
+            current.status = "failed"
+        applied = False
+        replan_patch_fn = getattr(self.planner, "replan_patch", None)
+        if callable(replan_patch_fn) and current is not None:
+            try:
+                patch = replan_patch_fn(
+                    self.state, current.id, instruction, []
+                )
+                applied = self._apply_replan_patch(patch, source="recovery")
+            except ProviderOutputError as exc:
+                logger.warning("model replan patch unusable, using minimal patch: %s", exc)
+                self._remember("decision", f"model replan unusable ({exc}); minimal patch")
+            except Exception as exc:  # noqa: BLE001 - a broken rescue must not kill the patient
+                self._degrade("replan patch", exc)
+        if not applied:
+            patch = self._deterministic_patch(
+                current,
+                reason=f"recovery: {instruction}",
+                category="failure",
+                instruction=instruction,
+            )
+            if not self._apply_replan_patch(patch, source="recovery"):
+                self._plan_bump(
+                    reason=f"recovery: {instruction}", category="failure",
+                    preserved=self._completed_ids(), invalidated=[],
+                    replaced=[current.id] if current is not None else [], inserted=[],
+                )
+                self._emit_plan(
+                    reason=f"recovery: {instruction}",
+                    replaced=current.id if current else None, failed=True,
+                )
+                self._persist()
         self._reset_working_memory()
         self.repetition = RepetitionGuard(self.repetition_limit)
         self.state.working_memory.hypotheses.append(f"recovery: {instruction}")
         self._enter_plan()
-        self._emit_plan(reason=f"recovery: {instruction}", replaced=plan.id if plan else None,
-                        failed=True)
         self._event(
             "replan",
             RunPhase.PLAN,
@@ -1659,10 +2077,320 @@ class Runtime:
                 )
         return build_trace(self.state, list(self._trace), memories, candidate=candidate)
 
-    def _replan(self, plan: PlanStep, reason: str, failed: bool) -> bool:
-        """Discard speculative work and the current step, queue a new one.
+    # ------------------------------------------------------------------ plan revisions
 
-        Returns True when stagnation is detected.
+    def _plan_bump(
+        self,
+        *,
+        reason: str,
+        category: str,
+        preserved: list[str],
+        invalidated: list[str],
+        replaced: list[str],
+        inserted: list[str],
+        removed: list[str] | None = None,
+    ) -> None:
+        """Record one plan revision. History is bounded; the plan itself is the truth."""
+        assert self.state is not None
+        self.state.plan_version += 1
+        self.state.plan_history.append(
+            PlanVersion(
+                version=self.state.plan_version,
+                reason=reason,
+                reason_category=category,
+                preserved=list(preserved),
+                invalidated=list(invalidated),
+                replaced=list(replaced),
+                inserted=list(inserted),
+            )
+        )
+        self.state.plan_history = self.state.plan_history[-20:]
+        if removed:
+            self.state.plan = [s for s in self.state.plan if s.id not in removed]
+
+    def _completed_ids(self) -> list[str]:
+        assert self.state is not None
+        return [s.id for s in self.state.plan if s.status == "completed"]
+
+    def _validate_replan_patch(self, patch: ReplanPatch) -> str:
+        """Check a patch against authoritative state. Empty string means applicable."""
+        assert self.state is not None
+        if patch.base_plan_version != self.state.plan_version:
+            return (
+                f"stale patch: base v{patch.base_plan_version} "
+                f"but active plan is v{self.state.plan_version}"
+            )
+        by_id = {step.id: step for step in self.state.plan}
+        for step_id in patch.preserve_step_ids:
+            if step_id not in by_id:
+                return f"preserve unknown step {step_id}"
+        for invalidation in patch.invalidate:
+            target = by_id.get(invalidation.step_id)
+            if target is None:
+                return f"invalidate unknown step {invalidation.step_id}"
+            if target.locked and (
+                not invalidation.reason or not invalidation.evidence_ids
+            ):
+                return (
+                    f"invalidate locked step {invalidation.step_id} "
+                    "requires a reason and evidence"
+                )
+        invalidated_here = {item.step_id for item in patch.invalidate}
+        for step_id in patch.replace_step_ids:
+            target = by_id.get(step_id)
+            if target is None:
+                return f"replace unknown step {step_id}"
+            if target.locked and step_id not in invalidated_here:
+                return f"replace locked step {step_id} without invalidation"
+        seen: set[str] = set(by_id)
+        for step in patch.new_steps:
+            if step.id in seen:
+                return f"duplicate step id {step.id}"
+            seen.add(step.id)
+        if patch.rollback_required and not patch.rollback_target_checkpoint:
+            return "rollback required but no rollback target checkpoint given"
+        unresolved = [
+            criterion
+            for criterion in self.state.success_criteria
+            if criterion not in self.state.verified_criteria
+        ]
+        if unresolved:
+            covered: set[str] = set()
+            for step in list(self.state.plan) + list(patch.new_steps):
+                if step.status in {"pending", "active"} or step in patch.new_steps:
+                    covered.update(step.validation_requirements)
+            missing = [c for c in unresolved if c not in covered]
+            if missing:
+                return f"patch drops coverage for: {', '.join(missing[:3])}"
+        return ""
+
+    def _apply_replan_patch(self, patch: ReplanPatch, *, source: str) -> bool:
+        """Validate and apply a patch deterministically. False leaves the plan untouched."""
+        assert self.state is not None
+        patch = patch.model_copy(
+            update={"invalidate": self._invalidation_closure(list(patch.invalidate))}
+        )
+        problem = self._validate_replan_patch(patch)
+        if problem:
+            self._remember("decision", f"replan patch rejected ({source}): {problem}")
+            self._event(
+                "replan_patch_rejected",
+                RunPhase.PLAN,
+                payload={"reason": problem, "source": source},
+            )
+            self._persist()
+            return False
+        invalidated_ids = [item.step_id for item in patch.invalidate]
+        replaced_ids = list(patch.replace_step_ids)
+        for invalidation in patch.invalidate:
+            target = next(s for s in self.state.plan if s.id == invalidation.step_id)
+            target.status = "invalidated"
+            target.locked = False
+            target.invalidated_reason = invalidation.reason
+            target.invalidated_evidence_ids = list(invalidation.evidence_ids)
+        new_ids = [step.id for step in patch.new_steps]
+        first_new = new_ids[0] if new_ids else ""
+        for step_id in replaced_ids:
+            target = next(s for s in self.state.plan if s.id == step_id)
+            if target.status in {"pending", "active", "failed", "skipped"}:
+                target.status = "replaced"
+                target.replaced_by = first_new
+        for step_id in patch.skip_step_ids:
+            skipped_target = next((s for s in self.state.plan if s.id == step_id), None)
+            if skipped_target is not None and skipped_target.status in {"pending", "active"}:
+                skipped_target.status = "skipped"
+        for step in patch.new_steps:
+            if step.status not in {"pending", "active"}:
+                step.status = "pending"
+            self.state.plan.append(step)
+        open_steps = [s for s in self.state.plan if s.status in {"pending", "active"}]
+        self.state.current_step_id = open_steps[0].id if open_steps else None
+        if patch.rollback_required and patch.rollback_target_checkpoint:
+            self._rollback(
+                f"replan rollback boundary: {patch.reason}",
+                target=patch.rollback_target_checkpoint,
+            )
+        self._plan_bump(
+            reason=patch.reason or source,
+            category=patch.reason_category,
+            preserved=list(patch.preserve_step_ids),
+            invalidated=invalidated_ids,
+            replaced=replaced_ids,
+            inserted=new_ids,
+        )
+        self._emit_plan(
+            reason=patch.reason or source,
+            replaced=replaced_ids[0] if replaced_ids else None,
+            diff={
+                "version": self.state.plan_version,
+                "preserved": patch.preserve_step_ids,
+                "invalidated": invalidated_ids,
+                "replaced": replaced_ids,
+                "inserted": new_ids,
+            },
+        )
+        self._persist()
+        self._plan_health_check()
+        return True
+
+    def _deterministic_patch(
+        self,
+        current: PlanStep | None,
+        *,
+        reason: str,
+        category: Literal[
+            "invalid_assumption", "failure", "new_evidence", "user_override",
+            "dependency_invalidated", "blocked_path", "requirement_change",
+            "verified_better_route",
+        ],
+        instruction: str,
+        invalidate: list[StepInvalidation] | None = None,
+    ) -> ReplanPatch:
+        """The minimal patch: preserve verified history, replace the current step only.
+
+        Future pending steps keep their content — the deterministic fallback cannot
+        author meaningful futures, so it must not destroy planned ones.
+        """
+        assert self.state is not None
+        new_steps = next_step(self.state, instruction)
+        return ReplanPatch(
+            base_plan_version=self.state.plan_version,
+            reason=reason,
+            reason_category=category,
+            affected_from_step_id=current.id if current is not None else "",
+            preserve_step_ids=self._completed_ids(),
+            invalidate=list(invalidate or []),
+            replace_step_ids=[current.id] if current is not None else [],
+            new_steps=new_steps,
+            success_criteria_coverage=list(self.state.success_criteria),
+        )
+
+    def _invalidate_step(
+        self, step_id: str, *, reason: str, evidence_ids: list[int]
+    ) -> bool:
+        """Reopen one completed step with recorded reason and evidence.
+
+        No version bump here: the caller folds the invalidation into its replan patch.
+        Returns False when there is nothing valid to invalidate.
+        """
+        assert self.state is not None
+        target = next((s for s in self.state.plan if s.id == step_id), None)
+        if target is None or target.status != "completed":
+            return False
+        if not reason or not evidence_ids:
+            return False
+        target.status = "invalidated"
+        target.locked = False
+        target.invalidated_reason = reason
+        target.invalidated_evidence_ids = list(evidence_ids)
+        self._remember("decision", f"step {step_id} invalidated: {reason}")
+        return True
+
+    def _invalidation_closure(
+        self, invalidate: list[StepInvalidation]
+    ) -> list[StepInvalidation]:
+        """Expand invalidations to dependents: a step built on invalidated work dies too.
+
+        Dependents get the dependency as their reason; the original evidence carries over.
+        Unrelated completed steps are never touched.
+        """
+        assert self.state is not None
+        expanded = list(invalidate)
+        invalid_ids = {item.step_id for item in expanded}
+        changed = True
+        while changed:
+            changed = False
+            for step in self.state.plan:
+                if step.id in invalid_ids or step.status != "completed":
+                    continue
+                hit = [dep for dep in step.depends_on if dep in invalid_ids]
+                if hit:
+                    invalid_ids.add(step.id)
+                    expanded.append(
+                        StepInvalidation(
+                            step_id=step.id,
+                            reason=f"dependency invalidated: {', '.join(hit)}",
+                            evidence_ids=list(expanded[0].evidence_ids) if expanded else [],
+                        )
+                    )
+                    changed = True
+        return expanded
+
+    def _plan_health_check(self) -> bool:
+        """Guardian review of plan consistency. False means already blocked/failed."""
+        assert self.state is not None
+        state = self.state
+        if state.status in {"complete"} or state.status.startswith("failed"):
+            return True
+        open_steps = [s for s in state.plan if s.status in {"pending", "active"}]
+        done_steps = [s for s in state.plan if s.status == "completed"]
+        if not open_steps and not done_steps:
+            return True  # no plan formed yet, or nothing left to check
+        steps = [
+            {
+                "id": s.id,
+                "status": s.status,
+                "locked": s.locked,
+                "checkpoint": s.checkpoint or "",
+                "depends_on": list(s.depends_on),
+                "validation_requirements": list(s.validation_requirements),
+            }
+            for s in state.plan
+        ]
+        history = [
+            {
+                "version": v.version,
+                "preserved": list(v.preserved),
+                "invalidated": list(v.invalidated),
+                "replaced": list(v.replaced),
+                "inserted": list(v.inserted),
+            }
+            for v in state.plan_history
+        ]
+        try:
+            check = self.guardian.plan_health(
+                steps=steps,
+                history=history,
+                version=state.plan_version,
+                current_step_id=state.current_step_id,
+                accepted_commit=state.accepted_commit,
+                criteria=list(state.success_criteria),
+                verified_criteria=list(state.verified_criteria),
+            )
+        except Exception as exc:  # noqa: BLE001 - supervision boundary
+            return self._guardian_crash("plan_health", exc) is not None
+        if check.ok:
+            return True
+        self._guardian_check_event("plan", check.kind, check.recovery_action.value, check.evidence)
+        if check.kind == "missing_success_criterion":
+            # advisory only: the final verifier independently refuses completion without
+            # criterion evidence, so a mid-run block here would strand runs whose steps
+            # cover criteria without declaring them
+            self._remember("decision", f"plan coverage gap: {check.evidence}")
+            return True
+        self.block(
+            f"plan inconsistency: {check.evidence}",
+            "inspect the plan history, fix the inconsistency, and resume",
+        )
+        return False
+
+    def _replan(
+        self,
+        plan: PlanStep,
+        reason: str,
+        failed: bool,
+        invalidate: list[StepInvalidation] | None = None,
+        category: Literal[
+            "invalid_assumption", "failure", "new_evidence", "user_override",
+            "dependency_invalidated", "blocked_path", "requirement_change",
+            "verified_better_route",
+        ] = "failure",
+    ) -> bool:
+        """Partial replan: preserve verified history, replace the current step.
+
+        The current step keeps its record (failed/skipped, never deleted); completed
+        steps are untouched; future steps keep their content. Returns True when
+        stagnation is detected.
         """
         assert self.state is not None
         if self._trajectory is not None:
@@ -1683,15 +2411,31 @@ class Runtime:
             ):
                 self._escalate(reason)
         self._remember("decision", f"replan: {reason}")
-        if plan.status in {"pending", "active"}:
-            plan.status = "failed" if failed else "skipped"
-        self.state.plan = [item for item in self.state.plan if item.id != plan.id]
-        self.state.plan.extend(next_step(self.state, reason))
+        current = plan if plan.status in {"pending", "active"} else None
+        if current is not None:
+            current.status = "failed" if failed else "skipped"
+        expanded_invalidate = self._invalidation_closure(list(invalidate or []))
+        patch = self._deterministic_patch(
+            current,
+            reason=reason,
+            category=category,
+            instruction=reason,
+            invalidate=expanded_invalidate,
+        )
+        if not self._apply_replan_patch(patch, source="replan"):
+            # deterministic patches are constructed valid; if validation ever
+            # disagrees, keep the failed step marked and continue without a suffix
+            self._plan_bump(
+                reason=reason, category=category, preserved=self._completed_ids(),
+                invalidated=[item.step_id for item in expanded_invalidate],
+                replaced=[current.id] if current is not None else [], inserted=[],
+            )
+            self._emit_plan(reason=reason, replaced=plan.id, failed=failed)
+            self._persist()
         self._reset_working_memory()
         self.repetition = RepetitionGuard(self.repetition_limit)
         self.state.working_memory.hypotheses.append(f"retry after: {reason}")
         self._transition(RunPhase.PLAN)
-        self._emit_plan(reason=reason, replaced=plan.id, failed=failed)
         self._event("replan", RunPhase.PLAN, step_id=plan.id, payload={"reason": reason})
         stagnated = self.stagnation.record(False)
         if stagnated:
@@ -1717,7 +2461,17 @@ class Runtime:
                 return True
             self._remember("failure", details)
             self._rollback(details)
-            self.state.plan.extend(next_step(self.state, details))
+            conflict_steps = next_step(self.state, details)
+            for step in conflict_steps:
+                self.state.plan.append(step)
+            self._plan_bump(
+                reason=details,
+                category="failure",
+                preserved=self._completed_ids(),
+                invalidated=[],
+                replaced=[],
+                inserted=[step.id for step in conflict_steps],
+            )
             self._transition(RunPhase.PLAN)
             self._persist()
             return False
@@ -1757,6 +2511,9 @@ class Runtime:
         )
         self._emit_candidate_state()
         if report.passed and report.hygiene_passed:
+            for result in report.criteria:
+                if result.status == "pass" and result.criterion not in self.state.verified_criteria:
+                    self.state.verified_criteria.append(result.criterion)
             if self._trajectory is not None:
                 self._end_trajectory(
                     TrajectoryStepStatus.ACCEPTED,
@@ -1779,8 +2536,11 @@ class Runtime:
                     },
                 )
             for plan in self.state.plan:
-                plan.status = "completed"
-            self.state.plan = []
+                if plan.status in {"pending", "active"}:
+                    # the run is complete: unexecuted steps stay recorded, never
+                    # falsely marked completed
+                    plan.status = "skipped"
+            self.state.current_step_id = None
             self.state.status = "complete"
             self._transition(RunPhase.COMPLETE)
             self._persist()
@@ -1792,6 +2552,11 @@ class Runtime:
             self._event("run_completed", RunPhase.COMPLETE)
             return True
         missing = report.missing_requirements
+        failed_now = {result.criterion for result in report.criteria if result.status != "pass"}
+        # a criterion that fails now is no longer verified, whatever an earlier run said
+        self.state.verified_criteria = [
+            criterion for criterion in self.state.verified_criteria if criterion not in failed_now
+        ]
         insufficient = [
             result.criterion for result in report.criteria if result.status == "insufficient"
         ]
@@ -1805,7 +2570,16 @@ class Runtime:
                 f"evidence missing for: {', '.join(insufficient)}",
                 knowledge=[f"criteria without evidence: {', '.join(insufficient)}"],
             )
-        self.state.plan.extend(next_step(self.state, failure_reason))
+        added = next_step(self.state, failure_reason)
+        self.state.plan.extend(added)
+        self._plan_bump(
+            reason=failure_reason,
+            category="failure",
+            preserved=self._completed_ids(),
+            invalidated=[],
+            replaced=[],
+            inserted=[step.id for step in added],
+        )
         self._transition(RunPhase.PLAN)
         self._persist()
         return False
@@ -2262,6 +3036,7 @@ class Runtime:
             sensitive=self._pending_sensitive,
         )
         self.state.status = "waiting_for_user"
+        self._set_health(HealthState.WAITING, f"process input: {prompt[:80]}")
         self.state.pending_question = (
             f"the running process is waiting for input: {prompt!r}. Send the answer to "
             "continue — the process is still alive and will resume with it."
@@ -2373,19 +3148,19 @@ class Runtime:
         assert self.state is not None
         self.state.working_memory = WorkingMemory()
 
-    def _rollback(self, reason: str = "") -> None:
+    def _rollback(self, reason: str = "", *, target: str | None = None) -> None:
         assert self.state is not None and self.repo is not None
         if self.state.phase != RunPhase.ROLLBACK:
             self._transition(RunPhase.ROLLBACK)
-        target = self.state.accepted_commit or self.repo.current_commit()
+        commit = target or self.state.accepted_commit or self.repo.current_commit()
         source = self.repo.current_commit()
         try:
             discarded = [entry["path"] for entry in self.repo.candidate_snapshot()["files"]]
         except GitError:
             discarded = []
-        logger.warning("rollback to %s", target[:12])
+        logger.warning("rollback to %s", commit[:12])
         try:
-            self.repo.rollback(target)
+            self.repo.rollback(commit)
         except GitError as exc:
             # the trusted state could not be restored: record it and let the caller's ladder
             # decide. The accepted commits are still on the branch, so no work is lost.
@@ -2394,7 +3169,7 @@ class Runtime:
                 "rollback_failed",
                 RunPhase.ROLLBACK,
                 step_id=self.state.current_step_id,
-                payload={"target": target, "error": str(exc)},
+                payload={"target": commit, "error": str(exc)},
             )
             self._persist()
             raise
@@ -2404,12 +3179,82 @@ class Runtime:
             step_id=self.state.current_step_id,
             payload={
                 "from_commit": source,
-                "to_commit": target,
+                "to_commit": commit,
                 "reason": reason,
                 "discarded": discarded,
             },
         )
         self._emit_candidate_state()
+        if target and target != self.state.accepted_commit:
+            # an explicit older boundary: execution moved behind the latest trust, so
+            # the plan must agree about which completed steps are still valid
+            self._reconcile_plan_with_rollback(target, reason)
+
+    def _reconcile_plan_with_rollback(self, target: str, reason: str) -> None:
+        """Invalidate completed steps whose checkpoints did not survive the rollback.
+
+        Steps at checkpoints still reachable from the target stay completed; the rest
+        — plus their dependents — are invalidated with the rollback as evidence.
+        Knowledge (lessons, evidence) is untouched: only plan state moves.
+        """
+        assert self.state is not None and self.repo is not None
+        survivors: list[str] = []
+        affected: list[str] = []
+        for step in self.state.plan:
+            if step.status != "completed" or not step.checkpoint:
+                continue
+            try:
+                reachable = self.repo.is_ancestor(step.checkpoint, target)
+            except GitError:
+                reachable = step.checkpoint == target
+            if reachable:
+                survivors.append(step.id)
+            else:
+                affected.append(step.id)
+        if not affected:
+            return
+        changed = True
+        invalidated: list[str] = []
+        while changed:
+            changed = False
+            for step in self.state.plan:
+                if step.id in affected or step.status != "completed":
+                    continue
+                if any(dep in affected for dep in step.depends_on):
+                    affected.append(step.id)
+                    changed = True
+        for step in self.state.plan:
+            if step.id in affected and step.status == "completed":
+                step.status = "invalidated"
+                step.locked = False
+                step.invalidated_reason = (
+                    f"rollback to {target[:12]} moved execution behind this step: {reason}"
+                )
+                invalidated.append(step.id)
+        if invalidated:
+            self._remember(
+                "decision",
+                f"rollback invalidated completed steps: {', '.join(invalidated)}",
+            )
+            self._plan_bump(
+                reason=f"rollback boundary: {reason}",
+                category="failure",
+                preserved=survivors,
+                invalidated=invalidated,
+                replaced=[],
+                inserted=[],
+            )
+            self._emit_plan(
+                reason=f"rollback boundary: {reason}",
+                diff={
+                    "version": self.state.plan_version,
+                    "preserved": survivors,
+                    "invalidated": invalidated,
+                    "replaced": [],
+                    "inserted": [],
+                },
+            )
+            self._persist()
 
     def _fail(self, reason: str, *, persist: bool = True) -> AgentState:
         assert self.state is not None
@@ -2529,6 +3374,7 @@ class Runtime:
         self.state.updated_at = now_utc()
         try:
             StateStore(self._run_dir() / "state.json").save(self.state)
+            self.guardian.heartbeat.last_persist_ok = time.monotonic()
         except Exception as exc:  # noqa: BLE001 - the reason is what matters, not the type
             self._degrade("state file", exc)
             if not required:
@@ -2563,7 +3409,13 @@ class Runtime:
         except Exception:  # noqa: BLE001 - migration aid, never run-critical
             logger.debug("memory source_repo backfill skipped", exc_info=True)
 
-    def _remember(self, kind: str, content: str, immutable: bool = False) -> None:
+    def _remember(
+        self,
+        kind: str,
+        content: str,
+        immutable: bool = False,
+        scope: Literal["run", "project", "global"] = "run",
+    ) -> None:
         if self.state is None or self.memory is None:
             return
         try:
@@ -2573,6 +3425,7 @@ class Runtime:
                     content=content,
                     run_id=self.state.run_id,
                     source_repo=self.state.source_repo,
+                    scope=scope,
                     step_id=self.state.current_step_id,
                     commit_sha=self.state.accepted_commit,
                     immutable=immutable,
@@ -2726,6 +3579,7 @@ class Runtime:
         reason: str,
         replaced: str | None = None,
         failed: bool = False,
+        diff: dict[str, object] | None = None,
     ) -> None:
         assert self.state is not None
         self._event(
@@ -2733,13 +3587,21 @@ class Runtime:
             self.state.phase,
             payload={
                 "reason": reason,
+                "version": self.state.plan_version,
                 "steps": [
-                    {"id": step.id, "goal": step.goal, "status": step.status}
+                    {
+                        "id": step.id,
+                        "goal": step.goal,
+                        "status": step.status,
+                        "invalidated_reason": step.invalidated_reason,
+                        "replaced_by": step.replaced_by,
+                    }
                     for step in self.state.plan
                 ],
                 "completed": self.state.accepted_steps,
                 "replaced": replaced,
                 "failed": failed,
+                "diff": diff or {},
             },
         )
 
@@ -2782,6 +3644,7 @@ class Runtime:
         self._trace.append(event)
         try:
             self.events.append(event)
+            self._last_event_write = time.monotonic()
         except Exception as exc:  # noqa: BLE001 - a full disk must not kill the run
             # bookkeeping is useful, not essential: the run continues and reports that its
             # own record is incomplete instead of dying because a log could not be written
@@ -2888,7 +3751,7 @@ class _ProgressReporter:
         if not self.announced:
             self.announced = True
             runtime._event("provider_first_token", runtime.state.phase, payload=payload)
-        if now - self.last_emit < 0.4 and progress.characters - self.last_characters < 2048:
+        if now - self.last_emit < 1.0 and progress.characters - self.last_characters < 4096:
             return
         self.last_emit = now
         self.last_characters = progress.characters

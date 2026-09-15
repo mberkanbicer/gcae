@@ -12,7 +12,8 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Label, ListItem, ListView, Static
 
-from ..models import PlanStep
+from ..models import PlanStep, TrajectoryStep
+from ..progress import ProgressEvent
 from . import formatters
 from .formatters import STYLES, elide, short_id
 
@@ -130,8 +131,10 @@ class LogsScreen(ViewerScreen):
     """Detailed runtime log with a small filter cycle."""
 
     FILTERS: tuple[tuple[str, str], ...] = (
+        ("semantic", "__semantic__"),
         ("all", ""),
-        ("model", "[decision]"),
+        ("model", "[model]"),
+        ("guardian", "[guardian_check]"),
         ("tools", "[tool]"),
         ("context", "[context]"),
         ("git", "[git]"),
@@ -145,7 +148,7 @@ class LogsScreen(ViewerScreen):
     ]
 
     def __init__(self, lines: Callable[[], list[str]], log_path: str) -> None:
-        super().__init__("logs · all events", f"{log_path} · f cycles filters · Esc closes")
+        super().__init__("logs · semantic", f"{log_path} · f cycles filters · Esc closes")
         self._lines = lines
         self.filter_index = 0
         self._at_bottom = True
@@ -162,7 +165,20 @@ class LogsScreen(ViewerScreen):
     def _reload(self) -> None:
         needle = self.FILTERS[self.filter_index][1]
         lines = self._lines()
-        if needle:
+        if needle == "__semantic__":
+            # default view: engineering progress without model chunk telemetry.
+            # Provider milestones (started/finished/stalls) stay; per-chunk progress
+            # and raw context dumps move to MODEL/ALL.
+            kept: list[str] = []
+            for line in lines:
+                if "provider_progress" in line or "provider_first_token" in line:
+                    continue
+                tag = line.split(" ", 1)[1] if " " in line else line
+                if tag.startswith("[context]"):
+                    continue
+                kept.append(line)
+            lines = kept
+        elif needle:
             lines = [line for line in lines if needle in line]
         body = Text()
         for line in lines[-4000:]:
@@ -287,16 +303,22 @@ class ContextScreen(ViewerScreen):
         self.set_body(body)
 
 
-class PlanScreen(ViewerScreen):
-    """Full plan metadata: rationale, expected result, validation requirements."""
+class TrajectoryScreen(ViewerScreen):
+    """Semantic attempts: plan steps, trajectory verdicts and progress lines."""
 
-    def __init__(self, steps: Sequence[PlanStep], reason: str = "") -> None:
+    def __init__(
+        self,
+        steps: Sequence[PlanStep],
+        trajectory: Sequence[TrajectoryStep],
+        progress: Sequence[ProgressEvent],
+    ) -> None:
         super().__init__(
-            f"plan · {len(steps)} open steps",
-            "replaced, preserved and pending steps · Esc closes",
+            f"trajectory · {len(trajectory)} attempts",
+            "attempts with verdicts and knowledge · Esc closes",
         )
         self.steps = list(steps)
-        self.reason = reason
+        self.trajectory = list(trajectory)
+        self.progress = list(progress)
 
     def compose_body(self) -> ComposeResult:
         with VerticalScroll(id="viewer-scroll", classes="scrollpane"):
@@ -304,27 +326,58 @@ class PlanScreen(ViewerScreen):
 
     def on_mount(self) -> None:
         body = Text()
-        if self.reason:
-            body.append(f"last update · {self.reason}\n\n", style=STYLES["muted"])
-        if not self.steps:
-            body.append("no open steps\n", style=STYLES["muted"])
-        for step in self.steps:
-            marker, style = formatters.plan_marker(step.status)
-            body.append(f"{marker} {step.id} · {step.goal}\n", style=STYLES[style])
-            if step.rationale:
-                body.append(f"    why      {step.rationale}\n", style=STYLES["muted"])
-            if step.expected_result:
-                body.append(f"    expected {step.expected_result}\n", style=STYLES["muted"])
-            if step.intended_scope:
-                body.append(
-                    f"    scope    {', '.join(step.intended_scope)}\n", style=STYLES["muted"]
-                )
-            if step.validation_requirements:
-                body.append(
-                    f"    checks   {'; '.join(step.validation_requirements)}\n",
-                    style=STYLES["muted"],
-                )
+        if self.steps:
+            body.append("PLAN\n", style=STYLES["title"])
+            for step in self.steps:
+                marker, style = formatters.plan_marker(step.status)
+                body.append(f"{marker} {step.id} · {step.goal}\n", style=STYLES[style])
+                if step.rationale:
+                    body.append(f"    why      {step.rationale[:90]}\n", style=STYLES["muted"])
             body.append("\n")
+        body.append("ATTEMPTS\n", style=STYLES["title"])
+        if not self.trajectory:
+            body.append("no attempts yet\n", style=STYLES["muted"])
+        for attempt in self.trajectory:
+            raw_status = attempt.status
+            status = str(raw_status.value if hasattr(raw_status, "value") else raw_status)
+            marker = {
+                "accepted": "✓", "rejected": "×", "repaired": "↻",
+                "replanned": "↻", "blocked": "!",
+            }.get(status, "●")
+            body.append(f"{marker} {attempt.id} · {attempt.semantic_goal}\n")
+            if attempt.expectation:
+                body.append(f"    expected {attempt.expectation[:90]}\n", style=STYLES["muted"])
+            verdict = attempt.decision_reason or attempt.decision
+            if verdict:
+                body.append(f"    verdict  {verdict[:90]}\n", style=STYLES["muted"])
+            for lesson in list(attempt.knowledge_gained or [])[:2]:
+                body.append(f"    learned  {str(lesson)[:90]}\n", style=STYLES["muted"])
+            if attempt.evidence_ids:
+                count = len(attempt.evidence_ids)
+                body.append(f"    evidence {count} records\n", style=STYLES["muted"])
+            body.append("\n")
+        self.set_body(body)
+
+
+class HealthScreen(ViewerScreen):
+    """Guardian health from real checks: one row per subsystem, no green paint."""
+
+    def __init__(self, checks: Sequence[tuple[str, str, str]]) -> None:
+        super().__init__("health", "health detail per subsystem · Esc closes")
+        self.checks = list(checks)
+
+    def compose_body(self) -> ComposeResult:
+        with VerticalScroll(id="viewer-scroll", classes="scrollpane"):
+            yield Static("", id="viewer-body")
+
+    def on_mount(self) -> None:
+        body = Text()
+        for component, state, detail in self.checks:
+            marker = "✓" if state == "ok" else "!" if state == "degraded" else "×"
+            line = f"{marker} {component} · {state}"
+            if detail:
+                line += f" · {detail[:80]}"
+            body.append(line + "\n")
         self.set_body(body)
 
 

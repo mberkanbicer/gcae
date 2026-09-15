@@ -1,10 +1,24 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
 from .memory import MemoryStore
-from .models import AgentState, MemoryRecord, SemanticStep, ValidationResult, WorkingMemory
+from .models import (
+    AgentState,
+    MemoryCandidate,
+    MemoryRecord,
+    PlanStep,
+    SemanticStep,
+    ValidationResult,
+    WorkingMemory,
+)
+
+
+def _normalize_memory(content: str) -> str:
+    """Canonical form for the duplication gate: case, spacing and surrounding noise out."""
+    return re.sub(r"\s+", " ", content.strip().lower())
 
 
 def estimate_tokens(text: str) -> int:
@@ -21,11 +35,32 @@ class Context:
     text: str
     pinned_ids: tuple[int, ...]
     omitted_ids: tuple[int, ...] = ()
+    #: share of the rendered text that is retrieved memory (0..1)
+    memory_share: float = 0.0
+    #: relevant records dropped as duplicates during retrieval
+    dropped_duplicates: int = 0
+    #: relevant records retrieved before budgeting
+    retrieved_total: int = 0
 
 
 class ContextBuilder:
     def __init__(self, memory: MemoryStore) -> None:
         self.memory = memory
+
+    @staticmethod
+    def _plan_line(plan: PlanStep) -> str:
+        """One compact plan row: locked history first, then the active trajectory."""
+        marker = {
+            "completed": "✓",
+            "active": "●",
+            "pending": "○",
+            "invalidated": "×",
+            "replaced": "↻",
+        }.get(plan.status, "·")
+        line = f"{marker} {plan.id} [{plan.status}] {plan.goal}"
+        if plan.status == "invalidated" and plan.invalidated_reason:
+            line += f" (invalidated: {plan.invalidated_reason[:80]})"
+        return line
 
     def build(
         self,
@@ -54,19 +89,49 @@ class ContextBuilder:
             for record in all_records
             if record.immutable or record.kind == "user_instruction"
         ] + failure_records
-        # relevant memory is scoped to this repository: the store is cumulative across runs,
-        # but another project's lessons must not enter this project's decision context
-        relevant = (
-            self.memory.search(state.objective, limit=20, source_repo=state.source_repo)
-            if state.objective
-            else []
-        )
+        # Retrieval tiers: this run first, then the same project, then explicitly
+        # reusable global knowledge. Scoped FTS keeps other projects out entirely;
+        # the unscoped pass only admits records marked global.
+        relevant: list[MemoryCandidate] = []
+        tier_of: dict[int, str] = {}
+
+        def _take(candidates: list[MemoryCandidate], tier: str) -> None:
+            for candidate in candidates:
+                record = candidate.record
+                if record.id is None or record.id in tier_of:
+                    continue
+                if tier == "global" and record.scope != "global":
+                    continue
+                tier_of[record.id] = tier
+                relevant.append(candidate)
+
+        if state.objective:
+            scoped = self.memory.search(
+                state.objective, limit=20, source_repo=state.source_repo
+            )
+            _take([c for c in scoped if c.record.run_id == state.run_id], "run")
+            _take([c for c in scoped if c.record.run_id != state.run_id], "project")
+            _take(self.memory.search(state.objective, limit=10), "global")
+        tier_lines = {
+            record.id: tier_of.get(record.id, "run")
+            for record in pinned + [candidate.record for candidate in relevant]
+            if record.id is not None
+        }
         records: list[MemoryRecord] = []
         seen: set[int] = set()
+        seen_content: set[str] = set()
+        dropped_duplicates = 0
         for record in pinned + [candidate.record for candidate in relevant]:
-            if record.id is not None and record.id not in seen:
-                records.append(record)
-                seen.add(record.id)
+            if record.id is None or record.id in seen:
+                continue
+            normalized = _normalize_memory(record.content)
+            if normalized in seen_content:
+                # relevance gate: the same lesson twice teaches nothing twice
+                dropped_duplicates += 1
+                continue
+            records.append(record)
+            seen.add(record.id)
+            seen_content.add(normalized)
 
         header = [
             f"Objective: {state.objective}",
@@ -85,14 +150,20 @@ class ContextBuilder:
         pinned_ids = {
             record.id for record in pinned if record.id is not None
         }
+        def _memory_line(record: MemoryRecord) -> str:
+            tier = tier_lines.get(record.id or 0, "run")
+            return f"Memory[{record.id}|{record.kind}|{tier}]: {record.content}"
+
         pinned_lines = header + [
-            f"Memory[{record.id}|{record.kind}]: {record.content}"
-            for record in records
-            if record.id in pinned_ids
+            _memory_line(record) for record in records if record.id in pinned_ids
         ]
         optional_lines = [
-            f"Plan: {plan.id} [{plan.status}] {plan.goal}"
+            f"Plan v{state.plan_version}:"
+        ] + [
+            f"  {self._plan_line(plan)} "
             for plan in state.plan
+            if plan.status in {"pending", "active", "completed"}
+            or (plan.status == "invalidated" and plan.invalidated_reason)
         ]
         if active_files:
             optional_lines.append(f"Active files: {', '.join(active_files)}")
@@ -132,10 +203,16 @@ class ContextBuilder:
             optional_lines.append("Execution evidence (what actually happened):")
             optional_lines.extend(f"  {item}" for item in evidence[-8:])
         optional_lines.extend(
-            f"Memory[{record.id}|{record.kind}]: {record.content}"
+            _memory_line(record)
             for record in records
             if record.id not in pinned_ids
         )
+
+        def _memory_share(text: str) -> float:
+            memory_chars = sum(
+                len(line) + 1 for line in text.splitlines() if line.startswith("Memory[")
+            )
+            return memory_chars / max(1, len(text))
 
         pinned_text = "\n".join(pinned_lines)
         if budget <= estimate_tokens(pinned_text):
@@ -147,6 +224,9 @@ class ContextBuilder:
                     for record in records
                     if record.id is not None and record.id not in pinned_ids
                 ),
+                memory_share=_memory_share(pinned_text),
+                dropped_duplicates=dropped_duplicates,
+                retrieved_total=len(relevant),
             )
 
         lines = [pinned_text]
@@ -165,11 +245,14 @@ class ContextBuilder:
         rendered = "\n".join(lines)
         included_text = rendered
         for record in optional_records:
-            rendered_line = f"Memory[{record.id}|{record.kind}]: {record.content}"
+            rendered_line = _memory_line(record)
             if rendered_line not in included_text:
                 omitted.append(record.id or 0)
         return Context(
             text=rendered,
             pinned_ids=tuple(sorted(pinned_ids)),
             omitted_ids=tuple(item for item in omitted if item > 0),
+            memory_share=_memory_share(rendered),
+            dropped_duplicates=dropped_duplicates,
+            retrieved_total=len(relevant),
         )

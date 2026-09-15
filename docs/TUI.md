@@ -136,6 +136,15 @@ validation panel carries the running evidence counts (`3 supporting · 1 contrad
 Contradictory evidence gets a timeline line of its own (`! evidence contradicts · <claim>`);
 routine supporting evidence stays in the logs, where the streaming telemetry also lives.
 
+## Plan history
+
+The PLAN panel keeps verified completed steps visible and muted under a `vN · M/K verified`
+header — history never disappears on replan. Invalidated steps show their reason briefly
+(`× setup · invalidated: PTY evidence …`); replaced steps name their successor.
+Replan timeline lines carry the scope (`preserved 3 · replaced 1 · added 2`). `[t]` opens the
+trajectory view: plan steps plus every attempt with its verdict, knowledge gained and evidence
+count. See `docs/PLAN_HISTORY.md`.
+
 ## Trusted versus candidate
 
 The CHECKPOINT panel is the run's identity: it shows the trusted commit (a verified tree) and the
@@ -183,7 +192,7 @@ there — it ends the run with its reason in the banner.
 | `m` | Memory | stored records grouped by kind (`USER_INSTRUCTION`, `FACT`, `DECISION`, `FAILURE`, …) with step, commit, timestamp and source provenance |
 | `c` | Context | the request payload actually sent to the model: section list with size share, plus the selected section's content |
 | `e` | Evaluation | latest decision and reason, next goal, promoted memories, verification criteria with evidence, validation command output tails |
-| `t` | Plan | every step with rationale, expected result, intended scope and validation requirements |
+| `t` | Trajectory | plan steps plus every attempt with verdict, knowledge and evidence; completed history stays visible |
 | `Enter` | Inspect | opens the detail screen for the focused section (plan, checkpoint→diff, validation/active→evaluation, objective→context, events→logs) |
 
 ## Keys

@@ -785,7 +785,7 @@ def test_a_long_active_step_wraps_instead_of_being_cut_off() -> None:
     assert "the buffering helper and its callers" in flat, "the active goal must be readable"
     assert text.count("\n") >= 2, "the long goal must occupy continuation rows"
     assert "reproduce the failure" in text, "neighbouring steps stay visible"
-    assert meta.endswith("steps")
+    assert meta.endswith("verified")
 
 
 def test_dashboard_shows_streaming_end_to_end_without_flooding_the_timeline(

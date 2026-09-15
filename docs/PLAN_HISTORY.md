@@ -18,6 +18,11 @@ FUTURE      remaining steps — adaptive
 - **Invalidation needs evidence.** A completed step moves to `invalidated` only with a
   recorded reason and ledger evidence IDs; dependents (via `depends_on`) follow with a
   dependency reason. Anything less is rejected.
+- **Invalidation un-verifies what it disproved.** Verified criteria whose supporting
+  evidence died with an invalidated step move to `revalidation_required`: not silently
+  deleted, not falsely verified. Guardian plan-health treats them as covered (final
+  verification re-checks them), the replan prompt asks for a cheap revalidation step
+  instead of a rebuild, and a passing final verification clears them.
 - **Replans are patches, not rewrites.** `ReplanPatch` carries the base plan version,
   the affected region, invalidations, replacements and new steps. The runtime validates
   deterministically — stale base, unknown IDs, locked rewrites without evidence,
@@ -25,7 +30,9 @@ FUTURE      remaining steps — adaptive
   reject the patch with the active plan untouched.
 - **Rollback and plan agree.** Rolling back to an explicit older checkpoint invalidates
   completed steps whose checkpoints are no longer reachable (ancestry-checked), plus
-  their dependents. Knowledge — lessons, evidence — never moves.
+  their dependents. Knowledge — lessons, evidence — never moves. The same ancestry
+  reconciliation runs on **resume** when execution sits behind the trusted checkpoint,
+  recording the revision under the `resume_reconciliation` reason category.
 - **Repair before replan.** Evaluator `repair` keeps the candidate; the strategy ledger
   forces a different method; deterministic partial replan replaces the current step;
   model-backed replan patches happen only after recovery shows local means failed.

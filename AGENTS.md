@@ -45,7 +45,9 @@ RECONSTRUCT → ACT → OBSERVE → JUDGE → COMMIT OR REVERT → LEARN → (re
    exhausted step budget first trigger `recovery.py`: the advisor reads the run's own trace
    and returns a structured `Diagnosis`. `replan` queues the correction and grants bounded
    extra iterations; otherwise the run pauses (`waiting_for_user`) or blocks (`blocked`) with
-   a question, keeping the plan and every accepted commit. A run only fails when the user was
+   a question, keeping the plan and every accepted commit. A blocked or asked run **stays
+   held across restarts**: a plain resume never restarts autonomous work; an instruction or
+   `resume --force` (recorded) proceeds. A run only fails when the user was
    asked or recovery was exhausted.
 6. **Verified work reaches the user.** A completed run merges its branch into the source
    branch (`[runtime] auto_merge`, default on) with the pre-merge and merge commits recorded
@@ -117,7 +119,8 @@ docs/              architecture and subsystem documentation
 Run all three before considering any change complete. Add tests for behavior changes:
 `tests/test_integration_rollback.py`, `tests/test_adaptive_trajectory.py`,
 `tests/test_hardening.py` (invariants A–J and trajectory tests 3, 4, 6) and
-`tests/test_plan_history.py` (stable prefix, invalidation, resume, TUI history) must keep
+`tests/test_plan_history.py` (stable prefix, invalidation, resume, TUI history) and
+`tests/test_resume_recovery.py` (every crash window plus a real SIGKILL resume) must keep
 passing, and TUI changes must keep `tests/test_tui.py` passing.
 
 ## Hygiene rules for your own changes

@@ -409,3 +409,130 @@ def test_waiting_run_keeps_its_question_across_resume(tmp_path: Path) -> None:
     assert resumed.state is not None
     assert resumed.state.status == "waiting_for_user"
     assert resumed.state.pending_question == "which database should the app target?"
+
+
+_CHILD_SCRIPT = '''
+import sys
+from pathlib import Path
+
+from gcae.providers import FakeProvider
+from gcae.runtime import Runtime, RuntimeControl
+
+mode = sys.argv[1]
+source, runtime_dir = Path(sys.argv[2]), Path(sys.argv[3])
+run_id_file, marker = Path(sys.argv[4]), Path(sys.argv[5])
+
+if mode == "run":
+    provider = FakeProvider([
+        {"action": "execute_tool", "semantic_goal": "create", "reason_summary": "create",
+         "tool": {"name": "create_file",
+                  "arguments": {"path": "out.txt", "content": "ok\\n"}}},
+        {"action": "complete_semantic_step", "semantic_goal": "create",
+         "reason_summary": "done"},
+        {"action": "execute_tool", "semantic_goal": "hold",
+         "reason_summary": "hold",
+         "tool": {"name": "run_command", "arguments": {"command": "sleep 30"}}},
+    ])
+    runtime = Runtime(source, runtime_dir, provider=provider, control=RuntimeControl())
+    seen = []
+
+    def watch(event) -> None:
+        if event.event_type == "checkpoint_created":
+            marker.write_text(event.payload.get("commit") or "?", encoding="utf-8")
+
+    runtime.subscribe(watch)
+    runtime.start("create out.txt", success_criteria=["file exists: out.txt"])
+    run_id_file.write_text(runtime.state.run_id, encoding="utf-8")
+    runtime.run()
+    import time
+
+    time.sleep(600)  # hold: the parent must be able to kill a live process
+else:
+    run_id = run_id_file.read_text(encoding="utf-8").strip()
+    provider = FakeProvider([
+        {"action": "execute_tool", "semantic_goal": "finish", "reason_summary": "finish",
+         "tool": {"name": "create_file",
+                  "arguments": {"path": "done.txt", "content": "done\\n"}}},
+        {"action": "complete_semantic_step", "semantic_goal": "finish",
+         "reason_summary": "done"},
+        {"action": "finish_candidate", "semantic_goal": "finish",
+         "reason_summary": "finish"},
+    ])
+    runtime = Runtime(source, runtime_dir, provider=provider, control=RuntimeControl())
+    runtime.resume(run_id)
+    state = runtime.run()
+    marker.write_text(state.status, encoding="utf-8")
+'''
+
+
+def test_sigkill_mid_run_resumes_and_completes(tmp_path: Path) -> None:
+    """The real crash: SIGKILL after the first checkpoint, resume in a new process."""
+    import os
+    import signal
+    import subprocess
+    import sys
+    import time
+
+    source = tmp_path / "source"
+    init_repo(source)
+    runtime_dir = tmp_path / "runtime"
+    child = tmp_path / "child.py"
+    child.write_text(_CHILD_SCRIPT, encoding="utf-8")
+    env = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1] / "src"))
+    run_id_file = tmp_path / "run_id"
+    marker = tmp_path / "checkpoint_seen"
+
+    first = subprocess.Popen(
+        [sys.executable, str(child), "run", str(source), str(runtime_dir),
+         str(run_id_file), str(marker)],
+        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    deadline = time.monotonic() + 60
+    while not marker.exists() and first.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert marker.exists(), "the child never reached its first checkpoint"
+    first.send_signal(signal.SIGKILL)
+    first.wait(timeout=10)
+    assert first.returncode == -signal.SIGKILL
+    run_id = run_id_file.read_text(encoding="utf-8").strip()
+
+    status_marker = tmp_path / "resume_status"
+    second = subprocess.run(
+        [sys.executable, str(child), "resume", str(source), str(runtime_dir),
+         str(run_id_file), str(status_marker)],
+        env=env, capture_output=True, text=True, timeout=180,
+    )
+    assert second.returncode == 0, second.stderr[-2000:]
+    assert status_marker.read_text(encoding="utf-8").strip() == "complete"
+    events_log = runtime_dir / "runs" / run_id / "events.jsonl"
+    lines = events_log.read_text(encoding="utf-8").splitlines()
+    assert lines and all(json.loads(line) is not None for line in lines)
+    kinds = [json.loads(line)["event_type"] for line in lines]
+    assert "run_resumed" in kinds, "the resumed process must say it resumed"
+    assert not (runtime_dir / "runs" / run_id / "state.json.write").exists()
+
+
+def test_crash_between_accept_and_next_step_queues_the_followup(tmp_path: Path) -> None:
+    """Kill landed after the acceptance persist but before the next step was queued:
+    current_step_id points at a completed step with nothing executable. Resume must
+    queue exactly one follow-up step instead of blocking as corrupted."""
+    from gcae.models import PlanStep
+
+    runtime, run_id, base = start_runtime(tmp_path)
+    assert runtime.state is not None
+    runtime.state.plan = [
+        PlanStep(id="step-1", goal="create", status="completed",
+                 checkpoint=base, locked=True),
+    ]
+    runtime.state.current_step_id = "step-1"
+    runtime.state.accepted_commit = base
+    runtime._persist()
+    resumed, _ = resumed_runtime(tmp_path, run_id)
+    assert resumed.state is not None
+    assert resumed.state.status == "running", "repaired, not blocked"
+    current = next(
+        (s for s in resumed.state.plan if s.id == resumed.state.current_step_id), None
+    )
+    assert current is not None and current.status in {"pending", "active"}
+    assert current.id != "step-1", "a follow-up step was queued"
+    assert resumed.state.plan[0].status == "completed", "history untouched"

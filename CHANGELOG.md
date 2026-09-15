@@ -4,6 +4,61 @@ All notable changes to GCAE are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] — 2026-09-16
+
+### Added — resume robustness and plan-consistency recovery
+
+- **Git-side resume reconciliation.** A crash between a checkpoint commit and the state
+  write, or mid event-append, is reconciled *and explained*: an unrecorded descendant
+  commit is discarded and named in a `resume_reconciled` event (subject included); a
+  diverged branch is restored forward and reported; `EventLog.repair_tail()` truncates a
+  torn trailing line (never mid-file damage); the stale `state.json.write` temp is
+  removed. (W1, W6)
+- **Plan↔git consistency repair on resume.** When execution sits behind the trusted
+  checkpoint, the ancestry-based reconciliation invalidates exactly the steps whose
+  checkpoints did not survive (dependents follow, knowledge stays) under the new
+  `resume_reconciliation` reason category — a shared `ReplanReason` literal now types
+  every plan revision. (W5, PH §21)
+- **Criterion revalidation.** Verified criteria whose supporting evidence died with an
+  invalidated step move to `revalidation_required`: never silently deleted, never falsely
+  verified. Guardian plan-health treats them as covered (final verification re-checks),
+  the replan prompt plans a cheap revalidation step, and passing final verification
+  clears them. (W7, PH §16/§42)
+- **Crash-safe merge lifecycle.** A `PendingMerge` marker persists before `git merge`;
+  on any later attempt, an already-performed merge is backfilled from git ancestry —
+  never merged twice, never left without an undo record, `gcae undo` keeps working. A
+  crash between completion and the merge is closed by the existing resume path. (W2, W3)
+- **Blocked-run resume contract.** A plain `resume` of a `blocked` or `waiting_for_user`
+  run holds it — reason, hint and question survive the restart and `run()` does not work
+  behind the block. Proceeding takes an instruction (which now also clears
+  `blocked_reason`) or `gcae resume --force` (recorded as `resume_forced`). (W4)
+- **Per-event detail screen.** `Enter` on the timeline opens the run's semantic events
+  one at a time — command, outcome, evidence ids, severity, bounded payload — with `j/k`
+  stepping newest-first. Raw telemetry stays in Logs. (R §37)
+- **Resume after accepting the last step.** A crash between the acceptance persist and
+  queueing the next step leaves `current_step_id` on a completed step — normal mid-loop
+  state that plan-health used to reject as `current_step_missing`. Resume now advances
+  the pointer or queues exactly one follow-up step (history untouched). Found by the
+  SIGKILL test, verified deterministic at file level.
+- `tests/test_resume_recovery.py` (15): every crash window at file level plus a **real
+  SIGKILL** run killed after its first checkpoint and resumed to completion in a second
+  process.
+
+### Fixed
+
+- `Guardian.plan_health` crashed on empty plan history (0.5.2 already noted; covered
+  again by the direct invariant test).
+- Earlier audit corrections recorded in `docs/IMPLEMENTATION_AUDIT.md`: typed replan
+  reasons and the ACTIVE model row were already shipped — the audit greps were wrong.
+
+### Tests
+
+349 pass (15 in tests/test_resume_recovery.py incl. the real SIGKILL resume, plus the
+event-detail TUI test). Docs updated: STATE_MACHINE (resume
+transitions + crash-window table), CLI (`resume --force`, notices), FAILURE_RECOVERY
+(crash windows), PLAN_HISTORY (typed reasons, revalidation), TUI (event detail),
+AGENTS.md invariant 5.
+
 ## [0.5.2] — 2026-09-15
 
 ### Fixed

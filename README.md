@@ -7,7 +7,7 @@
   <a href="https://github.com/mberkanbicer/gcae/actions/workflows/ci.yml"><img src="https://github.com/mberkanbicer/gcae/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
   <img src="https://img.shields.io/badge/python-3.12%20%7C%203.13-3776AB?logo=python&logoColor=white" alt="Python 3.12 and 3.13">
   <img src="https://img.shields.io/badge/dependencies-pydantic%20%C2%B7%20httpx%20%C2%B7%20textual-2F81F7" alt="Runtime dependencies: pydantic, httpx, textual">
-  <img src="https://img.shields.io/badge/tests-331%20passing-3FB950" alt="331 tests passing">
+  <img src="https://img.shields.io/badge/tests-349%20passing-3FB950" alt="349 tests passing">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-6E7681" alt="MIT license"></a>
 </p>
 

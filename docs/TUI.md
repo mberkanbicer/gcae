@@ -202,7 +202,7 @@ there — it ends the run with its reason in the banner.
 | `e` | Evaluation | latest decision and reason, next goal, promoted memories, verification criteria with evidence, validation command output tails |
 | `t` | Trajectory | plan steps plus every attempt with verdict, knowledge and evidence; completed history stays visible |
 | `h` | Health | the guardian's view per subsystem — runtime, model, worktree, memory, event store, active process, last recovery — built from live probes, never painted green |
-| `Enter` | Inspect | opens the detail screen for the focused section (plan, checkpoint→diff, validation/active→evaluation, objective→context, events→logs) |
+| `Enter` | Inspect | opens the detail screen for the focused section (plan, checkpoint→diff, validation/active→evaluation, objective→context, events→event detail: the timeline's own events with command, outcome and evidence, `j/k` to step) |
 
 ## Keys
 

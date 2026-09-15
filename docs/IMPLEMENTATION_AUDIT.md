@@ -74,18 +74,18 @@ dependency set is exactly `pydantic`, `httpx`, `textual`. Removed in this pass: 
 - The judge cannot *request* new evidence at verification time; the run's ladder does that
   work instead (verification failure replans with the missing evidence named).
 - The judge weighs recency explicitly (newest-first bundle with timestamps), not a score.
-- Replan reasons are recorded free text, not a typed category set
-  (`USER_OVERRIDE`, `INVALID_ASSUMPTION`, …). They are always present and persisted with
-  the `PlanVersion`, but nothing enforces the vocabulary. Add when reason statistics or
-  replan-policy decisions actually need the categories.
-- There is no revalidation model: `verified_criteria` drives replan coverage checks, but a
-  criterion affected by later changes has no `REVALIDATION_REQUIRED` state and there is no
-  impact analysis distinguishing "revalidate the assumption" from "redo the work". Add
+- Cross-step criterion impact analysis is the one planning deferral left: criteria move to
+  `revalidation_required` only when the step that proved them is invalidated; the runtime
+  does not heuristically infer that "a scoring change might affect keyboard input". Add
   when verified criteria start being invalidated by cross-step changes in practice.
-- Timeline events are not individually expandable: Level 2 detail lives in the dedicated
-  screens (`Enter`, `d`, `e`, `t`, `h`, `m`, `c`), not per-event expansion on the timeline
-  itself. Add when a failure line is not enough to reconstruct command/output/evidence
-  without opening those screens.
-- The ACTIVE panel has no in-panel model row; model, role and elapsed time live in the
-  status bar (`OPENROUTER · model · role · 12s`) and the phase label in ACTIVE. The five
-  core questions stay answered; only the spec's example layout differs.
+
+### Deferred items closed in 0.5.x–0.6.0 (recorded here because earlier audits were wrong)
+
+- Typed replan-reason categories: **shipped** (the 0.5.x audit grepped SCREAMING_SNAKE
+  and missed the lowercase `ReplanReason` literals; `PlanVersion.reason_category` is
+  persisted and tested).
+- The ACTIVE in-panel model row: **shipped** (rendered during model actions:
+  `controller · generating · 3.4s` + model name — the audit pattern `model_row` never
+  matched `_row("model", …)`).
+- Per-event timeline details: **shipped in 0.6.0** (`Enter` on the timeline opens the
+  EventDetailScreen; `j/k` steps the run's semantic events).

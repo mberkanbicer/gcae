@@ -659,6 +659,25 @@ class Runtime:
                 "resume found execution behind the trusted checkpoint",
                 category="resume_reconciliation",
             )
+        if self.state.status != "complete":
+            # a crash between accepting the last step and queueing the next leaves
+            # current_step_id on a completed step with nothing executable: that is
+            # normal mid-loop state, not corruption — advance the pointer, or queue
+            # exactly one follow-up step if the plan ran out. History is untouched.
+            current = next(
+                (s for s in self.state.plan if s.id == self.state.current_step_id), None
+            )
+            if current is None or current.status not in {"pending", "active"}:
+                executable = next(
+                    (s for s in self.state.plan if s.status in {"pending", "active"}), None
+                )
+                if executable is None:
+                    follow_ups = next_step(
+                        self.state, "continue the task from the trusted checkpoint"
+                    )
+                    self.state.plan.extend(follow_ups)
+                    executable = follow_ups[0]
+                self.state.current_step_id = executable.id
         if self.state.status in {"blocked", "waiting_for_user"} and not force:
             # an asked run stays asked: the question that stopped it survives the
             # restart and is answered with an instruction or --force — a plain

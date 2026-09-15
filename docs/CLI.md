@@ -61,6 +61,11 @@ warn that the built-in fake provider is about to be used instead of failing cryp
 - `list` prints known runs (id, status, accepted steps, update time, objective), newest first.
 - `inspect` prints objective, plan, verification per criterion, merge state and pending question;
   `--json` emits the persisted state verbatim.
+- `resume` reconciles whatever a crash left behind and says so (`resume_reconciled` notices:
+  discarded unrecorded checkpoint, branch divergence, torn event line, plan invalidation).
+  A `blocked` or `waiting_for_user` run is held, not restarted: the CLI prints the reason
+  and hint; `--force` overrides openly (recorded as `resume_forced`), and an instruction
+  (TUI `i`) answers it instead.
 
 ## Prune
 

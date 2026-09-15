@@ -91,7 +91,24 @@ when its first iteration starts, `completed` when accepted, `failed` on a reject
 
 ## Run status
 
-`running`, `waiting_for_user`, `stopped`, `complete`, `failed: <reason>`. `waiting_for_user` and
+`running`, `waiting_for_user`, `stopped`, `blocked`, `complete`, `failed: <reason>`. `waiting_for_user` and
 `stopped` are resumable: `resume` restores the accepted checkpoint, clears speculative state inside
-the worktree, rebuilds context from persistent state, and continues. `complete` and `failed` are
-terminal for the automatic loop, but `inspect`, `merge` and `undo` still apply.
+the worktree, rebuilds context from persistent state, and continues. `blocked` and
+`waiting_for_user` **stay held across restarts**: a plain `resume` restores the state, the
+question and the unblock hint without executing a step — proceeding requires an instruction
+(`inject_user_instruction`, TUI `i`) or `gcae resume --force` (recorded as `resume_forced`).
+`complete` and `failed` are terminal for the automatic loop, but `inspect`, `merge` and `undo`
+still apply — and `resume` of a `complete` run re-enters the merge path if the merge never
+happened (crash before it ran).
+
+## Crash reconciliation on resume
+
+| Crash window | Resume behavior |
+| --- | --- |
+| checkpoint committed, state not written | the unrecorded commit is discarded (the plan never recorded it) and named in a `resume_reconciled` event |
+| branch behind the trusted checkpoint | worktree and branch restored forward; divergence reported |
+| plan claims steps beyond the trusted checkpoint | ancestry reconciliation invalidates exactly those steps and dependents (`resume_reconciliation`); verified criteria whose proof died move to `revalidation_required` |
+| crash after accepting the last step, before the next was queued | `current_step_id` points at a completed step — resume queues exactly one follow-up step (history untouched) instead of blocking as corrupted |
+| torn trailing line in `events.jsonl` | the tail is truncated and reported; mid-file damage is never touched |
+| merge ran, record not written | `PendingMerge` marker reconciles by ancestry: record backfilled, never merged twice, `undo` keeps working |
+| merge intended, never run | the marker survives; the next attempt completes it |

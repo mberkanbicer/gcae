@@ -37,3 +37,13 @@ verified progress) route to the ladder above; hard stalls (mechanism stuck) rout
 Guardian recovery. If the Guardian itself throws, the run stops safely with FATAL and the
 trusted checkpoint survives. Health states (`healthy`, `degraded`, `recovering`,
 `waiting`, `blocked`, `fatal`) surface on the dashboard and `[h]`.
+
+## Crash windows (see STATE_MACHINE for the table)
+
+A *process death* is not a run failure — it is a resume with reconciliation: unrecorded
+checkpoints are discarded and named, branch divergence is restored forward and reported,
+the plan is repaired to the boundary git can prove, torn event tails are truncated, and
+merge intent persisted before `git merge` guarantees the undo record exists even when
+the process died mid-merge. Every repair emits a `resume_reconciled`/plan event; nothing
+is silently healed. `tests/test_resume_recovery.py` proves each window with file-level
+crash states plus one real SIGKILL run resumed in a second process.

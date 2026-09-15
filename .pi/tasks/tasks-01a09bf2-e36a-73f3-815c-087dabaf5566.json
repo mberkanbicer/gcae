@@ -2,17 +2,6 @@
   "nextId": 5,
   "tasks": [
     {
-      "id": "1",
-      "subject": "Backfill legacy source_repo for scoped retrieval",
-      "description": "Backfill legacy memory rows with source_repo from run state files so scoped retrieval includes pre-0.4.0 knowledge where the repo is known. Add migration + tests.",
-      "status": "completed",
-      "metadata": {},
-      "blocks": [],
-      "blockedBy": [],
-      "createdAt": 1789460927598,
-      "updatedAt": 1789461167230
-    },
-    {
       "id": "2",
       "subject": "Add retention TTL to gcae prune",
       "description": "Add retention TTL to prune: --older-than DAYS filter plus config option, respecting existing guards (live lock, merge record, dry-run). Add CLI tests and docs.",
@@ -22,17 +11,6 @@
       "blockedBy": [],
       "createdAt": 1789460927598,
       "updatedAt": 1789460927598
-    },
-    {
-      "id": "3",
-      "subject": "Explicit evidence recency for judge",
-      "description": "Make evidence recency explicit for the judge: newest-first ordering and created_at in cited bundle, so stale contradictions are weighed deterministically without scoring. Add tests.",
-      "status": "completed",
-      "metadata": {},
-      "blocks": [],
-      "blockedBy": [],
-      "createdAt": 1789460927598,
-      "updatedAt": 1789461167231
     },
     {
       "id": "4",

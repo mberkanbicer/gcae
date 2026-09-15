@@ -57,7 +57,9 @@ command succeeds: python -m pytest -q
 
 If a run has no criteria the planner derives them, and a run that cannot be verified is never
 declared complete. Completion requires PASS for every criterion, each mapped to ledger
-evidence: no evidence means INSUFFICIENT, contradiction means FAIL.
+evidence: no evidence means INSUFFICIENT, contradiction means FAIL. The judge bundle is
+newest-first with a timestamp on every cited record, so a repaired run's fresh support
+outranks the stale contradiction it replaced — recency made explicit, never scored.
 
 ## Self-recovery
 

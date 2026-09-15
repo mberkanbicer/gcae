@@ -20,7 +20,9 @@
 | stagnation / replan markers | the runtime (as `decision`) | the change-hypothesis record the ladder writes before trying something else |
 
 SQLite FTS5 retrieval ranks by relevance to the current step, scoped to the source repository:
-knowledge accumulates across runs of one project without leaking into another's. Immutable
+knowledge accumulates across runs of one project without leaking into another's. Rows written
+before scoped retrieval existed carry no repository; opening a run backfills them from the
+persisted run states where the repository is still known. Immutable
 lessons are surfaced first, because a repeated mistake is more expensive than a missing fact.
 
 ## Evidence ledger

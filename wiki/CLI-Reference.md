@@ -61,7 +61,12 @@ The whole run directory goes (state and events); repositories and worktrees are 
 gcae prune --dry-run    # list what would be deleted
 gcae prune --keep 20    # keep the 20 newest, delete the rest
 gcae prune --keep 0     # delete every run record
+gcae prune --older-than 30  # also delete runs older than 30 days, even within --keep
 ```
+
+`[runtime] run_retention_days` applies the same TTL without the flag (the flag wins when both
+are given). Pruning removes run directories only — the cumulative knowledge database
+(`memory.db`) is deliberately left alone: the per-run record goes, the lesson stays.
 
 Three guards keep pruning from breaking anything:
 

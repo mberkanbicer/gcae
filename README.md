@@ -7,7 +7,7 @@
   <a href="https://github.com/mberkanbicer/gcae/actions/workflows/ci.yml"><img src="https://github.com/mberkanbicer/gcae/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
   <img src="https://img.shields.io/badge/python-3.12%20%7C%203.13-3776AB?logo=python&logoColor=white" alt="Python 3.12 and 3.13">
   <img src="https://img.shields.io/badge/dependencies-pydantic%20%C2%B7%20httpx%20%C2%B7%20textual-2F81F7" alt="Runtime dependencies: pydantic, httpx, textual">
-  <img src="https://img.shields.io/badge/tests-165%20passing-3FB950" alt="165 tests passing">
+  <img src="https://img.shields.io/badge/tests-286%20passing-3FB950" alt="286 tests passing">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-6E7681" alt="MIT license"></a>
 </p>
 
@@ -74,6 +74,11 @@ documents: none — the run produced no files
 | A broken model is recovered too | A dead or misconfigured model is the one failure self-diagnosis cannot fix, so the role moves to `[models.escalation]` instead: a provider outage, or the same rejection three times, switches the controller for the rest of the run. Transient errors (429, 5xx, timeouts) are retried with backoff first. Verified live: an invalid controller model id still finished the task in 11 seconds. |
 | One run per repository | `run`, `resume`, `merge` and `undo` take a per-repository lock, so two runs can never interleave two merges into the same branch. The lock lives in the state directory and dies with the process. |
 | A blocked run fixes itself first | Before asking you, a failing run (stagnation, unusable model output, exhausted budget) reads its own trace — events, validation evidence, failure memories — and diagnoses the root cause, then retries with the correction. Bounded, and always outranked by the verification gate. |
+| The attempt is the unit, not the tool call | Each semantic attempt is a typed **trajectory step** — goal, expectation, expected evidence, failure signals, verdict, knowledge gained — persisted in `state.json` and visible on the dashboard timeline, with no chat transcript anywhere. |
+| Every claim needs evidence | An append-only **evidence ledger** records each command result, validation, interactive session and criterion verdict (supports / contradicts, never scored). Completion requires PASS for every criterion mapped to evidence: no evidence is INSUFFICIENT, contradiction is FAIL. |
+| Repair is not rollback | The evaluator can `repair` a valid direction with a broken implementation: the candidate is kept and the next attempt is told what to fix, instead of throwing the work away. |
+| Old runs are pruned, lessons stay | `gcae prune` deletes run records beyond `--keep` or older than `--older-than` / `[runtime] run_retention_days`, never touching live runs, recorded merges, repositories or worktrees — and never the cumulative knowledge database. |
+| Memory is scoped to the repository | Lessons accumulate across runs of one project; retrieval never leaks another project's failures into your context. |
 
 ## The execution loop
 
@@ -93,13 +98,14 @@ PLAN → SEMANTIC STEP → EXECUTE → OBSERVE → VALIDATE → EVALUATE → ACC
   a tool call. A per-step tool budget and a repetition guard keep a confused model bounded.
 - **VALIDATE** — deterministic checks: configured commands, `git diff --check`, scope violations,
   dependency-manifest changes, workspace hygiene.
-- **EVALUATE** — a structured decision (`accept`, `rollback`, `replan`, `continue`,
+- **EVALUATE** — a structured decision (`accept`, `repair`, `rollback`, `replan`, `continue`,
   `finish_candidate`) with a reason, a progress score and memories to promote.
 - **ACCEPT** — checkpoint commit `gcae: <goal>`, working memory settled into durable memory.
 - **ROLLBACK** — the candidate is discarded, the lesson is stored as immutable memory, the step is
   replaced by a replanned one.
-- **VERIFY** — every success criterion is checked again on the final tree before the run may
-  complete.
+- **VERIFY** — every success criterion is checked again on the final tree and mapped to ledger
+  evidence before the run may complete: PASS needs support, no evidence is INSUFFICIENT,
+  contradiction is FAIL.
 - **RECOVER** — if the run is about to give up (stagnation, unusable provider output, exhausted
   budget, or an unexpected exception), the recovery advisor reads the run's own trace and returns a `Diagnosis`: root cause,
   one corrective instruction, and a strategy. `replan` queues the correction as the next step and
@@ -186,6 +192,8 @@ models and tools run, and never blocks on Git, SQLite or the provider.
 | `gcae inspect <run-id>` | objective, plan, verification, merge state (`--json` for the raw state) |
 | `gcae merge <repo> <run-id>` | merge a run branch later, resolving conflicts through the agent |
 | `gcae undo <repo> <run-id>` | reverse a recorded merge |
+| `gcae input <repo> <run-id> <text>` | answer a live process waiting for input |
+| `gcae prune [--keep N] [--older-than DAYS] [--dry-run] [--force]` | delete old run records; never live runs, recorded merges, repos or worktrees |
 
 Exit codes: `0` only when a run completed **and** its work reached your checkout; `1` for handled
 errors, failed runs, or a merge that did not happen; `2` for usage errors.
@@ -204,6 +212,8 @@ errors, failed runs, or a merge that did not happen; `2` for usage errors.
 | `runtime.merge_accepted_on_failure` | `true` | hand over checkpoints a failed run accepted (labelled unverified) |
 | `runtime.resolve_merge_conflicts` | `true` | resolve merge conflicts through the agent |
 | `runtime.cleanup_after_merge` | `true` | remove GCAE's worktree once merged |
+| `runtime.require_execution_evidence` | `true` | a step that changed code must run something before acceptance |
+| `runtime.run_retention_days` | – | `gcae prune` deletes runs older than this (CLI `--older-than` overrides) |
 
 See [`config.example.toml`](./config.example.toml) and
 [`docs/CONFIGURATION.md`](./docs/CONFIGURATION.md).
@@ -217,14 +227,14 @@ See [`config.example.toml`](./config.example.toml) and
   `ask_user` pauses the run rather than guessing.
 - **It cannot verify what you never specified.** Without criteria it can only check what the
   planner inferred; pass `--criterion` for the things that matter.
-- **Token figures are estimates** (`chars / 4`), labelled `(est)` everywhere they appear.
-- **Parallel runs in one repository are unsupported**; each run owns one worktree and there is no
-  cross-run lock.
+- **Token figures are estimates** (`chars / 3`), labelled `(est)` everywhere they appear.
+- **Parallel runs in one repository are refused**; each run owns one worktree and a per-repository
+  lock dies with its process. Parallel runs across different repositories are fine.
 
 ## Development
 
 ```bash
-.venv/bin/pytest -q                      # 165 tests
+.venv/bin/pytest -q                      # 286 tests
 .venv/bin/ruff check .                   # lint
 .venv/bin/mypy src/gcae                  # strict typing
 .venv/bin/python tools/tui_demo.py       # dashboard with real git operations, no model calls
@@ -239,9 +249,16 @@ matching `v*` publish a GitHub release with the build artifacts.
 | Document | Contents |
 | --- | --- |
 | [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) | module map, state vs knowledge, data flow |
+| [`docs/TRAJECTORY_MODEL.md`](./docs/TRAJECTORY_MODEL.md) | the trajectory step: attempt as primary entity |
+| [`docs/EVIDENCE_LEDGER.md`](./docs/EVIDENCE_LEDGER.md) | evidence records, supports/contradicts, no scoring |
+| [`docs/VERIFICATION.md`](./docs/VERIFICATION.md) | evidence-backed completion: PASS / FAIL / INSUFFICIENT |
+| [`docs/EXECUTION_KNOWLEDGE_SPLIT.md`](./docs/EXECUTION_KNOWLEDGE_SPLIT.md) | reversible execution, cumulative knowledge |
 | [`docs/STATE_MACHINE.md`](./docs/STATE_MACHINE.md) | phases, allowed transitions, failure routing |
 | [`docs/GIT_EXECUTION.md`](./docs/GIT_EXECUTION.md) | worktrees, checkpoints, merges, conflicts, bootstrap |
 | [`docs/MEMORY_CONTEXT.md`](./docs/MEMORY_CONTEXT.md) | memory kinds, retrieval, context budgeting |
+| [`docs/CONTEXT_RECONSTRUCTION.md`](./docs/CONTEXT_RECONSTRUCTION.md) | projection priorities, pinned data, no summaries |
+| [`docs/FAILURE_RECOVERY.md`](./docs/FAILURE_RECOVERY.md) | failure ladder, escalation, blocked vs failed |
+| [`docs/INTERACTIVE_EXECUTION.md`](./docs/INTERACTIVE_EXECUTION.md) | batch / scripted / PTY, timeouts, waiting-for-user |
 | [`docs/TOOLS.md`](./docs/TOOLS.md) | tool contracts and the command guardrail |
 | [`docs/PROVIDERS.md`](./docs/PROVIDERS.md) | OpenAI-compatible providers, reasoning models, structured output |
 | [`docs/TUI.md`](./docs/TUI.md) | dashboard layout, keys, screens, responsive behavior |

@@ -4,6 +4,20 @@ All notable changes to GCAE are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] — 2026-09-16
+
+### Changed
+
+- **Headless console output speaks with one voice.** The final `AgentState` JSON is no
+  longer printed on stdout — it is saved to `./result.json` (stdout stays empty for
+  piping; `result.json` is git-ignored). The end-of-run summary and the `gcae list`
+  table use one shared column alignment, runtime log lines use the unified
+  `gcae LEVEL:` prefix, the config notice reads `gcae: using config <file>`, and a
+  blank line separates the event stream from the final report.
+- **`gcae run --help` documents everything.** Every subcommand and flag carries a
+  description (`run`, `resume` and `undo` had none), `--request` shows a clean
+  `-p TEXT` metavar, and `run --help` ends with copy-pasteable examples.
+
 ## [0.7.0] — 2026-09-16
 
 ### Added

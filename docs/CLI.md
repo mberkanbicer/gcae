@@ -38,7 +38,7 @@ exact `--criterion` to add. Provider failures report the underlying cause (conne
 instead of a generic message. `run` and `resume` open the dashboard on a terminal — unless a
 request was given on the command line, which runs headlessly; non-interactive environments
 (or `--headless`) get the event log on stderr plus the final
-`AgentState` JSON on stdout. The summary line reports status, accepted steps, verification,
+`AgentState` JSON in `./result.json` (stdout stays empty). The summary line reports status, accepted steps, verification,
 worktree and branch/merge state.
 
 ## Criteria

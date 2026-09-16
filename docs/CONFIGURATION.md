@@ -4,7 +4,7 @@ One TOML file, read with `tomllib`. Every field below is implemented; there are 
 options. `config.example.toml` is the copy-ready template.
 
 **Which file?** Without `--config`, GCAE looks at `$GCAE_CONFIG`, then `./config.toml`, then
-`~/.config/gcae/config.toml`, and prints the one it used (`gcae: config config.toml`). If none of
+`~/.config/gcae/config.toml`, and prints the one it used (`gcae: using config config.toml`). If none of
 them exists the built-in defaults apply — including the *fake* provider, and `run`/`resume` say so
 rather than failing later with a confusing model error.
 

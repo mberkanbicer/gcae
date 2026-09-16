@@ -54,8 +54,14 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     def add_runtime_flags(sub: argparse.ArgumentParser) -> None:
-        sub.add_argument("--config", type=Path)
-        sub.add_argument("--runtime-dir", type=Path)
+        sub.add_argument(
+            "--config", type=Path, help="config file to use instead of auto-discovery"
+        )
+        sub.add_argument(
+            "--runtime-dir",
+            type=Path,
+            help="directory for runs, worktrees and memory (defaults from config)",
+        )
         mode = sub.add_mutually_exclusive_group()
         sub.add_argument(
             "--no-auto-bootstrap",
@@ -65,8 +71,22 @@ def build_parser() -> argparse.ArgumentParser:
         mode.add_argument("--tui", action="store_true", help="force the interactive TUI")
         mode.add_argument("--headless", action="store_true", help="force non-interactive output")
 
-    run = subparsers.add_parser("run")
-    run.add_argument("repository", type=Path)
+    run = subparsers.add_parser(
+        "run",
+        help="start a run: plan the task, execute it in an isolated worktree, verify it",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "examples:\n"
+            '  gcae run ~/src/proj "Add a --dry-run flag to the importer"\n'
+            '  gcae run ~/src/proj -p "Fix the parser" '
+            '--criterion "command succeeds: pytest -q"\n'
+            "  gcae run ~/src/proj --tui\n"
+            "a request on the command line runs headlessly and saves ./result.json"
+        ),
+    )
+    run.add_argument(
+        "repository", type=Path, help="path to the repository root to work on"
+    )
     run.add_argument(
         "request",
         nargs="?",
@@ -77,21 +97,34 @@ def build_parser() -> argparse.ArgumentParser:
         "--request",
         "-p",
         dest="request_flag",
+        metavar="TEXT",
         default=None,
         help="task description (same as the positional form; a request on the command "
         "line runs headlessly — pass --tui to open the TUI with it pre-filled)",
     )
     add_runtime_flags(run)
-    run.add_argument("--constraint", action="append", default=[])
-    run.add_argument("--criterion", action="append", default=[])
+    run.add_argument(
+        "--constraint",
+        action="append",
+        default=[],
+        help="a hard constraint the work must respect (repeatable)",
+    )
+    run.add_argument(
+        "--criterion",
+        action="append",
+        default=[],
+        help="a checkable success criterion, e.g. 'command succeeds: pytest -q' (repeatable)",
+    )
     run.add_argument(
         "--merge", action="store_true", help="merge the verified branch without asking"
     )
     run.add_argument("--no-merge", action="store_true", help="never merge the run branch")
 
-    resume = subparsers.add_parser("resume")
-    resume.add_argument("repository", type=Path)
-    resume.add_argument("run_id")
+    resume = subparsers.add_parser(
+        "resume", help="continue a stopped, failed or waiting run where it left off"
+    )
+    resume.add_argument("repository", type=Path, help="path to the repository root")
+    resume.add_argument("run_id", help="run id from `gcae list`")
     resume.add_argument(
         "--force",
         action="store_true",
@@ -102,28 +135,54 @@ def build_parser() -> argparse.ArgumentParser:
     input_parser = subparsers.add_parser(
         "input", help="send input to a process waiting for the user"
     )
-    input_parser.add_argument("repository", type=Path)
-    input_parser.add_argument("run_id")
+    input_parser.add_argument("repository", type=Path, help="path to the repository root")
+    input_parser.add_argument("run_id", help="run id from `gcae list`")
     input_parser.add_argument("text", help="the value the running process is waiting for")
-    input_parser.add_argument("--config", type=Path)
-    input_parser.add_argument("--runtime-dir", type=Path)
+    input_parser.add_argument(
+        "--config", type=Path, help="config file to use instead of auto-discovery"
+    )
+    input_parser.add_argument(
+        "--runtime-dir",
+        type=Path,
+        help="directory for runs, worktrees and memory (defaults from config)",
+    )
     input_parser.add_argument("--headless", action="store_true", help=argparse.SUPPRESS)
 
     listing = subparsers.add_parser("list", help="list known runs")
-    listing.add_argument("--config", type=Path)
-    listing.add_argument("--runtime-dir", type=Path)
+    listing.add_argument(
+        "--config", type=Path, help="config file to use instead of auto-discovery"
+    )
+    listing.add_argument(
+        "--runtime-dir",
+        type=Path,
+        help="directory for runs, worktrees and memory (defaults from config)",
+    )
 
     inspect = subparsers.add_parser("inspect", help="show a run summary")
-    inspect.add_argument("run_id")
-    inspect.add_argument("--config", type=Path)
-    inspect.add_argument("--runtime-dir", type=Path)
+    inspect.add_argument("run_id", help="run id from `gcae list`")
+    inspect.add_argument(
+        "--config", type=Path, help="config file to use instead of auto-discovery"
+    )
+    inspect.add_argument(
+        "--runtime-dir",
+        type=Path,
+        help="directory for runs, worktrees and memory (defaults from config)",
+    )
     inspect.add_argument("--json", action="store_true", help="dump the full persisted state")
 
-    undo = subparsers.add_parser("undo")
-    undo.add_argument("repository", type=Path)
-    undo.add_argument("run_id")
-    undo.add_argument("--config", type=Path)
-    undo.add_argument("--runtime-dir", type=Path)
+    undo = subparsers.add_parser(
+        "undo", help="reverse a run's merge, restoring the checkout to its prior state"
+    )
+    undo.add_argument("repository", type=Path, help="path to the repository root")
+    undo.add_argument("run_id", help="run id from `gcae list`")
+    undo.add_argument(
+        "--config", type=Path, help="config file to use instead of auto-discovery"
+    )
+    undo.add_argument(
+        "--runtime-dir",
+        type=Path,
+        help="directory for runs, worktrees and memory (defaults from config)",
+    )
 
     prune = subparsers.add_parser("prune", help="delete the oldest run records")
     prune.add_argument(
@@ -141,16 +200,28 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="also prune runs older than this many days (overrides [runtime] run_retention_days)",
     )
-    prune.add_argument("--config", type=Path)
-    prune.add_argument("--runtime-dir", type=Path)
+    prune.add_argument(
+        "--config", type=Path, help="config file to use instead of auto-discovery"
+    )
+    prune.add_argument(
+        "--runtime-dir",
+        type=Path,
+        help="directory for runs, worktrees and memory (defaults from config)",
+    )
 
     merge = subparsers.add_parser(
         "merge", help="merge a completed run branch into the current branch"
     )
-    merge.add_argument("repository", type=Path)
-    merge.add_argument("run_id")
-    merge.add_argument("--config", type=Path)
-    merge.add_argument("--runtime-dir", type=Path)
+    merge.add_argument("repository", type=Path, help="path to the repository root")
+    merge.add_argument("run_id", help="run id from `gcae list`")
+    merge.add_argument(
+        "--config", type=Path, help="config file to use instead of auto-discovery"
+    )
+    merge.add_argument(
+        "--runtime-dir",
+        type=Path,
+        help="directory for runs, worktrees and memory (defaults from config)",
+    )
     return parser
 
 
@@ -271,6 +342,17 @@ def _run_files(state: AgentState, repo: GitRepository) -> list[str]:
         return list(validation.changed_files) if validation is not None else []
 
 
+def _aligned(rows: list[tuple[str, str]]) -> str:
+    """Render `label: value` rows with one shared colon column (plain ASCII, pipe-safe)."""
+    width = max(len(label) for label, _ in rows)
+    lines = []
+    for label, value in rows:
+        first, *rest = value.split("\n")
+        lines.append(f"  {label:<{width}}: {first}")
+        lines.extend(f"  {' ' * width}  {line}" for line in rest)
+    return "\n".join(lines)
+
+
 def _summary(state: AgentState, files: list[str] | None = None) -> str:
     files = files or []
     verification = state.last_verification
@@ -280,43 +362,47 @@ def _summary(state: AgentState, files: list[str] | None = None) -> str:
         passed = sum(1 for item in verification.criteria if item.passed)
         criteria = f"{passed}/{len(verification.criteria)} criteria passed"
     if state.merge is None and not files:
-        branch = f"branch: {state.branch} (no file changes; nothing to merge)"
+        branch = f"{state.branch} (no file changes; nothing to merge)"
     elif state.merge is None:
         branch = (
-            f"branch: {state.branch} (not merged yet — GCAE merges automatically; "
+            f"{state.branch} (not merged yet — GCAE merges automatically; "
             f"run 'gcae merge {state.source_repo} {state.run_id}' if it stayed pending)"
         )
     else:
         branch = (
-            f"branch: {state.branch} merged into {state.merge.target_branch} "
+            f"{state.branch} merged into {state.merge.target_branch} "
             f"(undo: gcae undo {state.source_repo} {state.run_id})"
         )
+    rows = [
+        ("accepted steps", f"{state.accepted_steps}, commit: {state.accepted_commit or 'none'}"),
+        ("verification", criteria),
+        ("worktree", f"{state.worktree}"),
+        ("branch", branch),
+    ]
     if files:
         listing = ", ".join(files[:5]) + (f" (+{len(files) - 5} more)" if len(files) > 5 else "")
-        branch = f"{branch}\nfiles: {listing}"
+        rows.append(("files", listing))
     if not files:
-        branch = f"{branch}\ndocuments: none — the run produced no files"
+        rows.append(("documents", "none — the run produced no files"))
     elif state.merge is not None:
-        branch = f"{branch}\ndocuments: {state.source_repo} (in your working tree now)"
+        rows.append(("documents", f"{state.source_repo} (in your working tree now)"))
     else:
-        branch = (
-            f"{branch}\ndocuments: {state.worktree} (worktree on branch {state.branch}; "
-            "nothing is in your checkout until GCAE merges it)"
+        rows.append(
+            (
+                "documents",
+                f"{state.worktree} (worktree on branch {state.branch}; "
+                "nothing is in your checkout until GCAE merges it)",
+            )
         )
-    question = ""
     if state.pending_question:
-        question = (
-            f"\nquestion: {state.pending_question}"
-            f"\nanswer with: gcae resume {state.source_repo} {state.run_id} "
-            "(or press i in the dashboard)"
+        rows.append(("question", state.pending_question))
+        rows.append(
+            (
+                "answer with",
+                f"gcae resume {state.source_repo} {state.run_id} (or press i in the dashboard)",
+            )
         )
-    return (
-        f"run {state.run_id}: {state.status}\n"
-        f"accepted steps: {state.accepted_steps}, commit: {state.accepted_commit or 'none'}\n"
-        f"verification: {criteria}\n"
-        f"worktree: {state.worktree}\n"
-        f"{branch}{question}"
-    )
+    return f"run {state.run_id}: {state.status}\n" + _aligned(rows)
 
 
 def _state_path(runtime_dir: Path, run_id: str) -> Path:
@@ -475,12 +561,28 @@ def _list_runs(runtime_dir: Path) -> None:
         print("no runs found")
         return
     rows.sort(key=lambda state: state.updated_at, reverse=True)
-    print(f"{'run id':<14} {'status':<18} {'steps':>5}  {'updated':<20} objective")
-    for state in rows:
-        objective = state.objective.replace("\n", " ")[:60]
+    table = [
+        (
+            state.run_id,
+            f"{state.status}",
+            str(state.accepted_steps),
+            state.updated_at.isoformat(timespec="seconds"),
+            state.objective.replace("\n", " ")[:60],
+        )
+        for state in rows
+    ]
+    width_id = max(len("run id"), max(len(row[0]) for row in table))
+    width_status = max(len("status"), max(len(row[1]) for row in table))
+    width_steps = max(len("steps"), max(len(row[2]) for row in table))
+    width_updated = max(len("updated"), max(len(row[3]) for row in table))
+    print(
+        f"{'run id':<{width_id}}  {'status':<{width_status}}  "
+        f"{'steps':>{width_steps}}  {'updated':<{width_updated}}  objective"
+    )
+    for run_id, status, steps, updated, objective in table:
         print(
-            f"{state.run_id:<14} {state.status:<18} {state.accepted_steps:>5}  "
-            f"{state.updated_at.isoformat(timespec='seconds'):<20} {objective}"
+            f"{run_id:<{width_id}}  {status:<{width_status}}  "
+            f"{steps:>{width_steps}}  {updated:<{width_updated}}  {objective}"
         )
 
 
@@ -683,13 +785,13 @@ def main(argv: list[str] | None = None) -> None:
                 "request given twice: pass the task either as the positional or as --request"
             )
         args.request = args.request_flag
-    logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(level=logging.WARNING, format="gcae %(levelname)s: %(message)s")
     logging.getLogger("gcae").setLevel(logging.INFO)
     try:
         chosen = Path(args.config).expanduser() if args.config else discover_config()
         config = load_config(chosen)
         if chosen is not None:
-            print(f"gcae: config {chosen}", file=sys.stderr)
+            print(f"gcae: using config {chosen}", file=sys.stderr)
         elif config.provider.kind == "fake" and args.command in {"run", "resume"}:
             print(
                 "gcae: no config file found (looked for ./config.toml and "
@@ -849,7 +951,16 @@ def main(argv: list[str] | None = None) -> None:
     except (GitError, OSError):
         validation = result.latest_validation
         files = list(validation.changed_files) if validation is not None else []
-    print(json.dumps(result.model_dump(mode="json"), indent=2, sort_keys=True))
+    result_path = Path("result.json")
+    try:
+        result_path.write_text(
+            json.dumps(result.model_dump(mode="json"), indent=2, sort_keys=True) + "\n"
+        )
+    except OSError as exc:
+        print(f"gcae: error: cannot write {result_path}: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
+    print(file=sys.stderr)
+    print(f"gcae: full result in {result_path}", file=sys.stderr)
     print(_summary(result, files), file=sys.stderr)
     if result.status != "complete":
         # a scripted caller must be able to tell an unfinished run from a finished one

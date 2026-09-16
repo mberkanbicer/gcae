@@ -6,7 +6,7 @@ options. `config.example.toml` is the copy-ready template.
 ## Which file?
 
 Without `--config`, GCAE looks at `$GCAE_CONFIG`, then `./config.toml`, then
-`~/.config/gcae/config.toml`, and prints the file it used (`gcae: config config.toml`). If none
+`~/.config/gcae/config.toml`, and prints the file it used (`gcae: using config config.toml`). If none
 exists the built-in defaults apply — including the *fake* provider, and `run`/`resume` say so rather
 than failing later with a confusing model error.
 

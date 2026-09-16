@@ -483,7 +483,7 @@ def test_summary_reports_where_the_documents_are(tmp_path: Path, capsys) -> None
     assert files == ["answer.txt"]
 
     summary = _summary(runtime.state, files)
-    assert "files: answer.txt" in summary
+    assert "  files         : answer.txt" in summary
     assert "worktree on branch" in summary
     assert "nothing is in your checkout until GCAE merges it" in summary
     assert str(runtime.state.worktree) in summary
@@ -495,7 +495,7 @@ def test_summary_reports_where_the_documents_are(tmp_path: Path, capsys) -> None
     files_after_merge = _run_files(runtime.state, runtime.repo)
     assert files_after_merge == ["answer.txt"]
     merged_summary = _summary(runtime.state, files_after_merge)
-    assert f"documents: {tmp_path / 'repo'} (in your working tree now)" in merged_summary
+    assert f"  documents     : {tmp_path / 'repo'} (in your working tree now)" in merged_summary
     assert (tmp_path / "repo" / "answer.txt").exists()
 
 
@@ -591,7 +591,7 @@ def test_cli_handles_every_git_step_without_user_action(tmp_path: Path, capsys) 
     # 5. nothing in the summary tells the user to run git
     summary = _summary(state, _run_files(state, repo_handle))
     assert "git merge" not in summary
-    assert "documents: " in summary and str(repo) in summary
+    assert "  documents     : " in summary and str(repo) in summary
 
 
 def test_no_change_run_cleans_up_and_says_so(tmp_path: Path, capsys) -> None:
@@ -626,7 +626,7 @@ def test_no_change_run_cleans_up_and_says_so(tmp_path: Path, capsys) -> None:
 
     summary = _summary(state, [])
     assert "no file changes; nothing to merge" in summary
-    assert "documents: none — the run produced no files" in summary
+    assert "  documents     : none — the run produced no files" in summary
 
 
 def _conflicting_repo(tmp_path: Path) -> tuple[Path, str, str]:

@@ -36,27 +36,32 @@ runs headless in CI.
 ```console
 $ gcae run ~/csv-parser "fix quoted records across chunk boundaries" --headless
 ...
+gcae: full result in result.json
 run d1ae6b3af14d: complete
-accepted steps: 1, commit: d176e5f2effb87af4108bafb4ea0b5d699fecc59
-verification: 1/1 criteria passed
-worktree: ~/.local/state/gcae/worktrees/d1ae6b3af14d
-branch: gcae/d1ae6b3af14d merged into main (undo: gcae undo ~/csv-parser d1ae6b3af14d)
-files: parser.py
-documents: ~/csv-parser (in your working tree now)
+  accepted steps: 1, commit: d176e5f2effb87af4108bafb4ea0b5d699fecc59
+  verification  : 1/1 criteria passed
+  worktree      : ~/.local/state/gcae/worktrees/d1ae6b3af14d
+  branch        : gcae/d1ae6b3af14d merged into main (undo: gcae undo ~/csv-parser d1ae6b3af14d)
+  files         : parser.py
+  documents     : ~/csv-parser (in your working tree now)
 ```
 
 Every line above is production output, not a mock: the run merged its branch, removed its own
-worktree, and named the folder holding the file. `gcae undo` puts the branch back.
+worktree, and named the folder holding the file. `gcae undo` puts the branch back. The full
+state JSON lands in `./result.json`; stdout stays empty.
 
 A step that fails validation or evaluation never reaches your branch:
 
 ```console
 $ gcae run ~/project "rework the parser" --headless
-WARNING gcae: rollback to 81aac02
+gcae WARNING: rollback to 81aac02ef739
 ...
 run 3f81c2d4: failed: step budget exhausted after 8 iterations (raise [runtime] max_steps ...)
-files: (no file changes)
-documents: none — the run produced no files
+  accepted steps: 0, commit: none
+  verification  : 0/1 criteria passed
+  worktree      : ~/.local/state/gcae/worktrees/3f81c2d4
+  branch        : gcae/3f81c2d4 (no file changes; nothing to merge)
+  documents     : none — the run produced no files
 ```
 
 ## Why it is different
@@ -150,7 +155,7 @@ gcae run ~/src/project "add a --dry-run flag to the importer" \
   --criterion "command succeeds: pytest -q" \
   --config config.toml
 
-# non-interactive: state JSON on stdout, log on stderr
+# non-interactive: log on stderr, full state JSON in ./result.json, stdout stays empty
 gcae run ~/src/project "add a --dry-run flag" --headless --config config.toml
 ```
 

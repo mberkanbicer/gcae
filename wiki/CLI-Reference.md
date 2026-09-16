@@ -7,7 +7,7 @@ gcae [-h] [--version] {run,resume,list,inspect,undo,merge} ...
 ## Configuration discovery
 
 Without `--config`, GCAE uses `$GCAE_CONFIG`, then `./config.toml`, then
-`~/.config/gcae/config.toml`, and prints the file it took (`gcae: config config.toml`). With none
+`~/.config/gcae/config.toml`, and prints the file it took (`gcae: using config config.toml`). With none
 present the built-in defaults apply — including the *fake* provider, which is why `run` and `resume`
 say so instead of failing later.
 
@@ -107,15 +107,22 @@ though its accepted work is intact.
 ## Reading a summary
 
 ```
-gcae: config config.toml
-gcae: merged gcae/2f4ac1b0c3e9 into main (b21f0aa1 -> 5c01d9ab)
-gcae: undo with: gcae undo /repo 2f4ac1b0c3e9
+gcae: using config config.toml
+...
+gcae: full result in result.json
+run 2f4ac1b0c3e9: complete
+  accepted steps: 1, commit: 5c01d9ab1e2f
+  verification  : 1/1 criteria passed
+  worktree      : ~/.local/state/gcae/worktrees/2f4ac1b0c3e9
+  branch        : gcae/2f4ac1b0c3e9 merged into main (undo: gcae undo /repo 2f4ac1b0c3e9)
+  files         : app.py
+  documents     : /repo (in your working tree now)
 ```
 
 | Line | Meaning |
 | --- | --- |
-| `gcae: config <file>` | which configuration was used |
-| `pending question:` | the run needs your decision; answer with `gcae resume` or `i` in the dashboard |
+| `gcae: using config <file>` | which configuration was used |
+| `question:` / `answer with:` | the run needs your decision; answer with `gcae resume` or `i` in the dashboard |
 | `degraded: …` | a subsystem failed and the run continued without it |
 | `gcae: error: …` | the failure reason; accepted commits are still on the branch |
 | `gcae: unexpected error: …` | an unhandled bug — the run directory and commits are intact |

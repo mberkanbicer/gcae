@@ -33,6 +33,7 @@ config.toml
 # GCAE runtime data (keep it outside repositories; ignored in case one lands here)
 memory.db
 *.sqlite3
+result.json
 
 # Editors and operating systems
 .idea/

@@ -155,6 +155,124 @@ def test_a_cli_request_runs_headlessly_even_in_a_terminal(
     assert "failed" in capsys.readouterr().err
 
 
+def test_headless_run_saves_result_json_instead_of_printing_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """End-of-run JSON goes to ./result.json; stdout stays empty for piping."""
+    import json
+
+    from gcae.cli import main
+
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(SystemExit) as exit_info:
+        main(
+            [
+                "run", str(_cli_repo(tmp_path)), "create the impossible file",
+                "--criterion", "file exists: never-created.txt",
+                "--headless", "--no-merge", "--config", str(_fake_config(tmp_path)),
+            ]
+        )
+    assert exit_info.value.code == 1
+    payload = json.loads((tmp_path / "result.json").read_text())
+    assert payload["success_criteria"] == ["file exists: never-created.txt"]
+    assert payload["status"].startswith("failed")
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "result.json" in captured.err
+
+
+def test_help_documents_every_command_and_flag(capsys: pytest.CaptureFixture[str]) -> None:
+    """--help is the product surface: every command described, no blank flags, one example."""
+    from gcae.cli import main
+
+    with pytest.raises(SystemExit) as exit_info:
+        main(["--help"])
+    assert exit_info.value.code == 0
+    top = capsys.readouterr().out
+    for description in (
+        "start a run",
+        "continue a stopped",
+        "send input",
+        "list known runs",
+        "show a run summary",
+        "reverse a run's merge",
+        "delete the oldest run records",
+        "merge a completed run branch",
+    ):
+        assert description in top, f"top-level help must describe every command ({description})"
+
+    with pytest.raises(SystemExit) as exit_info:
+        main(["run", "--help"])
+    assert exit_info.value.code == 0
+    run_help = capsys.readouterr().out
+    for text in (
+        "--request, -p TEXT",
+        "a hard constraint",
+        "a checkable success criterion",
+        "directory for runs, worktrees and memory",
+        "examples:",
+        "result.json",
+    ):
+        assert text in run_help, f"run --help must show {text!r}"
+
+
+def test_console_output_aligns_columns(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Summary labels share one colon column; the list table fits its widest row."""
+    from gcae.cli import _list_runs, _summary
+
+    long_status = make_state("run-long", "2026-01-02T10:00:00+00:00")
+    long_status.status = "failed: provider output was unusable, will retry"
+
+    body = _summary(long_status).split("\n")[1:]
+    assert len(body) > 3
+    assert len({line.index(":") for line in body}) == 1
+
+    runtime_dir = tmp_path / "runtime"
+    StateStore(runtime_dir / "runs" / "run-a" / "state.json").save(
+        make_state("run-a", "2026-01-01T10:00:00+00:00")
+    )
+    StateStore(runtime_dir / "runs" / "run-long" / "state.json").save(long_status)
+    _list_runs(runtime_dir)
+    lines = capsys.readouterr().out.split("\n")
+    assert "failed: provider output was unusable, will retry" in lines[1]
+    stamps = {line.index("2026-01-") for line in lines[1:3]}
+    assert len(stamps) == 1, "a long status must not shift the later columns"
+
+
+def test_headless_stderr_speaks_with_one_voice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Every headless stderr line is either a `gcae …` notice or the final summary block."""
+    import logging
+
+    from gcae.cli import main
+
+    formats: dict = {}
+    real_basic_config = logging.basicConfig
+
+    def spy(*args: object, **kwargs: object) -> None:
+        formats.update(kwargs)
+        real_basic_config(*args, **kwargs)
+
+    monkeypatch.setattr(logging, "basicConfig", spy)
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(SystemExit):
+        main(
+            [
+                "run", str(_cli_repo(tmp_path)), "create the impossible file",
+                "--criterion", "file exists: never-created.txt",
+                "--headless", "--no-merge", "--config", str(_fake_config(tmp_path)),
+            ]
+        )
+    assert formats.get("format") == "gcae %(levelname)s: %(message)s"
+    err = capsys.readouterr().err
+    assert "gcae: using config" in err
+    for line in err.split("\n"):
+        if not line.strip():
+            continue
+        assert line.startswith(("gcae", "run ", "  ")), f"stray console line: {line!r}"
+
+
 # ------------------------------------------------------------ prune (run-data retention)
 
 

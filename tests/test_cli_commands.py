@@ -188,7 +188,8 @@ def test_help_documents_every_command_and_flag(capsys: pytest.CaptureFixture[str
     with pytest.raises(SystemExit) as exit_info:
         main(["--help"])
     assert exit_info.value.code == 0
-    top = capsys.readouterr().out
+    # flatten whitespace: help wraps at the terminal width, which differs per environment
+    top = " ".join(capsys.readouterr().out.split())
     for description in (
         "start a run",
         "continue a stopped",
@@ -204,9 +205,12 @@ def test_help_documents_every_command_and_flag(capsys: pytest.CaptureFixture[str
     with pytest.raises(SystemExit) as exit_info:
         main(["run", "--help"])
     assert exit_info.value.code == 0
-    run_help = capsys.readouterr().out
+    # Python ≤3.12 renders '--request TEXT, -p TEXT', ≥3.13 '--request, -p TEXT':
+    # assert the flags and the metavar separately, on flattened whitespace.
+    run_help = " ".join(capsys.readouterr().out.split())
     for text in (
-        "--request, -p TEXT",
+        "--request",
+        "-p TEXT",
         "a hard constraint",
         "a checkable success criterion",
         "directory for runs, worktrees and memory",

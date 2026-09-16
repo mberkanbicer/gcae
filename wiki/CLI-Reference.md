@@ -14,14 +14,18 @@ say so instead of failing later.
 ## `gcae run`
 
 ```
-gcae run <repository> [request] [--config FILE] [--runtime-dir DIR]
+gcae run <repository> [request] [--request TEXT | -p TEXT] [--config FILE] [--runtime-dir DIR]
          [--constraint TEXT]... [--criterion TEXT]...
          [--headless | --tui] [--merge | --no-merge] [--no-auto-bootstrap]
 ```
 
 | Argument | Meaning |
 | --- | --- |
-| `request` | the task in words; omit it in a terminal to be asked interactively |
+| `request` / `--request` / `-p` | the task in words; either spelling works (both is an error) |
+
+A request on the command line runs headlessly — the task is already stated, so the work just
+happens and the summary prints at the end. Omit the request in a terminal to be asked
+interactively, or pass `--tui` to open the dashboard with it pre-filled.
 | `--criterion` | a checkable success criterion (repeatable) — see [Concepts](Concepts) |
 | `--constraint` | a hard constraint the work must respect (repeatable) |
 | `--headless` / `--tui` | force non-interactive output, or force the dashboard |

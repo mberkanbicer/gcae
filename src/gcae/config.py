@@ -36,6 +36,11 @@ class ProviderConfig(BaseModel):
     # with exponential backoff before they can fail a step.
     retries: int = 3
     retry_backoff: float = 2.0
+    # Minimum seconds between HTTP requests to the provider, process-wide. Free-tier APIs
+    # limit requests per minute; the runtime's role fan-out (planner, controller, evaluator,
+    # each with retries) bursts past those limits and the resulting 429s starve a run.
+    # 0 disables pacing. Applies across all provider instances in this process.
+    min_request_interval: float = 0.0
 
 
 class ModelOverride(BaseModel):

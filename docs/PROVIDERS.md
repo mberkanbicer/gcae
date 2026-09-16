@@ -1,8 +1,34 @@
 # Providers
 
 One generic OpenAI-compatible provider serves OpenRouter, Ollama, vLLM, LM Studio and similar
-endpoints. `provider.kind = "http"` or `"openrouter"` selects it; `"fake"` selects the deterministic
+endpoints. `provider.kind = "http"`, `"openrouter"` or `"google"` selects it; `"fake"` selects the deterministic
 offline provider. Unknown kinds are rejected — never silently replaced.
+
+## Google Gemini
+
+`kind = "google"` targets Google's OpenAI-compatible endpoint
+(`https://generativelanguage.googleapis.com/v1beta/openai/`), which supports chat completions,
+streaming and structured output with no provider-code differences. When `base_url` is left at
+its default it is replaced with that endpoint, `model` is required (e.g.
+`model = "gemini-2.5-flash"`), and the key defaults to `api_key_env = "GEMINI_API_KEY"`.
+The native `/v1beta/interactions` API is a different protocol and is rejected with an explicit
+error — point `base_url` at the `/v1beta/openai/` endpoint instead. Gemini thinking models
+obey the same `json_mode = false` guidance as other reasoning models when they deliberate past
+the output budget.
+
+### Measured against the free tier (2026-09)
+
+* **`max_tokens = 65535` answers `503 "high demand"` on every request** (the server will not
+  reserve that much output for a thinking model). 32768 works; 16384 is ample for GCAE's
+  schemas. The 503 body is misleading — it is deterministic, not load.
+* **`reasoning_effort` is rejected with an instant 503** on 3.x models. Do not set it in
+  `[provider.generation]`.
+* **Quota is 20 requests per day per model** (`...FreeTier` quota id), not the published
+  250. One GCAE run spends ~6-15 requests; a debugging session exhausts a day's budget.
+  Rotating `model` moves to a fresh daily budget; a billed key removes the wall.
+* **~10 requests/minute**: set `min_request_interval = 7.0` so the runtime's role fan-out
+  (planner, controller, evaluator, each with retries) stays under the RPM limit instead of
+  fanning a 429 storm that starves the run.
 
 Configurable per provider: `base_url`, `model`, `api_key` or `api_key_env`, `timeout`,
 `context_limit` and `generation` parameters. The HTTP provider posts to `/chat/completions` with

@@ -4,6 +4,37 @@ All notable changes to GCAE are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] — 2026-09-16
+
+### Added
+
+- **Google Gemini provider (`kind = "google"`).** Reuses the OpenAI-compatible provider
+  against Google's `/v1beta/openai/` endpoint (chosen by default when `base_url` is left
+  unset); the native `/v1beta/interactions` URL is rejected with a guided error because it
+  is a different protocol. `model` is required and the key defaults to `GEMINI_API_KEY`.
+  Verified live end to end (fib.py run completed, 2/2 criteria, merged). Measured
+  free-tier behaviour is documented in `docs/PROVIDERS.md`: `max_tokens` above 32768 gets
+  a deterministic 503, `reasoning_effort` gets an instant 503 on 3.x models, the quota is
+  ~20 requests/day/model at ~10 RPM.
+- **Request pacing (`min_request_interval`).** A process-wide pace gate shared by every
+  role provider instance, enforced before each HTTP attempt so planner/controller/evaluator
+  fan-out cannot burst past per-minute rate limits and starve the run in a 429 storm.
+  Provider 429 `Retry-After` is still honoured on top. Live-verified against Gemini
+  (1×429, 0×503 on the completing run).
+- **CLI `--request`/`-p` and headless-by-default.** The task can be passed as a flag instead
+  of the positional (both at once is a usage error), and a request given on the command
+  line now runs headlessly instead of opening the TUI — `--tui` forces the dashboard with
+  it pre-filled. Without a request, terminal behaviour is unchanged (interactive ask).
+- **Tool runtime upgrades.** `search_text` gains `regex`/`include`/`context_lines`/
+  `max_matches`; file writes are atomic (sibling temp + `os.replace`) with
+  validate-all-before-write and rollback for the batch ops; `create_file` refuses to
+  overwrite via `os.link`; `run_command` gains worktree-relative `cwd` and per-command
+  `env`; `fetch_url` resolves DNS once and allows only public addresses (SSRF guard).
+  Documented in `docs/TOOLS.md`.
+- **Prune DB semantics pinned.** A test locks in that `gcae prune` deletes execution
+  records only: the shared `memory.db` ledger (lessons + evidence rows) survives pruning
+  by design — knowledge is cumulative, retrieval stays scoped by `run_id`/`source_repo`.
+
 ## [0.6.2] — 2026-09-16
 
 ### Added

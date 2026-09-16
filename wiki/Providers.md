@@ -21,6 +21,25 @@ A local server needs no key (`base_url = "http://localhost:11434/v1"`). `kind = 
 built-in deterministic provider used by the test suite and the demo scripts; it is the default when
 no configuration is found, which is why GCAE warns instead of failing obscurely.
 
+## Google Gemini
+
+```toml
+[provider]
+kind = "google"
+model = "gemini-2.5-flash"
+api_key_env = "GEMINI_API_KEY"  # the default when no key is set; or set api_key
+```
+
+`base_url` left unset selects Google's OpenAI-compatible endpoint
+(`.../v1beta/openai/`). Pointing it at the native `/v1beta/interactions` API is rejected with
+an explicit error — that is a different protocol. Reuse the same `model` under
+`[models.controller]` / `[models.planner]` for fast JSON-clean roles.
+
+Free-tier gotchas (measured): `max_tokens` above 32768 gets a misleading `503 "high demand"`
+(use 16384); `reasoning_effort` gets an instant 503 on 3.x models; the quota is **20 requests
+per day per model** and ~10/min, so set `min_request_interval = 7.0` and expect roughly one
+debugging session per model per day. A billed key removes all three walls.
+
 ## What GCAE sends
 
 Every call is a fresh, reconstructed prompt: the objective, hard constraints, success criteria, the

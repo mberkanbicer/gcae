@@ -1,27 +1,16 @@
 {
-  "nextId": 5,
+  "nextId": 6,
   "tasks": [
     {
-      "id": "2",
-      "subject": "Add retention TTL to gcae prune",
-      "description": "Add retention TTL to prune: --older-than DAYS filter plus config option, respecting existing guards (live lock, merge record, dry-run). Add CLI tests and docs.",
-      "status": "pending",
+      "id": "5",
+      "subject": "Commit and push the 0.7.0 release",
+      "description": "Stage tracked changes only (git add -u, never the key-bearing config.openrouter.toml), commit 0.7.0, push to origin",
+      "status": "in_progress",
       "metadata": {},
       "blocks": [],
       "blockedBy": [],
-      "createdAt": 1789460927598,
-      "updatedAt": 1789460927598
-    },
-    {
-      "id": "4",
-      "subject": "Verify prune DB semantics and full gates",
-      "description": "Verify prune vs shared DB semantics (run dirs vs memory.db/evidence rows), document the decision, run full gates (pytest, ruff, mypy).",
-      "status": "pending",
-      "metadata": {},
-      "blocks": [],
-      "blockedBy": [],
-      "createdAt": 1789460927598,
-      "updatedAt": 1789460927598
+      "createdAt": 1789553247340,
+      "updatedAt": 1789553250660
     }
   ]
 }

@@ -1,6 +1,6 @@
 # Tools
 
-The registry exposes eight tools. Arguments are validated by the runtime; unknown tool names
+The registry exposes fourteen tools. Arguments are validated by the runtime; unknown tool names
 return a failed `ToolResult` and never execute. Git checkpoint operations are runtime-owned and not
 available to the model.
 
@@ -8,11 +8,17 @@ available to the model.
 | --- | --- | --- |
 | `list_files` | `{path?, pattern?}` | list files under a worktree-relative path |
 | `read_file` | `{path}` | read a UTF-8 text file |
-| `search_text` | `{query, path?}` | literal text search; skips `.git`, caches and files > 1 MB |
+| `read_files` | `{paths}` | read several files at once; partial results with per-file headers, `success=false` when any failed |
+| `search_text` | `{query, path?, regex?, include?, context_lines?, max_matches?}` | literal text search by default; `regex: true` for patterns, `include` glob (e.g. `**/*.py`) to narrow files, `context_lines` for surrounding lines (`-` prefix), `max_matches` cap (default 200); skips `.git`, caches and files > 1 MB |
 | `apply_patch` | `{patch}` | `git apply --whitespace=error` with header path checks |
 | `write_file` | `{path, content}` | overwrite or create a text file |
+| `write_files` | `{files: [{path, content}]}` | write several files; all-or-nothing with rollback |
 | `create_file` | `{path, content}` | create a new file; refuses to overwrite |
-| `run_command` | `{command, timeout?}` | shell command in the worktree |
+| `make_dirs` | `{paths}` | create directories; existing dirs are fine, existing files fail |
+| `edit_file` | `{path, old_text, new_text?, replace_all?}` | exact-text replacement; fails when absent or ambiguous |
+| `edit_files` | `{edits: [{path, old_text, ...}]}` | batch exact-text edits; validated before anything is written, rollback on failure |
+| `fetch_url` | `{url, timeout?, max_bytes?}` | fetch one public http(s) URL as text; truncated past `max_bytes` |
+| `run_command` | `{command, timeout?, cwd?, env?}` | shell command in the worktree; `cwd` is a worktree-relative directory, `env` maps extra variable names to values |
 | `run_tests` | `{}` | runs the configured `validation.commands` |
 
 Every result carries `success`, `output`, `error`, `exit_code`, `duration_ms`, `changed_files` and,
@@ -32,6 +38,12 @@ depending on the program:
 `run_command` also accepts `purpose` (a human sentence for the UI) and `timeout`. Commands run with
 `PYTHONUNBUFFERED=1` in their own process group, and a timeout terminates the whole group
 (SIGTERM, then SIGKILL), so no orphan is left behind.
+
+## Reliability
+
+File writes go through a sibling temp file and `os.replace`, so a crash never leaves a
+half-written file. `create_file` links instead of replacing, so a file that appears between
+the existence check and the write still fails atomically instead of being overwritten.
 
 ## Boundaries
 

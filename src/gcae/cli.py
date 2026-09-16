@@ -29,6 +29,12 @@ from .verifier import FinalVerifier
 
 ROLES = ("controller", "planner", "evaluator", "verifier", "escalation", "recovery")
 
+#: provider kinds served by the OpenAI-compatible HTTP provider
+HTTP_KINDS = frozenset({"http", "openrouter", "google"})
+#: Google's OpenAI-compatible endpoint (chat completions, streaming, structured output).
+#: The native `/v1beta/interactions` API is a different protocol and is not supported.
+GOOGLE_OPENAI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+
 
 def _version() -> str:
     """The installed distribution version, so packaging metadata stays the single source."""
@@ -66,6 +72,14 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="?",
         default=None,
         help="task description; optional in TUI mode, where it is requested interactively",
+    )
+    run.add_argument(
+        "--request",
+        "-p",
+        dest="request_flag",
+        default=None,
+        help="task description (same as the positional form; a request on the command "
+        "line runs headlessly — pass --tui to open the TUI with it pre-filled)",
     )
     add_runtime_flags(run)
     run.add_argument("--constraint", action="append", default=[])
@@ -142,24 +156,45 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _provider(provider_config: ProviderConfig) -> Provider:
     kind = provider_config.kind.lower()
-    if kind in {"http", "openrouter"}:
+    if kind in HTTP_KINDS:
+        base_url = provider_config.base_url
+        model = provider_config.model
+        api_key_env = provider_config.api_key_env
+        if kind == "google":
+            fields = ProviderConfig.model_fields
+            if base_url == fields["base_url"].default:
+                base_url = GOOGLE_OPENAI_BASE_URL
+            elif (
+                (urlparse(base_url).hostname or "") == "generativelanguage.googleapis.com"
+                and not urlparse(base_url).path.startswith("/v1beta/openai")
+            ):
+                raise ValueError(
+                    f"kind 'google' needs the OpenAI-compatible endpoint "
+                    f"({GOOGLE_OPENAI_BASE_URL}), got {base_url!r}; the native "
+                    "`/v1beta/interactions` API is a different protocol"
+                )
+            if model == fields["model"].default:
+                raise ValueError(
+                    'provider.model is required for kind "google" '
+                    "(e.g. model = \"gemini-2.5-flash\")"
+                )
+            if provider_config.api_key is None and api_key_env is None:
+                api_key_env = "GEMINI_API_KEY"
         local_hosts = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
         api_key = provider_config.api_key or (
-            os.environ.get(provider_config.api_key_env)
-            if provider_config.api_key_env
-            else None
+            os.environ.get(api_key_env) if api_key_env else None
         )
-        host = urlparse(provider_config.base_url).hostname or ""
+        host = urlparse(base_url).hostname or ""
         if not api_key and host not in local_hosts:
             raise ValueError(
-                f"no API key configured for {provider_config.base_url}; "
+                f"no API key configured for {base_url}; "
                 "set provider.api_key or provider.api_key_env"
             )
         return OpenAICompatibleProvider(
-            base_url=provider_config.base_url,
-            model=provider_config.model,
+            base_url=base_url,
+            model=model,
             api_key=provider_config.api_key,
-            api_key_env=provider_config.api_key_env,
+            api_key_env=api_key_env,
             timeout=provider_config.timeout,
             context_limit=provider_config.context_limit,
             generation=provider_config.generation.model_dump(),
@@ -168,6 +203,7 @@ def _provider(provider_config: ProviderConfig) -> Provider:
             stall_timeout=provider_config.stall_timeout,
             retries=provider_config.retries,
             retry_backoff=provider_config.retry_backoff,
+            min_request_interval=provider_config.min_request_interval,
         )
     if kind == "fake":
         return FakeProvider(
@@ -215,7 +251,7 @@ def _planner(config: Config, provider: Provider) -> Planner | LLMPlanner:
     if kind == "auto":
         kind = (
             "llm"
-            if config.provider.kind.lower() in {"http", "openrouter"}
+            if config.provider.kind.lower() in HTTP_KINDS
             else "deterministic"
         )
     if kind == "deterministic":
@@ -611,6 +647,9 @@ def _wants_tui(args: argparse.Namespace) -> bool:
         return False
     if getattr(args, "tui", False):
         return True
+    # a full request on the command line is a non-interactive instruction: run it
+    if getattr(args, "request", None):
+        return False
     return sys.stdout.isatty() and sys.stdin.isatty()
 
 
@@ -638,6 +677,12 @@ def _run_tui(
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if getattr(args, "request_flag", None) is not None:
+        if args.request is not None:
+            parser.error(
+                "request given twice: pass the task either as the positional or as --request"
+            )
+        args.request = args.request_flag
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
     logging.getLogger("gcae").setLevel(logging.INFO)
     try:

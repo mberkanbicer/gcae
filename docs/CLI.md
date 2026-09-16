@@ -1,7 +1,8 @@
 # CLI
 
 ```
-gcae run <repository> [<request>] [--config PATH] [--runtime-dir PATH]
+gcae run <repository> [<request>] [--request TEXT | -p TEXT]
+         [--config PATH] [--runtime-dir PATH]
          [--constraint TEXT]... [--criterion TEXT]... [--merge|--no-merge]
          [--no-auto-bootstrap] [--tui|--headless]
 gcae resume <repository> <run-id> [--config PATH] [--runtime-dir PATH] [--tui|--headless]
@@ -11,9 +12,12 @@ gcae merge <repository> <run-id> [--config PATH] [--runtime-dir PATH]
 gcae undo <repository> <run-id> [--config PATH] [--runtime-dir PATH]
 ```
 
-The request is optional in TUI mode: `gcae run <repository>` opens the TUI and asks for the task,
-and the planner derives the success criteria from it. Headless mode requires a request and exits 1
-without one.
+The request is the task in words, given either as the positional argument or as `--request`/`-p`
+(both spellings are the same slot; giving both is an error). **A request on the command line runs
+headlessly** — the full task is already stated, so `gcae run <repo> "task"` just does the work and
+prints the summary; pass `--tui` to open the dashboard with it pre-filled instead. Without a
+request, a terminal opens the TUI and asks for the task interactively, while non-interactive
+environments require `--request` and exit 1 without one.
 
 ## Preconditions (checked with actionable errors)
 
@@ -31,8 +35,9 @@ without one.
 `--criterion`, GCAE falls back to a deterministic single-step plan and says so in the timeline
 (`! planner unavailable · single-step plan · <reason>`); without criteria it stops and tells you the
 exact `--criterion` to add. Provider failures report the underlying cause (connection refused, HTTP status, invalid JSON)
-instead of a generic message. `run` and `resume` open the dashboard on a terminal;
-non-interactive environments (or `--headless`) get the event log on stderr plus the final
+instead of a generic message. `run` and `resume` open the dashboard on a terminal — unless a
+request was given on the command line, which runs headlessly; non-interactive environments
+(or `--headless`) get the event log on stderr plus the final
 `AgentState` JSON on stdout. The summary line reports status, accepted steps, verification,
 worktree and branch/merge state.
 

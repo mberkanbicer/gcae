@@ -64,13 +64,95 @@ def test_list_runs_reports_empty_state(tmp_path: Path, capsys) -> None:
     assert "no runs found" in capsys.readouterr().out
 
 
-def test_headless_run_requires_a_request(tmp_path: Path, capsys) -> None:
+def test_headless_run_requires_a_request(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
     from gcae.cli import main
 
+    # config discovery is cwd-dependent: a config.toml in the checkout must not leak in
+    monkeypatch.chdir(tmp_path)
     with pytest.raises(SystemExit) as exit_info:
         main(["run", str(tmp_path / "repo"), "--headless"])
     assert exit_info.value.code == 1
     assert "request is required" in capsys.readouterr().err
+
+
+def _cli_repo(tmp_path: Path) -> Path:
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    (repo / "README.md").write_text("base\n")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(
+        [
+            "git", "-C", str(repo),
+            "-c", "user.name=T", "-c", "user.email=t@e.f",
+            "commit", "-qm", "base",
+        ],
+        check=True,
+    )
+    return repo
+
+
+def _fake_config(tmp_path: Path) -> Path:
+    config = tmp_path / "config.toml"
+    config.write_text(
+        f'[provider]\nkind = "fake"\n\n[runtime]\nstate_dir = "{tmp_path / "state"}"\n'
+    )
+    return config
+
+
+def test_request_flag_reaches_the_runtime_like_the_positional(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--request/-p is an alternative spelling of the positional task argument."""
+    from gcae.cli import main
+
+    repo = _cli_repo(tmp_path)
+    with pytest.raises(SystemExit) as exit_info:
+        main(
+            [
+                "run", str(repo), "--request", "create the impossible file",
+                "--criterion", "file exists: never-created.txt",
+                "--headless", "--no-merge", "--config", str(_fake_config(tmp_path)),
+            ]
+        )
+    assert exit_info.value.code == 1
+    assert "failed" in capsys.readouterr().err
+
+
+def test_request_given_twice_is_rejected(tmp_path: Path) -> None:
+    from gcae.cli import main
+
+    with pytest.raises(SystemExit) as exit_info:
+        main(["run", str(_cli_repo(tmp_path)), "task one", "--request", "task two", "--headless"])
+    assert exit_info.value.code == 2  # argparse usage error, before any run starts
+
+
+def test_a_cli_request_runs_headlessly_even_in_a_terminal(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A full task on the command line is a non-interactive instruction: no TUI."""
+    from gcae.cli import main
+
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True, raising=False)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True, raising=False)
+    monkeypatch.setattr(
+        "gcae.cli._run_tui", lambda *a, **k: (_ for _ in ()).throw(AssertionError("TUI opened"))
+    )
+    with pytest.raises(SystemExit) as exit_info:
+        main(
+            [
+                "run", str(_cli_repo(tmp_path)), "create the impossible file",
+                "--criterion", "file exists: never-created.txt",
+                "--no-merge", "--config", str(_fake_config(tmp_path)),
+            ]
+        )
+    # the run executed headlessly (failed criteria -> exit 1) instead of opening the TUI
+    assert exit_info.value.code == 1
+    assert "failed" in capsys.readouterr().err
 
 
 # ------------------------------------------------------------ prune (run-data retention)
@@ -262,3 +344,34 @@ def test_prune_uses_config_retention_when_the_flag_is_absent(
     output = capsys.readouterr().out
     assert "pruned run-old" in output
     assert (runtime_dir / "runs" / "run-new").exists()
+
+
+def test_prune_leaves_the_shared_memory_ledger_untouched(tmp_path: Path) -> None:
+    """Prune deletes execution records; the cumulative knowledge ledger is not one.
+
+    memory.db lives at the runtime-dir root and is shared across runs (invariant: knowledge
+    is cumulative and survives rollback). Pruning a run's directory must not delete that
+    run's lessons or evidence rows — retrieval stays scoped by run_id/source_repo."""
+    from gcae.memory import MemoryStore
+    from gcae.models import EvidenceRecord, MemoryRecord
+
+    runtime_dir = tmp_path / "runtime"
+    StateStore(runtime_dir / "runs" / "run-old" / "state.json").save(
+        make_state("run-old", "2026-01-01T10:00:00+00:00")
+    )
+    memory = MemoryStore(runtime_dir / "memory.db")
+    memory.add(MemoryRecord(kind="failure_lesson", content="flaky hook", run_id="run-old"))
+    memory.add_evidence(
+        EvidenceRecord(run_id="run-old", kind="command_result", summary="make passed")
+    )
+    memory.close()
+
+    _prune_runs(runtime_dir, keep=0, dry_run=False)
+
+    assert not (runtime_dir / "runs" / "run-old").exists()
+    memory = MemoryStore(runtime_dir / "memory.db")
+    try:
+        assert [record.content for record in memory.all("run-old")] == ["flaky hook"]
+        assert len(memory.evidence_for_run("run-old")) == 1
+    finally:
+        memory.close()

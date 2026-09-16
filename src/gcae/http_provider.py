@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import random
+import threading
 import time
 from collections.abc import Callable
 from typing import Any, TypeVar
@@ -30,6 +31,12 @@ class _StreamUnavailable(RuntimeError):
     """The endpoint refused or dropped a streaming request; retry it without streaming."""
 
 
+# process-wide request pacing: role providers are separate instances but share one API key,
+# so the rate limit is shared too and the gate has to be shared
+_PACE_LOCK = threading.Lock()
+_PACE_NEXT_ALLOWED = 0.0
+
+
 class OpenAICompatibleProvider:
     """Minimal JSON-over-HTTP provider for OpenAI-compatible endpoints."""
 
@@ -49,6 +56,7 @@ class OpenAICompatibleProvider:
         stall_timeout: float = 45.0,
         retries: int = 3,
         retry_backoff: float = 2.0,
+        min_request_interval: float = 0.0,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
@@ -68,6 +76,8 @@ class OpenAICompatibleProvider:
         # exponential backoff before they are allowed to become a run failure
         self.retries = max(0, retries)
         self.retry_backoff = max(0.0, retry_backoff)
+        # free-tier APIs rate-limit by requests per minute; keep the loop under that
+        self.min_request_interval = max(0.0, min_request_interval)
         self.on_progress: ProgressListener | None = None
         # token counts from the last HTTP response (buffered or streamed), keyed by
         # prompt/completion/total. The runtime copies this into provider_finished; the
@@ -176,10 +186,23 @@ class OpenAICompatibleProvider:
             return True, 0.0
         return False, 0.0
 
+    def _pace(self) -> None:
+        """Block until the configured minimum interval since the last request has passed."""
+        global _PACE_NEXT_ALLOWED
+        if self.min_request_interval <= 0.0:
+            return
+        with _PACE_LOCK:
+            now = time.monotonic()
+            remaining = _PACE_NEXT_ALLOWED - now
+            if remaining > 0:
+                time.sleep(remaining)
+            _PACE_NEXT_ALLOWED = time.monotonic() + self.min_request_interval
+
     def _with_retries(self, attempt_call: Callable[[], _R]) -> _R:
         """Run one request, retrying transient failures with backoff and jitter."""
         last: BaseException | None = None
         for index in range(self.retries + 1):
+            self._pace()
             try:
                 return attempt_call()
             except Exception as exc:  # noqa: BLE001 - classified immediately below

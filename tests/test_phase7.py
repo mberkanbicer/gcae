@@ -1,4 +1,5 @@
 import json
+import time
 
 import httpx
 import pytest
@@ -7,6 +8,41 @@ from gcae.controller import Controller
 from gcae.http_provider import OpenAICompatibleProvider
 from gcae.models import Decision
 from gcae.providers import DecisionProvider, ProviderOutputError, StreamProgress
+
+
+def test_min_request_interval_paces_requests_process_wide() -> None:
+    """Free-tier RPM limits: separate role providers share one pace gate."""
+    stamps: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        stamps.append(time.monotonic())
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                '{"action":"finish_candidate","semantic_goal":"done","reason_summary":"ok"}'
+                            )
+                        }
+                    }
+                ]
+            },
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    common = dict(client=client, stream=False, min_request_interval=0.3)
+    # two instances like the runtime's role providers: both must be paced together
+    first = OpenAICompatibleProvider("http://local/v1", "a", **common)
+    second = OpenAICompatibleProvider("http://local/v1", "b", **common)
+    first.complete("p", Decision)
+    second.complete("p", Decision)
+    first.close()
+    second.close()
+    assert len(stamps) == 2
+    assert stamps[1] - stamps[0] >= 0.25, "the shared gate must space requests apart"
 
 
 def test_openai_compatible_provider() -> None:

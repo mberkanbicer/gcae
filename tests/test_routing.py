@@ -345,3 +345,40 @@ def test_json_mode_is_configurable_and_reaches_the_provider() -> None:
     assert isinstance(provider, OpenAICompatibleProvider)
     assert provider.json_mode is False
     assert _provider(ProviderConfig(kind="http", base_url="http://localhost:11434/v1")).json_mode
+
+
+def test_google_kind_uses_defaults_and_builds(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    provider = _provider(ProviderConfig(kind="google", model="gemini-2.5-flash"))
+    assert isinstance(provider, OpenAICompatibleProvider)
+    assert provider.base_url == "https://generativelanguage.googleapis.com/v1beta/openai"
+    assert provider.model == "gemini-2.5-flash"
+    provider.close()
+
+
+def test_google_kind_rejects_native_interactions_endpoint() -> None:
+    with pytest.raises(ValueError, match="OpenAI-compatible endpoint"):
+        _provider(
+            ProviderConfig(
+                kind="google",
+                base_url="https://generativelanguage.googleapis.com/v1beta/interactions",
+                model="gemini-2.5-flash",
+                api_key="k",
+            )
+        )
+
+
+def test_google_kind_requires_model_and_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    with pytest.raises(ValueError, match="provider.model is required"):
+        _provider(ProviderConfig(kind="google", api_key="k"))
+    with pytest.raises(ValueError, match="no API key"):
+        _provider(ProviderConfig(kind="google", model="gemini-2.5-flash"))
+
+
+def test_google_kind_gets_llm_planner() -> None:
+    provider = FakeProvider([])
+    assert isinstance(
+        _planner(Config(provider=ProviderConfig(kind="google", model="m")), provider),
+        LLMPlanner,
+    )

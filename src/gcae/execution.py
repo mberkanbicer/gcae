@@ -113,6 +113,11 @@ class CommandRequest:
     interactive: bool = False
     #: what the command is for (shown in the UI, never executed)
     purpose: str = ""
+    #: absolute working directory for this call; empty means the runner's worktree.
+    #: Set only by the tool registry after workspace validation — never by the model.
+    cwd: str = ""
+    #: extra environment variables merged over the process environment for this call
+    env: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -165,7 +170,7 @@ class RunningCommand:
 
     def __init__(self, request: CommandRequest, cwd: Path, max_output: int) -> None:
         self.request = request
-        self.cwd = cwd
+        self.cwd = Path(request.cwd) if request.cwd else cwd
         self.max_output = max_output
         self.started_at = time.monotonic()
         self.stdout = ""
@@ -194,6 +199,10 @@ class RunningCommand:
         asked — and reports a timeout where the truth is "interactive".
         """
         env = dict(os.environ)
+        env.update(self.request.env)
+        # unbuffered output stays forced even if the caller set it: prompt detection
+        # depends on seeing output as it happens, and a silent override would reintroduce
+        # the buffered-prompt-misread-as-timeout failure this method documents above
         env["PYTHONUNBUFFERED"] = "1"
         env.setdefault("PYTHONIOENCODING", "utf-8")
         return env

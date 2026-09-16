@@ -40,6 +40,11 @@ kind = "fake"
 base_url = "http://localhost:11434/v1"
 model = "llama3.2"
 api_key_env = "OPENAI_API_KEY"
+# Google Gemini (OpenAI-compatible endpoint; key from $GEMINI_API_KEY by default):
+# kind = "google"
+# model = "gemini-2.5-flash"
+# base_url left unset selects https://generativelanguage.googleapis.com/v1beta/openai/
+# (the native /v1beta/interactions API is a different protocol and is rejected)
 timeout = 60
 # Stream completions: the dashboard shows tokens arriving and a hung endpoint is detected as
 # a stall instead of looking like a frozen run. Falls back to a buffered request automatically.
@@ -49,6 +54,9 @@ stall_timeout = 45.0
 # exponential backoff before they can fail a step. A Retry-After header is honoured.
 retries = 3
 retry_backoff = 2.0
+# Free-tier APIs (Gemini, OpenRouter :free) limit requests per minute; the runtime's role
+# fan-out bursts past it. 7s spaces requests under 10 RPM. 0 disables.
+# min_request_interval = 7.0
 # Token budget for reconstructed context and the provider's maximum output tokens.
 context_limit = 8192
 # response_format=json_object. Reasoning models (e.g. many :free OpenRouter models) can

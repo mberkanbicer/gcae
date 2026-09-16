@@ -1,0 +1,16 @@
+{
+  "nextId": 6,
+  "tasks": [
+    {
+      "id": "5",
+      "subject": "Commit and push the 0.7.0 release",
+      "description": "Stage tracked changes only (git add -u, never the key-bearing config.openrouter.toml), commit 0.7.0, push to origin",
+      "status": "in_progress",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1789553247340,
+      "updatedAt": 1789553250660
+    }
+  ]
+}

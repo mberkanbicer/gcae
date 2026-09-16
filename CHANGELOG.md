@@ -18,6 +18,10 @@ All notable changes to GCAE are documented here. The format follows
   description (`run`, `resume` and `undo` had none), `--request` shows a clean
   `-p TEXT` metavar, and `run --help` ends with copy-pasteable examples.
 
+### Tests
+
+378 pass.
+
 ## [0.7.0] — 2026-09-16
 
 ### Added
@@ -48,6 +52,10 @@ All notable changes to GCAE are documented here. The format follows
 - **Prune DB semantics pinned.** A test locks in that `gcae prune` deletes execution
   records only: the shared `memory.db` ledger (lessons + evidence rows) survives pruning
   by design — knowledge is cumulative, retrieval stays scoped by `run_id`/`source_repo`.
+
+### Tests
+
+374 pass.
 
 ## [0.6.2] — 2026-09-16
 

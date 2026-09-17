@@ -25,6 +25,7 @@ coverage.xml
 
 # Secrets and machine-local configuration
 config.toml
+config.openrouter.toml
 .env
 .env.*
 *.pem

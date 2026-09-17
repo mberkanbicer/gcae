@@ -508,6 +508,13 @@ def test_an_exhausted_failure_is_refused_and_pinned_into_the_prompt(tmp_path: Pa
     assert any(
         record.kind == "failure" and "method exhausted" in record.content for record in memory
     ), "the exhaustion must be remembered"
+    # the failure reaches the next decision as an explicit, structured block
+    evidence = "\n".join(runtime._execution_evidence())
+    assert "LAST FAILURE" in evidence
+    assert "kind: command_error" in evidence
+    assert "command: python -c" in evidence
+    assert "what to do differently:" in evidence
+    assert "directive:" in evidence
 
 
 # ------------------------------------------------------------------ B: repair after evidence

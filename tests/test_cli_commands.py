@@ -1,3 +1,4 @@
+import argparse
 import json
 from pathlib import Path
 
@@ -275,6 +276,39 @@ def test_headless_stderr_speaks_with_one_voice(
         if not line.strip():
             continue
         assert line.startswith(("gcae", "run ", "  ")), f"stray console line: {line!r}"
+
+
+def test_tui_mode_routes_runtime_logs_to_a_file_not_the_terminal(tmp_path: Path) -> None:
+    """In TUI mode a stderr handler leaks as a stray one-line log on the dashboard; the
+    logs must go to a file under the runtime directory instead."""
+    import logging
+
+    from gcae.cli import _configure_logging
+
+    captured: list[dict] = []
+    monkey_basic = logging.basicConfig
+
+    def spy(*args: object, **kwargs: object) -> None:
+        captured.append(kwargs)
+
+    logging.basicConfig = spy
+    try:
+        _configure_logging(
+            argparse.Namespace(tui=True, headless=False, request=None), tmp_path / "runtime"
+        )
+        assert len(captured) == 1
+        assert captured[0]["format"] == "gcae %(levelname)s: %(message)s"
+        assert captured[0]["filename"].endswith("gcae.log")
+        assert (tmp_path / "runtime" / "gcae.log").parent.exists()
+
+        captured.clear()
+        _configure_logging(
+            argparse.Namespace(tui=False, headless=True, request=None), tmp_path / "runtime"
+        )
+        assert len(captured) == 1
+        assert "filename" not in captured[0], "headless keeps stderr as the log channel"
+    finally:
+        logging.basicConfig = monkey_basic
 
 
 # ------------------------------------------------------------ prune (run-data retention)

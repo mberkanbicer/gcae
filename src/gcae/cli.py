@@ -786,6 +786,23 @@ def _run_tui(
     ).run()
 
 
+def _configure_logging(args: argparse.Namespace, runtime_dir: Path) -> None:
+    """The ``gcae`` logger speaks at INFO. Headless, stderr is the channel; in the TUI the
+    terminal belongs to Textual, and a stderr handler leaks runtime logs onto the dashboard
+    as stray one-line notices. The TUI already shows the same information as semantic
+    events, so the file keeps the full record and the screen stays clean."""
+    if _wants_tui(args):
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        logging.basicConfig(
+            level=logging.WARNING,
+            format="gcae %(levelname)s: %(message)s",
+            filename=str(runtime_dir / "gcae.log"),
+        )
+    else:
+        logging.basicConfig(level=logging.WARNING, format="gcae %(levelname)s: %(message)s")
+    logging.getLogger("gcae").setLevel(logging.INFO)
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -795,8 +812,6 @@ def main(argv: list[str] | None = None) -> None:
                 "request given twice: pass the task either as the positional or as --request"
             )
         args.request = args.request_flag
-    logging.basicConfig(level=logging.WARNING, format="gcae %(levelname)s: %(message)s")
-    logging.getLogger("gcae").setLevel(logging.INFO)
     try:
         chosen = Path(args.config).expanduser() if args.config else discover_config()
         config = load_config(chosen)
@@ -811,6 +826,7 @@ def main(argv: list[str] | None = None) -> None:
                 file=sys.stderr,
             )
         runtime_dir = (args.runtime_dir or config.state_dir).expanduser()
+        _configure_logging(args, runtime_dir)
         if args.command == "prune":
             older_than = args.older_than
             if older_than is None:

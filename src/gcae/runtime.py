@@ -3277,29 +3277,49 @@ class Runtime:
         logger.warning("run %s is waiting for process input", self.state.run_id)
         return self.state
 
+    #: what the next attempt must do differently, per failure kind — the shortest honest fix
+    FAILURE_DIRECTIVES = {
+        FailureKind.INTERACTIVE_INPUT_REQUIRED: (
+            "rerun with mode='scripted_input' and a 'stdin' list of answers, or "
+            "mode='interactive_pty' when the program needs a terminal"
+        ),
+        FailureKind.COMMAND_TIMEOUT: (
+            "decide from the captured output whether it was slow, deadlocked or waiting for "
+            "input, and change the approach instead of retrying it unchanged"
+        ),
+        FailureKind.COMMAND_ERROR: (
+            "read the error output, fix its cause, and change the command or its inputs "
+            "before rerunning"
+        ),
+        FailureKind.TEST_FAILURE: (
+            "read the failing assertion, fix the named code or test, then rerun"
+        ),
+        FailureKind.CODE_ERROR: "read the traceback, fix the named file and line, then rerun",
+        FailureKind.FILE_NOT_FOUND: "check the path spelling, create or locate the file first",
+        FailureKind.DEPENDENCY_MISSING: (
+            "install the missing dependency or fix the environment before rerunning"
+        ),
+        FailureKind.PERMISSION_ERROR: "change the location or the permissions before rerunning",
+    }
+
     def _execution_evidence(self) -> list[str]:
         """The last command outcomes, in the form the next decision has to reason about."""
         assert self.state is not None
         lines: list[str] = []
         if self.state.last_failure is not None:
             failure = self.state.last_failure
-            lines.append(
-                f"Last failure [{failure.kind}]: {failure.lesson} "
-                f"(command: {failure.command}; evidence: {failure.evidence[:200]})"
-            )
-            if failure.kind == str(FailureKind.INTERACTIVE_INPUT_REQUIRED):
-                lines.append(
-                    "Directive: the previous attempt failed because the program needs input. "
-                    "Do not repeat it as a batch command: pass mode='scripted_input' with a "
-                    "'stdin' list of answers, or mode='interactive_pty' when it needs a "
-                    "terminal."
-                )
-            elif failure.kind == str(FailureKind.COMMAND_TIMEOUT):
-                lines.append(
-                    "Directive: the previous attempt timed out. Decide from the captured output "
-                    "whether it was slow, deadlocked, or waiting for input, and change the "
-                    "approach instead of retrying it unchanged."
-                )
+            block = [
+                "LAST FAILURE — your next action must address this; rerunning it unchanged "
+                "is refused:",
+                f"  kind: {failure.kind}",
+                f"  command: {failure.command}",
+                f"  what it showed: {failure.evidence[:200]}",
+                f"  what to do differently: {failure.lesson}",
+            ]
+            directive = self.FAILURE_DIRECTIVES.get(FailureKind(failure.kind))
+            if directive:
+                block.append(f"  directive: {directive}")
+            lines.append("\n".join(block))
         for item in self.state.latest_observations[-4:]:
             lines.append(f"Recent result: {item}")
         if self.state.pending_input is not None:

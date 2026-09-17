@@ -1,0 +1,366 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "GCAE — evidence-driven execution runtime",
+    "locale": "en",
+    "output": "gcae-architecture.html",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "main-loop",
+        "label": "Main loop",
+        "focus": [
+          "cli",
+          "runtime",
+          "evaluator",
+          "git",
+          "memory"
+        ],
+        "note": "The primary path from a semantic step to an accepted checkpoint and the evidence ledger."
+      },
+      {
+        "id": "recovery",
+        "label": "Recovery",
+        "focus": [
+          "runtime",
+          "recovery",
+          "planner"
+        ],
+        "note": "Stalls and failures: diagnosis first, then replan, wait, or block."
+      },
+      {
+        "id": "isolation",
+        "label": "Isolation",
+        "focus": [
+          "tools",
+          "git",
+          "repo"
+        ],
+        "note": "One worktree per run, sandboxed commands, verified merge."
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "cli",
+      "type": "frontend",
+      "label": "gcae CLI",
+      "sublabel": "run · resume · merge",
+      "pos": [
+        40,
+        250
+      ],
+      "size": [
+        120,
+        64
+      ]
+    },
+    {
+      "id": "tui",
+      "type": "frontend",
+      "label": "Textual TUI",
+      "sublabel": "trajectory inspector",
+      "pos": [
+        40,
+        405
+      ],
+      "size": [
+        120,
+        64
+      ]
+    },
+    {
+      "id": "runtime",
+      "type": "backend",
+      "label": "Runtime Loop",
+      "sublabel": "control + phases",
+      "pos": [
+        190,
+        250
+      ],
+      "size": [
+        125,
+        72
+      ],
+      "tag": "RECONSTRUCT → LEARN"
+    },
+    {
+      "id": "provider",
+      "type": "external",
+      "label": "LLM Provider",
+      "sublabel": "OpenAI-compatible",
+      "pos": [
+        190,
+        95
+      ],
+      "size": [
+        125,
+        60
+      ]
+    },
+    {
+      "id": "recovery",
+      "type": "backend",
+      "label": "Recovery Advisor",
+      "sublabel": "replan · wait · block",
+      "pos": [
+        190,
+        405
+      ],
+      "size": [
+        125,
+        64
+      ]
+    },
+    {
+      "id": "verifier",
+      "type": "backend",
+      "label": "Final Verifier",
+      "sublabel": "criterion PASS gate",
+      "pos": [
+        385,
+        95
+      ],
+      "size": [
+        120,
+        60
+      ]
+    },
+    {
+      "id": "planner",
+      "type": "backend",
+      "label": "Planner",
+      "sublabel": "plan + replan patch",
+      "pos": [
+        385,
+        250
+      ],
+      "size": [
+        120,
+        64
+      ]
+    },
+    {
+      "id": "tools",
+      "type": "security",
+      "label": "Tool Belt",
+      "sublabel": "commands per step",
+      "pos": [
+        385,
+        405
+      ],
+      "size": [
+        120,
+        64
+      ],
+      "tag": "sandbox"
+    },
+    {
+      "id": "evaluator",
+      "type": "backend",
+      "label": "Evaluator",
+      "sublabel": "accept · repair · rollback",
+      "pos": [
+        570,
+        250
+      ],
+      "size": [
+        120,
+        64
+      ]
+    },
+    {
+      "id": "memory",
+      "type": "database",
+      "label": "Memory (SQLite)",
+      "sublabel": "evidence + lessons",
+      "pos": [
+        570,
+        405
+      ],
+      "size": [
+        120,
+        64
+      ],
+      "tag": "survives rollback"
+    },
+    {
+      "id": "git",
+      "type": "database",
+      "label": "Git Worktree",
+      "sublabel": "one isolated tree per run",
+      "pos": [
+        755,
+        250
+      ],
+      "size": [
+        125,
+        64
+      ]
+    },
+    {
+      "id": "repo",
+      "type": "external",
+      "label": "Source Repo",
+      "sublabel": "the user's working tree",
+      "pos": [
+        930,
+        250
+      ],
+      "size": [
+        125,
+        64
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "User surface",
+      "wraps": [
+        "cli",
+        "tui"
+      ]
+    },
+    {
+      "kind": "region",
+      "label": "GCAE runtime",
+      "wraps": [
+        "runtime",
+        "provider",
+        "recovery",
+        "verifier",
+        "planner",
+        "tools",
+        "evaluator",
+        "memory",
+        "git"
+      ]
+    },
+    {
+      "kind": "security-group",
+      "label": "Command sandbox · [sandbox] command_prefix",
+      "wraps": [
+        "tools"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "cli-runtime",
+      "from": "cli",
+      "to": "runtime",
+      "label": "run",
+      "variant": "emphasis"
+    },
+    {
+      "id": "tui-runtime",
+      "from": "tui",
+      "to": "runtime",
+      "label": "events + control",
+      "variant": "dashed"
+    },
+    {
+      "id": "runtime-provider",
+      "from": "runtime",
+      "to": "provider",
+      "label": "structured decisions"
+    },
+    {
+      "id": "runtime-verifier",
+      "from": "runtime",
+      "to": "verifier",
+      "label": "final verification"
+    },
+    {
+      "id": "runtime-planner",
+      "from": "runtime",
+      "to": "planner",
+      "label": "replan",
+      "labelDy": 20
+    },
+    {
+      "id": "runtime-evaluator",
+      "from": "runtime",
+      "to": "evaluator",
+      "label": "validate + judge",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "bottom",
+      "via": [
+        [
+          252.5,
+          361
+        ],
+        [
+          630,
+          361
+        ]
+      ]
+    },
+    {
+      "id": "runtime-recovery",
+      "from": "runtime",
+      "to": "recovery",
+      "label": "stall → Diagnosis",
+      "variant": "dashed",
+      "labelDx": 75,
+      "labelDy": 30
+    },
+    {
+      "id": "evaluator-git",
+      "from": "evaluator",
+      "to": "git",
+      "label": "accept → checkpoint · reject → reset",
+      "variant": "emphasis",
+      "labelDx": 70,
+      "labelDy": 55
+    },
+    {
+      "id": "git-repo",
+      "from": "git",
+      "to": "repo",
+      "label": "verified merge",
+      "variant": "dashed",
+      "labelDy": -60
+    },
+    {
+      "id": "evaluator-memory",
+      "from": "evaluator",
+      "to": "memory",
+      "label": "evidence + lessons",
+      "labelDx": -80,
+      "labelDy": 20
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Execution loop",
+      "items": [
+        "RECONSTRUCT → ACT → OBSERVE → JUDGE → COMMIT/REVERT → LEARN",
+        "The unit of progress is a semantic trajectory step, not a tool call",
+        "Action ≠ progress: stagnation is measured by accepted checkpoints"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Evidence",
+      "items": [
+        "The evidence ledger lives in SQLite: command results, validations, criterion verdicts",
+        "Completion = every success criterion PASS + mapped ledger evidence",
+        "memory.db survives every rollback; knowledge accumulates"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Trust & recovery",
+      "items": [
+        "Commands run through the [sandbox] command_prefix wrapper",
+        "The model can never run Git checkpoint commands",
+        "Only a verified merge writes to the user's working tree"
+      ]
+    }
+  ]
+}

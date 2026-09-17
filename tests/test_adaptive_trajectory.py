@@ -245,3 +245,33 @@ def test_the_adaptive_trajectory_survives_every_obstacle(tmp_path: Path) -> None
     time.sleep(0.3)
     orphans = subprocess.run(["pgrep", "-f", "game.py"], capture_output=True)
     assert orphans.returncode != 0, "a process from the trajectory is still running"
+
+
+def test_start_flags_criteria_that_only_a_judge_could_verify(tmp_path: Path) -> None:
+    """"Done" must not silently rest on model judgement alone.
+
+    A run whose success criteria contain no deterministic form (file/command checks) can
+    only be completed by the verifier judge, and fails outright without one. The start of
+    the run says so, while the operator can still add a checkable --criterion."""
+    source = tmp_path / "repo"
+    source.mkdir()
+    init_repo(source)
+    runtime = Runtime(
+        source,
+        tmp_path / "runtime",
+        provider=FakeProvider([]),
+        planner=FixedPlan(),
+        control=RuntimeControl(),
+    )
+    events: list[Any] = []
+    runtime.subscribe(events.append)
+
+    runtime.start("make it nice", success_criteria=["the code looks nice"])
+    flagged = [e for e in events if e.event_type == "unverifiable_criteria"]
+    assert len(flagged) == 1, [e.event_type for e in events]
+    assert flagged[0].payload["criteria"] == ["the code looks nice"]
+
+    # a deterministic criterion needs no warning
+    events.clear()
+    runtime.start("make it nice", success_criteria=["file exists: nice.py"])
+    assert not any(e.event_type == "unverifiable_criteria" for e in events)

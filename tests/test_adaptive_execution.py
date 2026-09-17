@@ -30,6 +30,7 @@ from gcae.models import (
     Event,
     InitialPlan,
     PlanStep,
+    ToolCall,
 )
 from gcae.persistence import StateStore
 from gcae.planner import Planner
@@ -130,6 +131,42 @@ def test_scripted_input_feeds_a_prompting_program(tmp_path: Path) -> None:
     assert outcome.exit_code == 0
     assert "Hello Ada" in outcome.stdout
     assert outcome.stdin_sent == 1
+
+
+def test_sandbox_prefix_wraps_every_command(tmp_path: Path) -> None:
+    """The operator's wrapper sees every command; placeholders expand; the blocklist
+    still judges the raw command, not the wrapped string."""
+    from gcae.tools import ToolRegistry
+
+    work = tmp_path / "work"
+    work.mkdir()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    tools = ToolRegistry(
+        work,
+        sandbox_prefix=["env", "GCAE_WT={worktree}", "GCAE_REPO={repo}"],
+        source_repo=repo,
+    )
+
+    result = tools.execute(
+        ToolCall(name="run_command", arguments={"command": "printenv GCAE_WT GCAE_REPO"})
+    )
+    assert result.success, result.error
+    assert result.output.splitlines() == [str(work), str(repo)]
+
+    # the blocklist sees the model's command, not the wrapped string
+    blocked = tools.execute(
+        ToolCall(name="run_command", arguments={"command": "sudo printenv GCAE_WT"})
+    )
+    assert not blocked.success
+    assert "blocked" in (blocked.error or "")
+
+    # no prefix configured: the variable is never injected (printenv exits 1 when unset)
+    plain = ToolRegistry(work)
+    result = plain.execute(
+        ToolCall(name="run_command", arguments={"command": "printenv GCAE_WT"})
+    )
+    assert result.exit_code == 1
 
 
 def test_multiple_scripted_guesses_complete(tmp_path: Path) -> None:

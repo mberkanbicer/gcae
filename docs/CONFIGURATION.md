@@ -69,6 +69,12 @@ kind = "deterministic"              # deterministic | hybrid
 
 [validation]
 commands = ["pytest -q"]            # run before every semantic evaluation
+
+[sandbox]
+command_prefix = []                 # optional wrapper around every executed command, e.g.
+# command_prefix = ["bwrap", "--ro-bind", "/", "/", "--bind", "{worktree}", "{worktree}",
+#                   "--dev", "/dev", "--proc", "/proc", "--unshare-all", "--"]
+# `{worktree}` and `{repo}` are replaced with the run worktree and the source repository.
 ```
 
 ## Behavior notes
@@ -111,5 +117,10 @@ commands = ["pytest -q"]            # run before every semantic evaluation
   (`(characters + 3) // 4`). Pinned information may exceed the budget rather than be dropped.
 - `validation.commands` are executed with the isolated worktree as cwd and count as validation
   evidence; failures fail the step. The `run_tests` tool runs the same commands.
+- `sandbox.command_prefix` wraps every command the run executes — step commands, validation
+  commands, `command succeeds:` criteria and `run_tests`. The blocklist still judges the raw
+  command first. GCAE only routes commands through the wrapper; whether the wrapper actually
+  isolates (mounts, network, namespaces) is the operator's configuration. Interactive and
+  scripted-input commands keep working if the wrapper forwards stdin.
 - API keys may be inline (`api_key`) or read from the environment (`api_key_env`). Keep
   `config.toml` out of repositories; it is gitignored here.

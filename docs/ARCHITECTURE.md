@@ -21,7 +21,8 @@ model.
 | `context.py` | context reconstruction, pinned sections, token budgeting |
 | `memory.py` | SQLite FTS5 knowledge store, JSONL event log |
 | `tools.py` | sandboxed tool registry |
-| `git.py` | worktree, checkpoint, rollback, merge, undo |
+| `git.py` | worktree, checkpoint, rollback, undo |
+| `merge.py` | guarded merge of a run branch into the source branch (shared by the runtime and `gcae merge`) |
 | `safeguards.py` | repetition guard, stagnation window, hygiene check |
 | `recovery.py` | self-recovery: trace assembly from the run's own record, advisor prompt, `Diagnosis` |
 | `providers.py`, `http_provider.py` | structured-output providers, streaming progress, stall detection |

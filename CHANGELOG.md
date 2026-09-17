@@ -4,6 +4,37 @@ All notable changes to GCAE are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Optional command sandbox prefix (`[sandbox] command_prefix`).** An operator-supplied wrapper
+  (bubblewrap, docker, …) is prepended to every executed command — step commands, validation
+  commands, `command succeeds:` criteria and `run_tests`. `{worktree}` and `{repo}` expand to the
+  run worktree and the source repository. The blocklist still judges the raw command first.
+  GCAE routes commands through the wrapper; whether the wrapper actually isolates is the
+  operator's configuration.
+- **A run whose criteria no deterministic check can verify says so at start.** The new
+  `unverifiable_criteria` event fires when none of the success criteria uses a checkable form
+  (`file exists:`, `file contains:`, `file contains exactly:`, `command succeeds:`), while the
+  operator can still add a `--criterion` — acceptance would otherwise rest entirely on the
+  verifier judge.
+- **`gcae.merge` module.** The guarded merge rules (`merge_verified_run`, worktree cleanup
+  helpers) moved out of `runtime.py`, which keeps loop control; both the runtime and
+  `gcae merge` still apply identical checks.
+
+### Changed
+
+- `gcae prune` deletes a pruned run's raw evidence rows with the run record. Evidence is
+  consulted only while a run is active, so rows of a pruned run were dead weight that grew the
+  ledger forever. Failure lessons stay cumulative and are never touched; `--dry-run` still
+  touches nothing.
+- Documentation no longer states fixed test counts (README badge, Development section,
+  CHANGELOG entries): counts rot, CI is the source of truth.
+- Package metadata completed for publishing: `license` and `authors` in `pyproject.toml`, and a
+  CI job that publishes tagged builds to PyPI via trusted publishing (one-time pending-publisher
+  entry required on pypi.org).
+
 ## [0.7.1] — 2026-09-16
 
 ### Changed
@@ -20,7 +51,7 @@ All notable changes to GCAE are documented here. The format follows
 
 ### Tests
 
-378 pass.
+Full suite green (`pytest -q`).
 
 ## [0.7.0] — 2026-09-16
 
@@ -271,8 +302,8 @@ trajectory screen, replay, plan history).
 
 ### Tests
 
-286 pass (+7): backfill store + runtime wiring, TTL prune / rejection / config fallback,
-judge newest-first ordering and newest-first contradiction citation.
+New: backfill store + runtime wiring, TTL prune / rejection / config fallback, judge
+newest-first ordering and newest-first contradiction citation.
 
 ## [0.4.0] — 2026-09-14
 

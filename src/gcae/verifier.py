@@ -27,6 +27,15 @@ def evidence_for(path: Path, expected: str, found: str | None, limit: int = 200)
     return f"{path}: expected {wanted!r}, found {actual!r}"
 
 
+#: criteria prefixes _verify_criterion can check deterministically, without the judge
+DETERMINISTIC_PREFIXES = (
+    "file exists: ",
+    "file contains: ",
+    "file contains exactly: ",
+    "command succeeds: ",
+)
+
+
 class FinalVerifier:
     """Deterministic verification with an optional, strict model judge.
 
@@ -34,8 +43,13 @@ class FinalVerifier:
     structured evidence, and fails closed on any provider error or empty evidence.
     """
 
-    def __init__(self, judge: Provider | None = None) -> None:
+    def __init__(
+        self, judge: Provider | None = None, sandbox_prefix: list[str] | None = None
+    ) -> None:
         self.judge = judge
+        #: optional command wrapper applied to `command succeeds:` criteria too, so
+        #: verification runs under the same operator boundary as the step's own commands
+        self.sandbox_prefix = list(sandbox_prefix or [])
 
     def verify(
         self,
@@ -59,7 +73,9 @@ class FinalVerifier:
                 details=["agent worktree does not exist"],
             )
         ledger = list(evidence or [])
-        tools = ToolRegistry(worktree)
+        tools = ToolRegistry(
+            worktree, sandbox_prefix=self.sandbox_prefix, source_repo=state.source_repo
+        )
         # Hygiene describes the candidate as the agent left it, so it is measured before
         # criterion commands run: a criterion that runs pytest creates __pycache__ and
         # would otherwise fail its own run's hygiene check.

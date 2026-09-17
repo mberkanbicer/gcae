@@ -468,12 +468,14 @@ def test_prune_uses_config_retention_when_the_flag_is_absent(
     assert (runtime_dir / "runs" / "run-new").exists()
 
 
-def test_prune_leaves_the_shared_memory_ledger_untouched(tmp_path: Path) -> None:
-    """Prune deletes execution records; the cumulative knowledge ledger is not one.
+def test_prune_keeps_lessons_but_drops_the_run_evidence(tmp_path: Path) -> None:
+    """Prune deletes the run's execution ledger with it; cumulative knowledge stays.
 
     memory.db lives at the runtime-dir root and is shared across runs (invariant: knowledge
-    is cumulative and survives rollback). Pruning a run's directory must not delete that
-    run's lessons or evidence rows — retrieval stays scoped by run_id/source_repo."""
+    is cumulative and survives rollback). Pruning a run's directory keeps that run's
+    lessons — retrieval stays scoped by run_id/source_repo — but drops its evidence rows:
+    evidence is consulted only while the run is active, so rows of a pruned run are dead
+    weight that grows the ledger forever."""
     from gcae.memory import MemoryStore
     from gcae.models import EvidenceRecord, MemoryRecord
 
@@ -494,6 +496,30 @@ def test_prune_leaves_the_shared_memory_ledger_untouched(tmp_path: Path) -> None
     memory = MemoryStore(runtime_dir / "memory.db")
     try:
         assert [record.content for record in memory.all("run-old")] == ["flaky hook"]
+        assert memory.evidence_for_run("run-old") == []
+    finally:
+        memory.close()
+
+
+def test_prune_dry_run_leaves_evidence_untouched(tmp_path: Path) -> None:
+    from gcae.memory import MemoryStore
+    from gcae.models import EvidenceRecord
+
+    runtime_dir = tmp_path / "runtime"
+    StateStore(runtime_dir / "runs" / "run-old" / "state.json").save(
+        make_state("run-old", "2026-01-01T10:00:00+00:00")
+    )
+    memory = MemoryStore(runtime_dir / "memory.db")
+    memory.add_evidence(
+        EvidenceRecord(run_id="run-old", kind="command_result", summary="make passed")
+    )
+    memory.close()
+
+    _prune_runs(runtime_dir, keep=0, dry_run=True)
+
+    assert (runtime_dir / "runs" / "run-old").exists()
+    memory = MemoryStore(runtime_dir / "memory.db")
+    try:
         assert len(memory.evidence_for_run("run-old")) == 1
     finally:
         memory.close()

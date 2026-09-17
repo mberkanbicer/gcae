@@ -19,10 +19,11 @@ from .context import ContextBuilder, estimate_tokens
 from .controller import Controller
 from .evaluator import DeterministicEvaluator, Evaluator
 from .execution import FailureKind, classify_failure, strategy_signature
-from .git import GitError, GitRepository, NothingToMerge
+from .git import GitError, GitRepository
 from .guardian import Guardian, HealthState
 from .guardian import RecoveryAction as GuardianRecovery
 from .memory import EventLog, MemoryStore
+from .merge import cleanup_merged_worktree, merge_verified_run
 from .models import (
     Action,
     AgentState,
@@ -39,7 +40,6 @@ from .models import (
     MergeRecord,
     Observation,
     PendingInput,
-    PendingMerge,
     PlanStep,
     PlanVersion,
     RecoveryRecord,
@@ -70,7 +70,7 @@ from .safeguards import RepetitionGuard, StagnationDetector
 from .state_machine import StateMachine
 from .tools import ToolRegistry
 from .validation import DeterministicValidator
-from .verifier import FinalVerifier
+from .verifier import DETERMINISTIC_PREFIXES, FinalVerifier
 
 logger = logging.getLogger("gcae")
 
@@ -92,123 +92,6 @@ _DIRECT_TO_PLAN = frozenset(
 PROVIDER_HEARTBEAT_SECONDS = 10.0
 
 EventSubscriber = Callable[[Event], None]
-
-
-def cleanup_idle_worktree(repo: GitRepository, state: AgentState) -> bool:
-    """Remove GCAE's own worktree once the run no longer needs it. True when removed.
-
-    Used when the run's work is delivered (merged) or empty (nothing to merge). The branch
-    is deliberately kept when a merge happened: the merge stays reversible with
-    ``gcae undo`` and the accepted commits can be merged again.
-    """
-    path = Path(state.worktree)
-    if not path.exists():
-        return False
-    repo.worktree = path
-    repo.remove_worktree()
-    return True
-
-
-def cleanup_merged_worktree(repo: GitRepository, state: AgentState) -> bool:
-    """Remove the worktree of a merged run (see :func:`cleanup_idle_worktree`)."""
-    if state.merge is None:
-        return False
-    return cleanup_idle_worktree(repo, state)
-
-
-def merge_verified_run(
-    repo: GitRepository,
-    state: AgentState,
-    persist: Callable[[], None],
-    allow_unverified: bool = False,
-) -> MergeRecord:
-    """Guarded merge of a run branch into the current source branch.
-
-    Shared by the runtime (after completion) and ``gcae merge`` so both paths apply the
-    same checks: the run must be complete, unmerged, and its branch must still point at
-    the verified commit; the source repository must be clean.
-
-    ``allow_unverified`` additionally permits a failed or stopped run that accepted at
-    least one checkpoint: the user asked for the accepted work back explicitly, and the
-    caller reports that final verification did not pass.
-    """
-    unverified = state.status != "complete"
-    if unverified and not (allow_unverified and state.accepted_steps > 0):
-        raise RuntimeError(f"run {state.run_id} is not complete: {state.status}")
-    if unverified and state.merge is None:
-        logger.warning(
-            "merging accepted work from run %s without final verification (%s)",
-            state.run_id,
-            state.status,
-        )
-    if state.merge is not None:
-        raise RuntimeError(
-            f"run {state.run_id} is already merged into {state.merge.target_branch}; "
-            f"run 'gcae undo {state.source_repo} {state.run_id}' first"
-        )
-    if state.pending_merge is not None and state.branch:
-        # crash-window marker: a merge was intended. If it already happened, the
-        # source branch carries the merge and the record is backfilled from git —
-        # never merged twice, never left without an undo record.
-        marker = state.pending_merge
-        try:
-            merged_already = (
-                marker.target_branch == repo.current_branch()
-                and repo.source_commit() != marker.pre_merge_commit
-                and repo.is_ancestor(state.branch, repo.source_commit())
-            )
-        except GitError:
-            merged_already = False
-        if merged_already:
-            record = MergeRecord(
-                branch=marker.branch,
-                target_branch=marker.target_branch,
-                pre_merge_commit=marker.pre_merge_commit,
-                merge_commit=repo.source_commit(),
-            )
-            state.merge = record
-            state.pending_merge = None
-            persist()
-            return record
-        if marker.branch != state.branch or marker.target_branch != repo.current_branch():
-            # stale marker from a different target: forget it and merge fresh
-            state.pending_merge = None
-            persist()
-    if not state.branch:
-        raise RuntimeError(f"run {state.run_id} has no branch to merge")
-    if state.accepted_commit:
-        head = repo.branch_head(state.branch)
-        if head != state.accepted_commit:
-            raise RuntimeError(
-                f"branch {state.branch} moved past the verified commit "
-                f"{state.accepted_commit[:12]}; refusing to merge"
-            )
-    if state.branch and repo.branch_head(state.branch) == repo.source_commit():
-        raise NothingToMerge(
-            f"run {state.run_id} produced no file changes; there is nothing to merge"
-        )
-    if repo.source_status_entries():
-        # GCAE never leaves the user to stash their own work: commit it as the base the
-        # merge builds on (bounded, reported, reversible with git reset --soft HEAD~1).
-        repo.bootstrap_source_repository()
-    target = repo.current_branch()
-    # persist intent before the merge: a crash between `git merge` and the record
-    # write is then reconcilable by ancestry on the next attempt
-    state.pending_merge = PendingMerge(
-        branch=state.branch, target_branch=target, pre_merge_commit=repo.source_commit()
-    )
-    persist()
-    pre, merged = repo.merge_branch(state.branch)
-    record = MergeRecord(
-        branch=state.branch,
-        target_branch=target,
-        pre_merge_commit=pre,
-        merge_commit=merged,
-    )
-    state.merge = record
-    state.pending_merge = None
-    persist()
-    return record
 
 
 #: fallback used when a Runtime is built without an explicit strategy retry limit
@@ -375,6 +258,7 @@ class Runtime:
         command_startup_timeout: float = 10.0,
         strategy_retry_limit: int = 2,
         require_execution_evidence: bool = True,
+        sandbox_command_prefix: list[str] | None = None,
     ) -> None:
         self.source_repo = Path(source_repo).resolve()
         self.runtime_dir = Path(runtime_dir).expanduser().resolve()
@@ -401,6 +285,8 @@ class Runtime:
         self._conflict_failed = False
         self._stagnation_escalated = False
         self._stagnation_asked = False
+        #: optional wrapper (e.g. bwrap/docker) prepended to every executed command
+        self.sandbox_command_prefix = list(sandbox_command_prefix or [])
         # self-recovery: how often this session may diagnose itself, and how many extra
         # iterations each successful diagnosis buys.
         self.recovery_attempts = recovery_attempts
@@ -584,6 +470,17 @@ class Runtime:
         for constraint in initial_plan.hard_constraints:
             if constraint not in self.state.hard_constraints:
                 self.state.hard_constraints.append(constraint)
+        if self.state.success_criteria and not any(
+            criterion.startswith(DETERMINISTIC_PREFIXES)
+            for criterion in self.state.success_criteria
+        ):
+            # nothing here can be checked without the judge, so "done" rests entirely on
+            # model judgement — say so now, while the user can still add a --criterion
+            self._event(
+                "unverifiable_criteria",
+                RunPhase.PLAN,
+                payload={"criteria": list(self.state.success_criteria)},
+            )
         self.state.plan = list(initial_plan.steps)
         self.state.plan_version = 1
         self.state.plan_history = [
@@ -2814,6 +2711,8 @@ class Runtime:
             test_commands=self.validator_commands,
             idle_timeout=self.command_idle_timeout,
             startup_timeout=self.command_startup_timeout,
+            sandbox_prefix=self.sandbox_command_prefix,
+            source_repo=self.state.source_repo,
         )
 
     def _strategy_key(self, tool: ToolCall, plan: PlanStep) -> str:

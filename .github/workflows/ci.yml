@@ -104,3 +104,18 @@ jobs:
           gh release create "$GITHUB_REF_NAME" dist/* \
             --title "GCAE $GITHUB_REF_NAME" \
             --notes-file CHANGELOG.md
+
+  publish:
+    name: publish to PyPI
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # trusted publishing: no PyPI token in the repository
+    environment: pypi
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: gcae-dist
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1

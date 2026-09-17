@@ -102,7 +102,7 @@ multi-agent orchestration, no plugins.
 
 ```
 src/gcae/          runtime, contracts, memory, context, tools, validation, evaluator,
-                   verifier, planner, providers, config, cli, git, execution
+                   verifier, planner, providers, config, cli, git, merge, execution
 src/gcae/tui/      Textual app (isolated; engine never imports it)
 tests/             architecture tests, TUI tests, trajectory tests, invariant tests
 docs/              architecture and subsystem documentation
@@ -127,7 +127,11 @@ passing, and TUI changes must keep `tests/test_tui.py` passing.
 
 - Modify existing modules; do not add parallel implementations or compatibility layers.
 - No dead code, no unused imports/options, no speculative abstractions or factories.
-- Keep the runtime loop readable in `runtime.py`; do not introduce workflow engines.
+- Keep the runtime loop readable in `runtime.py`; do not introduce workflow engines. New
+  behavior lands in the subsystem module that owns it (validation, evaluator, verifier,
+  recovery, memory, merge, tools, git); only loop control and phase sequencing belong in
+  `runtime.py`. When a change touches a cohesive block living there, extract it instead of
+  growing the file.
 - Runtime data lives under `${XDG_STATE_HOME:-~/.local/state}/gcae`; never write runtime
   state into target repositories or this repository.
 - Do not commit `config.toml` (API keys) or run artifacts.

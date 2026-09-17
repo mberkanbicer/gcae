@@ -3,6 +3,7 @@ from __future__ import annotations
 import ipaddress
 import os
 import re
+import shlex
 import socket
 import subprocess
 import tempfile
@@ -96,12 +97,20 @@ class ToolRegistry:
         max_output_chars: int = 8000,
         idle_timeout: float = 20.0,
         startup_timeout: float = 10.0,
+        sandbox_prefix: list[str] | None = None,
+        source_repo: str | Path | None = None,
     ) -> None:
         self.worktree = Path(worktree).resolve()
         self.command_timeout = command_timeout
         self.artifact_dir = Path(artifact_dir).resolve() if artifact_dir is not None else None
         self.test_commands = list(test_commands or [])
         self.max_output_chars = max_output_chars
+        self.sandbox_prefix = [
+            item.replace("{worktree}", str(self.worktree)).replace(
+                "{repo}", str(Path(source_repo).resolve()) if source_repo else ""
+            )
+            for item in (sandbox_prefix or [])
+        ]
         self._artifact_counter = 0
         self.runner = CommandRunner(
             self.worktree,
@@ -555,6 +564,11 @@ class ToolRegistry:
         env: Any = None,
     ) -> ToolResult:
         self._check_command(command)
+        if self.sandbox_prefix:
+            # the blocklist judged the raw command; execution goes through the wrapper.
+            # Prefix tokens are quoted (they are operator config, not shell syntax); the
+            # command itself stays raw so shell syntax keeps working inside the wrapper.
+            command = " ".join(shlex.quote(item) for item in self.sandbox_prefix) + " " + command
         limit = float(timeout) if timeout is not None else float(self.command_timeout)
         if limit <= 0:
             raise ValueError("command timeout must be positive")

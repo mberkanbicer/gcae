@@ -252,6 +252,19 @@ class MemoryStore:
             ).fetchall()
         return [self._to_evidence(row) for row in rows]
 
+    def forget_run_evidence(self, run_id: str) -> int:
+        """Delete one run's evidence rows; return how many were removed.
+
+        Evidence is consulted only while its run is active, so a pruned run record leaves
+        no reader behind and keeping its raw rows forever only grows the ledger. Failure
+        lessons are cumulative knowledge and are never touched here."""
+        with self._lock:
+            cursor = self.connection.execute(
+                "DELETE FROM evidence WHERE run_id = ?", (run_id,)
+            )
+            self.connection.commit()
+        return cursor.rowcount
+
     @staticmethod
     def _to_evidence(row: sqlite3.Row) -> EvidenceRecord:
         try:

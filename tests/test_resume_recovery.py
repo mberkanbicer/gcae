@@ -287,9 +287,9 @@ def completed_run(tmp_path: Path) -> tuple[object, str]:
 def test_merge_crash_window_backfills_the_record(tmp_path: Path) -> None:
     """W2: crash after `git merge`, before the record write — undo must still work."""
     from gcae.git import GitRepository
+    from gcae.merge import merge_verified_run
     from gcae.models import PendingMerge
     from gcae.persistence import StateStore
-    from gcae.runtime import merge_verified_run
 
     runtime, run_id = completed_run(tmp_path)
     state = runtime.state
@@ -319,9 +319,9 @@ def test_merge_crash_window_backfills_the_record(tmp_path: Path) -> None:
 def test_merge_marker_without_merge_completes_once(tmp_path: Path) -> None:
     """Marker persisted, crash before the merge: the next attempt merges and clears."""
     from gcae.git import GitRepository
+    from gcae.merge import merge_verified_run
     from gcae.models import PendingMerge
     from gcae.persistence import StateStore
-    from gcae.runtime import merge_verified_run
 
     runtime, run_id = completed_run(tmp_path)
     state = runtime.state
@@ -343,7 +343,7 @@ def test_merge_marker_without_merge_completes_once(tmp_path: Path) -> None:
     assert again.merge is not None
     import pytest
 
-    from gcae.runtime import merge_verified_run as mvr
+    from gcae.merge import merge_verified_run as mvr
 
     with pytest.raises(RuntimeError, match="already merged"):
         mvr(repo, again, persist=lambda: StateStore(state_path).save(again))

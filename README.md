@@ -7,7 +7,6 @@
   <a href="https://github.com/mberkanbicer/gcae/actions/workflows/ci.yml"><img src="https://github.com/mberkanbicer/gcae/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
   <img src="https://img.shields.io/badge/python-3.12%20%7C%203.13-3776AB?logo=python&logoColor=white" alt="Python 3.12 and 3.13">
   <img src="https://img.shields.io/badge/dependencies-pydantic%20%C2%B7%20httpx%20%C2%B7%20textual-2F81F7" alt="Runtime dependencies: pydantic, httpx, textual">
-  <img src="https://img.shields.io/badge/tests-356%20passing-3FB950" alt="356 tests passing">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-6E7681" alt="MIT license"></a>
 </p>
 
@@ -82,7 +81,7 @@ run 3f81c2d4: failed: step budget exhausted after 8 iterations (raise [runtime] 
 | The attempt is the unit, not the tool call | Each semantic attempt is a typed **trajectory step** — goal, expectation, expected evidence, failure signals, verdict, knowledge gained — persisted in `state.json` and visible on the dashboard timeline, with no chat transcript anywhere. |
 | Every claim needs evidence | An append-only **evidence ledger** records each command result, validation, interactive session and criterion verdict (supports / contradicts, never scored). Completion requires PASS for every criterion mapped to evidence: no evidence is INSUFFICIENT, contradiction is FAIL. |
 | Repair is not rollback | The evaluator can `repair` a valid direction with a broken implementation: the candidate is kept and the next attempt is told what to fix, instead of throwing the work away. |
-| Old runs are pruned, lessons stay | `gcae prune` deletes run records beyond `--keep` or older than `--older-than` / `[runtime] run_retention_days`, never touching live runs, recorded merges, repositories or worktrees — and never the cumulative knowledge database. |
+| Old runs are pruned, lessons stay | `gcae prune` deletes run records beyond `--keep` or older than `--older-than` / `[runtime] run_retention_days`, never touching live runs, recorded merges, repositories or worktrees. Failure lessons stay cumulative; a pruned run's raw evidence rows go with it — nothing reads evidence of an inactive run. |
 | Memory is scoped to the repository | Lessons accumulate across runs of one project; retrieval never leaks another project's failures into your context. |
 
 ## The execution loop
@@ -118,7 +117,14 @@ PLAN → SEMANTIC STEP → EXECUTE → OBSERVE → VALIDATE → EVALUATE → ACC
 
 ## Install
 
-Requires Python 3.12+ and Git. The package is not on PyPI yet; install from the repository:
+Requires Python 3.12+ and Git. Tags (`v*`) build sdist and wheel in CI and publish them to
+[PyPI](https://pypi.org/project/gcae/) via trusted publishing, so once the first release is out:
+
+```bash
+python -m pip install gcae
+```
+
+Until then, install from the repository:
 
 ```bash
 git clone https://github.com/mberkanbicer/gcae.git
@@ -226,7 +232,9 @@ See [`config.example.toml`](./config.example.toml) and
 ## What GCAE does not do
 
 - **It is not a sandbox.** `run_command` enforces a blocklist and workspace confinement, not
-  OS-level isolation. Run it against repositories you can restore.
+  OS-level isolation. An opt-in `[sandbox] command_prefix` can route every command through a
+  wrapper such as bubblewrap or docker; making that wrapper actually isolating stays the
+  operator's job. Run it against repositories you can restore.
 - **It is not a multi-agent framework.** One agent, one run, no orchestration graph.
 - **It does not decide product questions for you.** When the task is ambiguous the agent asks, and
   `ask_user` pauses the run rather than guessing.
@@ -239,7 +247,7 @@ See [`config.example.toml`](./config.example.toml) and
 ## Development
 
 ```bash
-.venv/bin/pytest -q                      # 286 tests
+.venv/bin/pytest -q
 .venv/bin/ruff check .                   # lint
 .venv/bin/mypy src/gcae                  # strict typing
 .venv/bin/python tools/tui_demo.py       # dashboard with real git operations, no model calls
@@ -247,7 +255,9 @@ See [`config.example.toml`](./config.example.toml) and
 
 CI (`.github/workflows/ci.yml`) runs the same commands on Python 3.12 and 3.13, builds the sdist and
 wheel, installs the wheel in a clean environment, and checks that `gcae --version` works. Tags
-matching `v*` publish a GitHub release with the build artifacts.
+matching `v*` publish a GitHub release with the build artifacts and publish to PyPI via trusted
+publishing — a one-time pending-publisher entry for this repository, workflow (`ci.yml`),
+environment (`pypi`) on [pypi.org](https://pypi.org/manage/account/publishing/) is required first.
 
 ## Documentation
 

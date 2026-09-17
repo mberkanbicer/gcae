@@ -89,12 +89,13 @@ are given).
 
 Pruning removes run records only — it never touches repositories or worktrees, and it never
 deletes a run whose repository lock is held: that is a live run in another process, however old its
-record is. The shared knowledge database is deliberately left alone: `memory.db` (memory records
-and the evidence ledger) is cumulative knowledge, so pruning a run's directory does not delete
-what that run taught — the per-run record goes, the lesson stays. Two further guards keep pruning from breaking anything: a record whose merge is still
+record is. The knowledge database stays cumulative: pruning a run keeps the failure lessons that
+run taught (`memory` records are never touched), but deletes the run's raw evidence rows —
+evidence is consulted only while a run is active, so rows of a pruned run are dead weight that
+would grow the ledger forever. Two further guards keep pruning from breaking anything: a record whose merge is still
 recorded is kept (it holds the pre-merge/merge commit pair that `gcae undo` reverses from) unless
 `--force` says otherwise, and unreadable records are reported and skipped, not silently kept or
-deleted.
+deleted. `--dry-run` touches neither the directories nor the evidence rows.
 
 ## Merge / undo
 

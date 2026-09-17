@@ -60,6 +60,12 @@ recursive deletion, network download tools, package installation (`pip`/`pip3`/`
 and Git history/worktree commands (`reset`, `clean`, `commit`, `worktree`, `checkout`, `switch`,
 `merge`, `rebase`). This is a guardrail, not an OS sandbox.
 
+For OS-level isolation, `[sandbox] command_prefix` in `config.toml` prepends an operator-supplied
+wrapper (bubblewrap, docker, …) to every executed command — step commands, validation commands,
+`command succeeds:` criteria and `run_tests`. The blocklist still judges the raw command first;
+`{worktree}` and `{repo}` in the prefix expand to the run worktree and the source repository.
+Whether the wrapper actually isolates is the operator's configuration — see `docs/CONFIGURATION.md`.
+
 ## Output handling
 
 When combined output exceeds `max_output_chars` (default 8000), the full text is written to

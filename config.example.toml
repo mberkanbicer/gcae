@@ -93,3 +93,12 @@ kind = "deterministic"
 
 [validation]
 commands = []
+
+[sandbox]
+# Optional wrapper around every executed command (step commands, validation commands,
+# "command succeeds:" criteria, run_tests). Empty by default: no wrapper. GCAE only routes
+# commands through it; whether the wrapper actually isolates is your configuration.
+# {worktree} and {repo} expand to the run worktree and the source repository.
+command_prefix = []
+# command_prefix = ["bwrap", "--ro-bind", "/", "/", "--bind", "{worktree}", "{worktree}",
+#                   "--dev", "/dev", "--proc", "/proc", "--unshare-all", "--"]

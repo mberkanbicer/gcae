@@ -13,6 +13,8 @@ from .config import Config, ProviderConfig, discover_config, load_config
 from .evaluator import DeterministicEvaluator, Evaluator, LLMEvaluator
 from .git import GitError, GitRepository, MergeConflict, NothingToMerge
 from .http_provider import OpenAICompatibleProvider
+from .memory import MemoryStore
+from .merge import cleanup_idle_worktree, cleanup_merged_worktree, merge_verified_run
 from .models import AgentState, MergeRecord, now_utc
 from .persistence import StateStore
 from .planner import LLMPlanner, Planner
@@ -21,9 +23,6 @@ from .runtime import (
     RunLock,
     Runtime,
     RuntimeControl,
-    cleanup_idle_worktree,
-    cleanup_merged_worktree,
-    merge_verified_run,
 )
 from .verifier import FinalVerifier
 
@@ -311,9 +310,9 @@ def _evaluator(config: Config, provider: Provider) -> Evaluator:
 def _verifier(config: Config, provider: Provider) -> FinalVerifier:
     kind = config.verifier.kind.lower()
     if kind == "deterministic":
-        return FinalVerifier()
+        return FinalVerifier(sandbox_prefix=config.sandbox.command_prefix)
     if kind == "hybrid":
-        return FinalVerifier(provider)
+        return FinalVerifier(provider, sandbox_prefix=config.sandbox.command_prefix)
     raise ValueError(f"unsupported verifier kind: {config.verifier.kind!r}")
 
 
@@ -600,7 +599,8 @@ def _prune_runs(
 
     A recorded merge is the only piece of run data that git does not already have (the
     pre-merge/merge commit pair), so `gcae undo` stops working without it; such records are
-    kept unless `force` says otherwise."""
+    kept unless `force` says otherwise. A pruned run's evidence rows go with it (nothing
+    reads evidence of an inactive run); failure lessons stay — they are cumulative."""
     import shutil
 
     runs_dir = Path(runtime_dir).expanduser() / "runs"
@@ -609,6 +609,10 @@ def _prune_runs(
     if not runs_dir.is_dir():
         print("no runs found")
         return
+    memory_db = Path(runtime_dir).expanduser() / "memory.db"
+    memory: MemoryStore | None = (
+        MemoryStore(memory_db) if memory_db.exists() and not dry_run else None
+    )
     states: list[tuple[AgentState, Path]] = []
     for state_file in sorted(runs_dir.glob("*/state.json")):
         try:
@@ -644,8 +648,12 @@ def _prune_runs(
             print(f"would prune {state.run_id} ({state.status}, updated {stamp})")
         else:
             shutil.rmtree(run_dir)
+            if memory is not None:
+                memory.forget_run_evidence(state.run_id)
             print(f"pruned {state.run_id} ({state.status}, updated {stamp})")
         pruned += 1
+    if memory is not None:
+        memory.close()
     if pruned:
         verb = "would be pruned" if dry_run else "pruned"
         print(f"{pruned} run record(s) {verb}")
@@ -722,6 +730,7 @@ def _build_runtime(args: argparse.Namespace, config: Config, runtime_dir: Path) 
         command_startup_timeout=config.runtime.command_startup_timeout,
         strategy_retry_limit=config.runtime.strategy_retry_limit,
         require_execution_evidence=config.runtime.require_execution_evidence,
+        sandbox_command_prefix=config.sandbox.command_prefix,
         recovery_budget=config.runtime.recovery_budget,
         command_timeout=config.runtime.command_timeout,
         context_limit=config.provider.context_limit,

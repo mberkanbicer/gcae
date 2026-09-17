@@ -117,6 +117,15 @@ class ValidationConfig(BaseModel):
     commands: list[str] = Field(default_factory=list)
 
 
+class SandboxConfig(BaseModel):
+    # Optional command wrapper (e.g. a bubblewrap or docker invocation) prepended to
+    # every command the run executes. `{worktree}` and `{repo}` are replaced with the run
+    # worktree and the source repository. Empty by default: no wrapper. The prefix makes
+    # commands *go through* the wrapper — whether the wrapper actually isolates is the
+    # operator's configuration, not something GCAE can verify.
+    command_prefix: list[str] = Field(default_factory=list)
+
+
 class EvaluatorConfig(BaseModel):
     kind: str = "deterministic"
 
@@ -137,6 +146,7 @@ class Config(BaseModel):
     evaluator: EvaluatorConfig = Field(default_factory=EvaluatorConfig)
     verifier: VerifierConfig = Field(default_factory=VerifierConfig)
     validation: ValidationConfig = Field(default_factory=ValidationConfig)
+    sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
 
     @property
     def state_dir(self) -> Path:

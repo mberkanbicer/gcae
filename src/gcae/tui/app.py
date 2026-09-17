@@ -19,8 +19,9 @@ from textual.widgets import Static
 from textual.worker import Worker
 
 from ..git import GitError, MergeConflict, NothingToMerge
+from ..merge import cleanup_idle_worktree
 from ..models import Event
-from ..runtime import Runtime, RuntimeControl, cleanup_idle_worktree
+from ..runtime import Runtime, RuntimeControl
 from . import formatters
 from .modals import (
     ConfirmStopModal,

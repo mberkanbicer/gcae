@@ -209,6 +209,45 @@ models and tools run, and never blocks on Git, SQLite or the provider.
 Exit codes: `0` only when a run completed **and** its work reached your checkout; `1` for handled
 errors, failed runs, or a merge that did not happen; `2` for usage errors.
 
+## Use from Python
+
+The supported interface is the `gcae` command; from Python, call it through the entry point:
+
+```python
+from gcae.cli import main
+
+main([
+    "run", "~/src/project", "add a --dry-run flag to the importer",
+    "--criterion", "command succeeds: pytest -q",
+    "--headless", "--config", "config.toml",
+])
+```
+
+For deeper embedding, the runtime is importable directly. One `Runtime` drives one run
+(reconstruct → act → observe → judge → commit or revert), and everything it does is
+observable as events:
+
+```python
+from gcae.http_provider import OpenAICompatibleProvider
+from gcae.runtime import Runtime
+
+runtime = Runtime(
+    "~/src/project",            # the repository to work on (never modified outside a worktree)
+    "~/.local/state/gcae",      # where runs, checkpoints and memory live
+    provider=OpenAICompatibleProvider(
+        base_url="http://localhost:11434/v1",   # any OpenAI-compatible endpoint
+        model="qwen2.5-coder:14b",              # add api_key_env="OPENAI_API_KEY" for hosted ones
+    ),
+)
+runtime.subscribe(print)        # the whole run, as events
+runtime.start(
+    "add a --dry-run flag to the importer",
+    success_criteria=["command succeeds: pytest -q"],
+)
+state = runtime.run()
+print(state.status, state.accepted_commit)
+```
+
 ## Configuration essentials
 
 | Key | Default | Effect |

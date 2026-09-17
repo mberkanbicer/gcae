@@ -455,6 +455,61 @@ def test_a_retry_after_a_real_change_is_allowed(tmp_path: Path) -> None:
     assert len(executed_commands) == 2
 
 
+def test_an_exhausted_failure_is_refused_and_pinned_into_the_prompt(tmp_path: Path) -> None:
+    """A/C: the same error returning under different commands exhausts the method —
+    the exact repeat is refused on sight and the decision prompt carries a mandatory
+    method change, even without stagnation or recovery having fired."""
+    script = "import sys\nprint('boom')\nsys.exit(1)\n"
+    variants = [f'python -c "{script}"', f'python -c "{script}" x', f'python -c "{script}" y']
+
+    def decision(command: str, why: str) -> dict[str, object]:
+        return {
+            "action": "execute_tool",
+            "semantic_goal": "run it",
+            "reason_summary": why,
+            "tool": {"name": "run_command", "arguments": {"command": command, "mode": "batch"}},
+        }
+
+    provider = FakeProvider(
+        [
+            decision(variants[0], "first approach"),
+            decision(variants[1], "different command, same expectation"),
+            decision(variants[2], "yet another command, same expectation"),
+            # the exact repeat of the first command is now refused before it runs
+            decision(variants[0], "retry the first approach"),
+            {
+                "action": "complete_semantic_step",
+                "semantic_goal": "run it",
+                "reason_summary": "enough",
+            },
+        ]
+    )
+    runtime = make_runtime(
+        tmp_path,
+        provider,
+        planner=one_step_plan("run it"),
+        max_steps=8,
+        recovery_attempts=0,
+        failure_repeat_limit=3,
+    )
+    events = collect(runtime)
+    state = runtime.run()
+
+    kinds = [e.event_type for e in events]
+    assert "method_exhausted" in kinds, "the recurring failure must be named"
+    assert any(
+        e.event_type == "strategy_ineffective" and e.payload.get("exhausted") is True
+        for e in events
+    ), "the exact repeat must be refused on sight"
+    assert "MANDATORY METHOD CHANGE" in runtime.last_context_text, (
+        "the next decision must see the exhausted-method directive"
+    )
+    memory = runtime.memory.all(state.run_id) if runtime.memory is not None else []
+    assert any(
+        record.kind == "failure" and "method exhausted" in record.content for record in memory
+    ), "the exhaustion must be remembered"
+
+
 # ------------------------------------------------------------------ B: repair after evidence
 
 

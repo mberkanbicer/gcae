@@ -11,11 +11,11 @@ import uuid
 from collections import deque
 from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import IO, Any, Literal
 
-from .context import ContextBuilder, estimate_tokens
+from .context import Context, ContextBuilder, estimate_tokens
 from .controller import Controller
 from .evaluator import DeterministicEvaluator, Evaluator
 from .execution import FailureKind, classify_failure, strategy_signature
@@ -66,7 +66,7 @@ from .providers import (
     StreamProgress,
 )
 from .recovery import RecoveryAction, RecoveryAdvisor, build_trace
-from .safeguards import RepetitionGuard, StagnationDetector
+from .safeguards import FailureRecurrence, RepetitionGuard, StagnationDetector
 from .state_machine import StateMachine
 from .tools import ToolRegistry
 from .validation import DeterministicValidator
@@ -107,6 +107,16 @@ class StrategyRecord:
     error: str = ""
     lesson: str = ""
     tree: str = ""
+
+
+@dataclass
+class ExhaustedMethod:
+    """A failure that keeps coming back no matter which approach produced it."""
+
+    count: int = 0
+    lesson: str = ""
+    excerpt: str = ""
+    commands: list[str] = field(default_factory=list)
 
 
 class UnresumableStateError(RuntimeError):
@@ -257,6 +267,7 @@ class Runtime:
         command_idle_timeout: float = 20.0,
         command_startup_timeout: float = 10.0,
         strategy_retry_limit: int = 2,
+        failure_repeat_limit: int = 3,
         require_execution_evidence: bool = True,
         sandbox_command_prefix: list[str] | None = None,
     ) -> None:
@@ -309,6 +320,8 @@ class Runtime:
         self.require_execution_evidence = require_execution_evidence
         self._strategies: dict[str, StrategyRecord] = {}
         self._strategy_limit = strategy_retry_limit
+        self._recurrence = FailureRecurrence(failure_repeat_limit)
+        self._exhausted_methods: dict[str, ExhaustedMethod] = {}
         #: the command currently executing (used when it turns out to want input)
         self._pending_command = ""
         self._pending_sensitive = False
@@ -979,7 +992,9 @@ class Runtime:
             signature = self._strategy_key(decision.tool, plan)
             self._pending_command = str(decision.tool.arguments.get("command") or "")
             self._pending_sensitive = False
-            if self._strategy_should_refuse(signature):
+            if self._strategy_should_refuse(signature) or self._command_is_exhausted(
+                decision.tool
+            ):
                 result = self._refuse_repeat(decision.tool, signature, plan)
             else:
                 result = tools.execute(decision.tool)
@@ -1161,18 +1176,20 @@ class Runtime:
         tools: ToolRegistry,
     ) -> Decision | None:
         assert self.state is not None and self.repo is not None and self.memory is not None
-        context = ContextBuilder(self.memory).build(
-            self.state,
-            step,
-            validation=self.state.latest_validation,
-            budget=self.context_limit,
-            current_diff=self.repo.diff(),
-            active_files=self.repo.changed_files(),
-            observations=self.state.latest_observations,
-            working=self.state.working_memory,
-            step_tool_calls=self.state.step_tool_calls,
-            max_tool_calls=self.max_tool_calls_per_step,
-            evidence=self._execution_evidence(),
+        context = self._with_directive(
+            ContextBuilder(self.memory).build(
+                self.state,
+                step,
+                validation=self.state.latest_validation,
+                budget=self.context_limit,
+                current_diff=self.repo.diff(),
+                active_files=self.repo.changed_files(),
+                observations=self.state.latest_observations,
+                working=self.state.working_memory,
+                step_tool_calls=self.state.step_tool_calls,
+                max_tool_calls=self.max_tool_calls_per_step,
+                evidence=self._execution_evidence(),
+            )
         )
         self.last_context_info = {
             "characters": len(context.text),
@@ -1218,18 +1235,20 @@ class Runtime:
                     pre.evidence, plan.id,
                 )
                 if pre.recovery_action is GuardianRecovery.REDUCE_CONTEXT:
-                    context = ContextBuilder(self.memory).build(
-                        self.state,
-                        step,
-                        validation=self.state.latest_validation,
-                        budget=max(512, self.context_limit // 2),
-                        current_diff="",
-                        active_files=self.repo.changed_files(),
-                        observations=self.state.latest_observations,
-                        working=self.state.working_memory,
-                        step_tool_calls=self.state.step_tool_calls,
-                        max_tool_calls=self.max_tool_calls_per_step,
-                        evidence=self._execution_evidence(),
+                    context = self._with_directive(
+                        ContextBuilder(self.memory).build(
+                            self.state,
+                            step,
+                            validation=self.state.latest_validation,
+                            budget=max(512, self.context_limit // 2),
+                            current_diff="",
+                            active_files=self.repo.changed_files(),
+                            observations=self.state.latest_observations,
+                            working=self.state.working_memory,
+                            step_tool_calls=self.state.step_tool_calls,
+                            max_tool_calls=self.max_tool_calls_per_step,
+                            evidence=self._execution_evidence(),
+                        )
                     )
                     self.last_context_info = {
                         "characters": len(context.text),
@@ -1989,6 +2008,10 @@ class Runtime:
             self._fail(f"recovery advised stopping: {diagnosis.root_cause}")
             return RecoveryAction.FAILED
         self.stagnation.reset()
+        # the advisor prescribed a different method: unblock the commands the exhausted
+        # methods had refused. A fix changes the error, so those commands can run again;
+        # the recurrence counts stay, so the same failure coming back re-exhausts at once.
+        self._exhausted_methods.clear()
         self._recovery_extensions += self.recovery_budget
         self._queue_correction(plan, diagnosis.corrective_instruction)
         return RecoveryAction.CONTINUE
@@ -2104,7 +2127,15 @@ class Runtime:
                     f"(+{snapshot.get('added', 0)} -{snapshot.get('deleted', 0)}): "
                     f"{', '.join(files[:8])}"
                 )
-        return build_trace(self.state, list(self._trace), memories, candidate=candidate)
+        exhausted = [
+            f"{entry.count}x {entry.excerpt!r} via "
+            f"{', '.join(repr(command) for command in entry.commands[-3:])}: {entry.lesson}"
+            for entry in self._exhausted_methods.values()
+        ]
+        return build_trace(
+            self.state, list(self._trace), memories, candidate=candidate,
+            exhausted_methods=exhausted,
+        )
 
     # ------------------------------------------------------------------ plan revisions
 
@@ -2747,7 +2778,12 @@ class Runtime:
         return bool(record.tree) and record.tree == self._tree_hash()
 
     def _refuse_repeat(self, tool: ToolCall, signature: str, plan: PlanStep) -> ToolResult:
-        record = self._strategies[signature]
+        record = self._strategies.get(signature, StrategyRecord())
+        command = str(tool.arguments.get("command") or "")
+        exhausted = next(
+            (entry for entry in self._exhausted_methods.values() if command in entry.commands),
+            None,
+        )
         self._event(
             "strategy_ineffective",
             RunPhase.EXECUTE,
@@ -2757,17 +2793,28 @@ class Runtime:
                 "attempts": record.attempts,
                 "lesson": record.lesson,
                 "signature": signature,
+                "exhausted": exhausted is not None,
             },
         )
-        return ToolResult(
-            tool=tool.name,
-            success=False,
-            error=(
+        if exhausted is not None:
+            error = (
+                f"refused: this command already produced a failure that has recurred "
+                f"{exhausted.count} times across different approaches ({exhausted.lesson}). "
+                "Rerunning it cannot help — gather new information first (read the failing "
+                "code or tests, write a minimal reproduction) and then change the strategy "
+                "itself, or reply with replan."
+            )
+        else:
+            error = (
                 f"refused: this exact approach already failed {record.streak} times with the "
                 f"same result ({record.lesson}). The candidate is unchanged, so repeating it "
                 "cannot help — change the method (different arguments, different tool, or a "
                 "different execution mode) before trying again."
-            ),
+            )
+        return ToolResult(
+            tool=tool.name,
+            success=False,
+            error=error,
             mode="refused",
         )
 
@@ -3000,6 +3047,11 @@ class Runtime:
             # learning a *new* failure signature is verified progress even though the
             # attempt failed: the run now knows something it did not know before
             self.stagnation.record(True)
+        else:
+            # the same lesson learned again is activity, not progress — and a failure
+            # that keeps coming back is exactly the loop stagnation exists to catch,
+            # so a repeat fills the stagnation window instead of being invisible
+            self.stagnation.record(False)
 
         signal = FailureSignal(
             kind=str(kind),
@@ -3009,6 +3061,7 @@ class Runtime:
             evidence=(result.error or result.output or "")[:400],
         )
         self.state.last_failure = signal
+        self._observe_recurrence(error_signature, signal, lesson, plan)
         self._remember(
             "failure",
             f"{kind} · {lesson} · command: {signal.command} · evidence: {signal.evidence[:200]}",
@@ -3031,6 +3084,84 @@ class Runtime:
         )
         if kind is FailureKind.INTERACTIVE_INPUT_REQUIRED:
             self._record_interactive_hypothesis(result, plan, signal)
+
+    def _observe_recurrence(
+        self, signature: str, signal: FailureSignal, lesson: str, plan: PlanStep
+    ) -> None:
+        """Track how often this exact failure returns, across different approaches.
+
+        The per-approach streak above only counts repeats of the same command; the loop
+        that actually burns runs is "fix attempt, rerun, same error, another fix, same
+        error", where every attempt looks new.  When the same failure signature crosses
+        ``failure_repeat_limit``, the method is declared exhausted: the decision prompt
+        pins a mandatory method-change directive and repeats of the guilty commands are
+        refused on sight.
+        """
+        assert self.state is not None
+        count = self._recurrence.record(signature, signal.command)
+        entry = self._exhausted_methods.get(signature)
+        if entry is None:
+            if not self._recurrence.exhausted(signature):
+                return
+            entry = ExhaustedMethod(
+                lesson=lesson,
+                excerpt=signal.evidence[:120],
+                # seed with every command that already produced this failure, so their
+                # exact repeats are refused on sight, not only future ones
+                commands=self._recurrence.commands_for(signature),
+            )
+            self._exhausted_methods[signature] = entry
+            self._event(
+                "method_exhausted",
+                RunPhase.EXECUTE,
+                step_id=plan.id,
+                payload={
+                    "count": count,
+                    "lesson": lesson,
+                    "evidence": signal.evidence[:200],
+                    "commands": list(entry.commands),
+                },
+            )
+            self._remember(
+                "failure",
+                f"method exhausted: the same failure has recurred {count} times across "
+                f"different approaches ({lesson}) — a different kind of strategy is required",
+                immutable=True,
+            )
+        entry.count = count
+        entry.lesson = lesson
+        if signal.command not in entry.commands:
+            entry.commands.append(signal.command)
+
+    def _command_is_exhausted(self, tool: ToolCall) -> bool:
+        """A command that already produced an exhausted failure is refused on sight."""
+        command = str(tool.arguments.get("command") or "")
+        return any(command in entry.commands for entry in self._exhausted_methods.values())
+
+    def _method_directive(self) -> str:
+        """The pinned instruction while approaches are exhausted: the loop must change."""
+        if not self._exhausted_methods:
+            return ""
+        lines = [
+            "MANDATORY METHOD CHANGE — these failures keep coming back no matter which "
+            "approach produced them:"
+        ]
+        for entry in list(self._exhausted_methods.values())[-3:]:
+            tried = ", ".join(repr(command) for command in entry.commands[-3:])
+            lines.append(f"- {entry.count}x: {entry.excerpt!r} via {tried} ({entry.lesson})")
+        lines.append(
+            "Rerunning any of those commands is refused. First gather new information (read "
+            "the failing code or tests, write a minimal reproduction), then change the "
+            "strategy itself; if the step's whole approach is wrong, reply with replan."
+        )
+        return "\n".join(lines)
+
+    def _with_directive(self, context: Context) -> Context:
+        """Pin the exhausted-method warning into the decision prompt, when one is active."""
+        directive = self._method_directive()
+        if not directive:
+            return context
+        return replace(context, text=f"{context.text}\n{directive}")
 
     def _record_interactive_hypothesis(
         self, result: ToolResult, plan: PlanStep, signal: FailureSignal

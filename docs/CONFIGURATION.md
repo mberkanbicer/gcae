@@ -20,6 +20,10 @@ cleanup_after_merge = true          # remove GCAE's worktree once merged (the br
 command_idle_timeout = 20.0            # no output while running -> stalled command
 command_startup_timeout = 10.0         # no output at all -> command never really started
 strategy_retry_limit = 2               # identical failures before a blind repeat is refused
+failure_repeat_limit = 3               # same failure across different approaches before the
+                                       # method is declared exhausted: the decision prompt pins
+                                       # a mandatory method change and repeats of the commands
+                                       # that produced the failure are refused on sight
 require_execution_evidence = true      # code changed + runnable check declared => a command must run
 recovery_attempts = 2               # self-diagnoses per run before the run must ask the user
 recovery_budget = 5                 # extra iterations granted by each successful correction
@@ -108,7 +112,9 @@ command_prefix = []                 # optional wrapper around every executed com
   `Retry-After` header. Client errors (400/404/422) are not retried — they are the caller's
   problem, and the run's recovery ladder handles them.
 - `command_idle_timeout`, `command_startup_timeout` and `strategy_retry_limit` shape how execution
-  failures are detected and how quickly a blind repeat is refused; `require_execution_evidence`
+  failures are detected and how quickly a blind repeat is refused; `failure_repeat_limit` adds the
+  cross-approach guard: the same failure coming back under different commands exhausts the method.
+  `require_execution_evidence`
   decides whether an acceptance without a single executed command is allowed when the run declares a
   runnable check.
 - `recovery_attempts` and `recovery_budget` bound self-recovery: each diagnosis may queue a corrective

@@ -18,6 +18,27 @@ The recovery ladder is bounded and evidence-chosen, not mechanical:
 6. self-diagnose from the persisted trace (`recovery.py`, bounded by `recovery_attempts`)
 7. ask the user only when externally blocked (`waiting_for_user` / `blocked`)
 
+### When the method itself is exhausted
+
+Per-approach fingerprints (tool plus arguments) and the unchanged-tree rule can be evaded
+by cosmetic changes — a different flag, a reworded command, a trivial edit between
+attempts. So the runtime also tracks failures at the *failure level*: how often the same
+normalized error signature has returned, no matter which command produced it
+(`failure_repeat_limit`, default 3). When the limit is crossed:
+
+- the method is declared exhausted (`method_exhausted` event, an immutable failure memory);
+- the decision prompt pins a **mandatory method change** directive naming the error, the
+  commands that produced it and the lesson — new information first (read the failing code,
+  write a minimal reproduction), then a different strategy, or `replan`;
+- an exact repeat of any command that produced the exhausted failure is refused on sight;
+- a repeated failure signature no longer counts as knowledge progress — repeats fill the
+  stagnation window instead, so a perturbation loop reaches the recovery ladder instead of
+  silently burning the iteration budget.
+
+A recovery replan clears the exhausted-method list (the advisor prescribed a different
+method, and a fix changes the failure) while keeping the recurrence counts: if the same
+failure comes back after the replan, the method re-exhausts on its first recurrence.
+
 `BLOCKED` is not `FAILED`: blocked records the last trusted state, the exact blocker, the
 attempted strategies, and what would unblock; failed means the runtime itself cannot
 continue safely (or the user was already asked).

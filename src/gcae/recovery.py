@@ -123,6 +123,7 @@ def build_trace(
     events: Sequence[Event],
     memories: Sequence[MemoryRecord],
     candidate: str = "",
+    exhausted_methods: Sequence[str] = (),
     max_events: int = 25,
     max_memories: int = 12,
     max_chars: int = 7000,
@@ -134,6 +135,9 @@ def build_trace(
         f"STATUS: {state.status} | PHASE: {state.phase.value} | ITERATION: {state.iteration}",
         f"ACCEPTED STEPS: {state.accepted_steps} | COMMIT: {state.accepted_commit or 'none'}",
     ]
+    if exhausted_methods:
+        lines.append("EXHAUSTED METHODS (the same failure across different approaches):")
+        lines.extend(f"  {_clip(item, 300)}" for item in exhausted_methods)
     if state.hard_constraints:
         lines.append("CONSTRAINTS: " + _clip("; ".join(state.hard_constraints), 600))
     if state.success_criteria:

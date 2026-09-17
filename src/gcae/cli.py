@@ -729,6 +729,7 @@ def _build_runtime(args: argparse.Namespace, config: Config, runtime_dir: Path) 
         command_idle_timeout=config.runtime.command_idle_timeout,
         command_startup_timeout=config.runtime.command_startup_timeout,
         strategy_retry_limit=config.runtime.strategy_retry_limit,
+        failure_repeat_limit=config.runtime.failure_repeat_limit,
         require_execution_evidence=config.runtime.require_execution_evidence,
         sandbox_command_prefix=config.sandbox.command_prefix,
         recovery_budget=config.runtime.recovery_budget,

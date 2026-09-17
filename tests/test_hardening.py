@@ -14,7 +14,8 @@ H  final completion requires evidence for every mandatory success criterion
 I  the source repository is never destructively manipulated
 J  runtime-owned artifacts stay outside the target repository
 
-Trajectory tests 3 (contradictory evidence), 4 (stagnation) and 6 (final evidence
+Trajectory tests 3 (contradictory evidence), 4 (stagnation), 4b (a failure recurring
+across different approaches is declared exhausted) and 6 (final evidence
 mapping) live here; trajectory tests 1 and 2 are the existing
 ``test_integration_rollback`` and ``test_adaptive_trajectory`` suites, and test 5 is
 ``test_context_budget``.
@@ -34,7 +35,7 @@ from gcae.models import (
 )
 from gcae.planner import LLMPlanner
 from gcae.providers import FakeProvider
-from gcae.runtime import Runtime, RuntimeControl
+from gcae.runtime import ExhaustedMethod, Runtime, RuntimeControl
 from gcae.verifier import FinalVerifier
 
 
@@ -421,10 +422,10 @@ def test_repeated_failing_strategy_is_refused_and_reconsidered(tmp_path: Path) -
     provider = FakeProvider(
         [
             # the same broken command, twice, then refused, then again: the run never
-            # changes the file, so the strategy ledger sees an unchanged candidate tree
+            # changes the file, so the strategy ledger sees an unchanged candidate tree.
+            # A repeated failure no longer counts as progress, so the second rejected
+            # completion already fills the stagnation window.
             tool("run_command", command="python missing_module.py", mode="batch"),
-            tool("run_command", command="python missing_module.py", mode="batch"),
-            step("complete_semantic_step"),
             tool("run_command", command="python missing_module.py", mode="batch"),
             step("complete_semantic_step"),
             tool("run_command", command="python missing_module.py", mode="batch"),
@@ -471,6 +472,74 @@ def test_repeated_failing_strategy_is_refused_and_reconsidered(tmp_path: Path) -
     # the failed strategy is recorded as a trajectory, and the final strategy differs
     assert any(t.status.value in {"rejected", "replanned"} for t in state.trajectory)
     assert "here" in (Path(state.worktree) / "missing_module.py").read_text()
+
+
+def test_a_failure_recurring_across_approaches_is_declared_exhausted(tmp_path: Path) -> None:
+    """Trajectory test 4b: the same failure returning under *different* commands is the
+    loop that burns runs. It is declared exhausted, its exact repeats are refused on
+    sight, the decision prompt and the recovery trace carry it — and a recovery replan
+    unblocks the commands again (a fix changes the failure)."""
+    source = fresh_repo(tmp_path)
+    provider = FakeProvider(
+        [
+            # two different commands, one identical failure, then a rejected completion
+            tool("run_command", command="python missing_module.py", mode="batch"),
+            tool("run_command", command="python missing_module.py -v", mode="batch"),
+            step("complete_semantic_step"),
+            # a third command, same failure: the method is declared exhausted
+            tool("run_command", command="python missing_module.py -q", mode="batch"),
+            # a repeat of the first command is refused before it runs
+            tool("run_command", command="python missing_module.py", mode="batch"),
+            step("complete_semantic_step"),
+            # the stagnating run reads a trace that names the exhausted method
+            {
+                "root_cause": "missing_module.py does not exist; three commands proved it",
+                "corrective_instruction": "create missing_module.py first",
+                "strategy": "replan",
+            },
+            tool("write_file", path="missing_module.py", content="print('here')\n"),
+            # the replan unblocks the refused command: the fix changes the failure
+            tool("run_command", command="python missing_module.py", mode="batch"),
+            step("complete_semantic_step"),
+            step("finish_candidate"),
+        ]
+    )
+    runtime = Runtime(
+        source,
+        tmp_path / "runtime",
+        provider=provider,
+        validator_commands=["test -f missing_module.py"],
+        control=RuntimeControl(),
+        auto_merge=False,
+        failure_repeat_limit=3,
+    )
+    events: list = []
+    runtime.subscribe(events.append)
+    runtime.start("run missing_module.py", success_criteria=["file exists: missing_module.py"])
+    state = runtime.run()
+
+    assert state.status == "complete", state.status
+    kinds = [e.event_type for e in events]
+    assert "method_exhausted" in kinds, "a recurring failure must be named"
+    assert any(
+        e.event_type == "strategy_ineffective" and e.payload.get("exhausted") is True
+        for e in events
+    ), "a repeat of an exhausted command must be refused on sight"
+    assert any(
+        e.event_type == "tool_result"
+        and e.payload.get("tool") == "run_command"
+        and e.payload.get("exit_code") == 0
+        for e in events
+    ), "the fixed command must run again after the replan unblocks it"
+    assert runtime.memory is not None
+    lessons = [r.content for r in runtime.memory.all(state.run_id) if r.kind == "failure"]
+    assert any("method exhausted" in lesson for lesson in lessons)
+    # the directive reaches the decision prompt and the advisor's trace
+    runtime._exhausted_methods["sig"] = ExhaustedMethod(
+        count=3, lesson="boom", excerpt="boom", commands=["python missing_module.py"]
+    )
+    assert "MANDATORY METHOD CHANGE" in runtime._method_directive()
+    assert "EXHAUSTED METHODS" in runtime._recovery_trace()
 
 
 # ===================================================================== evidence ledger

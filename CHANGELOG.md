@@ -8,6 +8,15 @@ All notable changes to GCAE are documented here. The format follows
 
 ### Added
 
+- **Failure-level repetition guard (`[runtime] failure_repeat_limit`, default 3).** The same
+  failure returning under *different* commands — the fix-attempt/rerun loop that burns runs —
+  is now visible: after the limit is crossed the method is declared exhausted, the decision
+  prompt pins a mandatory method-change directive, exact repeats of the guilty commands are
+  refused on sight, and the recovery trace names the exhausted method. A repeated failure
+  signature no longer counts as knowledge progress, so a perturbation loop reaches the
+  recovery ladder instead of silently exhausting the iteration budget. A recovery replan
+  unblocks the commands (a fix changes the failure) while the recurrence counts stay.
+
 - **Optional command sandbox prefix (`[sandbox] command_prefix`).** An operator-supplied wrapper
   (bubblewrap, docker, …) is prepended to every executed command — step commands, validation
   commands, `command succeeds:` criteria and `run_tests`. `{worktree}` and `{repo}` expand to the

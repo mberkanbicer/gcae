@@ -104,6 +104,9 @@ class RuntimeConfig(BaseModel):
     command_startup_timeout: float = 10.0
     #: how many times the same approach may fail the same way before a blind repeat is refused
     strategy_retry_limit: int = 2
+    #: how many times the same failure may recur across different approaches before the
+    #: runtime declares the method exhausted and demands a genuinely different strategy
+    failure_repeat_limit: int = 3
     #: when a step changed code and the run declares checkable commands, at least one command
     #: must actually have run before the step can be accepted
     require_execution_evidence: bool = True

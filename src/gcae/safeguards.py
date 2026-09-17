@@ -31,6 +31,42 @@ class StagnationDetector:
         self._progress.clear()
 
 
+class FailureRecurrence:
+    """How often the same failure has come back, no matter which approach produced it.
+
+    A per-approach fingerprint (tool plus arguments) is evaded by cosmetic changes to the
+    command, and the tree changes on every edit — so the loop this guard exists to break
+    (fix attempt, rerun, same error, another fix, same error) is only visible at the
+    failure level, keyed by the normalized error signature alone.
+    """
+
+    def __init__(self, limit: int = 3) -> None:
+        self.limit = limit
+        self._counts: dict[str, int] = {}
+        self._commands: dict[str, list[str]] = {}
+
+    def record(self, signature: str, command: str = "") -> int:
+        if not signature:
+            return 0
+        self._counts[signature] = self._counts.get(signature, 0) + 1
+        commands = self._commands.setdefault(signature, [])
+        if command and command not in commands:
+            commands.append(command)
+        return self._counts[signature]
+
+    def exhausted(self, signature: str) -> bool:
+        return bool(signature) and self._counts.get(signature, 0) >= self.limit
+
+    def commands_for(self, signature: str) -> list[str]:
+        """Every command that has produced this failure, first seen first."""
+        return list(self._commands.get(signature, ()))
+
+    def summary(self, limit: int = 5) -> list[tuple[str, int, list[str]]]:
+        """Most-recurring failures first, each with the commands that produced it."""
+        ranked = sorted(self._counts.items(), key=lambda item: (-item[1], item[0]))
+        return [(sig, count, list(self._commands.get(sig, ()))) for sig, count in ranked[:limit]]
+
+
 @dataclass(frozen=True)
 class HygieneReport:
     passed: bool

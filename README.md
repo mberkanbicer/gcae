@@ -303,6 +303,7 @@ environment (`pypi`) on [pypi.org](https://pypi.org/manage/account/publishing/) 
 | Document | Contents |
 | --- | --- |
 | [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) | module map, state vs knowledge, data flow |
+| [`docs/architecture.html`](./docs/architecture.html) | interactive component map: primary path, trust boundaries, curated views |
 | [`docs/TRAJECTORY_MODEL.md`](./docs/TRAJECTORY_MODEL.md) | the trajectory step: attempt as primary entity |
 | [`docs/EVIDENCE_LEDGER.md`](./docs/EVIDENCE_LEDGER.md) | evidence records, supports/contradicts, no scoring |
 | [`docs/VERIFICATION.md`](./docs/VERIFICATION.md) | evidence-backed completion: PASS / FAIL / INSUFFICIENT |
